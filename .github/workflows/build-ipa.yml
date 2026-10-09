@@ -98,13 +98,24 @@ jobs:
           xcodebuild -version
           echo "xcode_path=$XC" >> "$GITHUB_OUTPUT"
 
-      - name: Install build tools (meson ninja lld)
+      - name: Install build tools (meson ninja lld libarchive)
         run: |
           set -euo pipefail
-          brew install meson ninja lld
+          # libarchive is required even though the README does not mention it:
+          # ish-arm64/tools/meson.build only builds tools/fakefsify (and the
+          # unfakefsify symlink) when a *host* libarchive is found, and
+          # scripts/build-rootfs.sh hard-fails without fakefsify.
+          brew install meson ninja lld libarchive
+
           LLD_BIN="$(brew --prefix lld)/bin"
           echo "$LLD_BIN" >> "$GITHUB_PATH"
           export PATH="$LLD_BIN:$PATH"
+
+          # Homebrew's libarchive may be keg-only; make it visible to
+          # meson's pkg-config probe. The meson file also falls back to
+          # /opt/homebrew/opt/libarchive/lib, so either path works.
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
           echo "--- toolchain ---"
           command -v meson && meson --version
           command -v ninja && ninja --version
@@ -112,6 +123,11 @@ jobs:
           command -v node && node -v
           command -v npm && npm -v
           command -v python3 && python3 -V
+          if pkg-config --exists libarchive; then
+            echo "libarchive (pkg-config): $(pkg-config --modversion libarchive)"
+          else
+            echo "libarchive: not visible to pkg-config; meson will use the /opt/homebrew/opt/libarchive/lib fallback"
+          fi
 
       - name: Ensure xcodeproj gem
         run: |
@@ -136,6 +152,28 @@ jobs:
           set -euo pipefail
           mkdir -p cilogs
           make emulator 2>&1 | tee cilogs/01-emulator.log
+
+      - name: Verify emulator toolchain
+        run: |
+          set -euo pipefail
+          B=ish-arm64/build-arm64-release
+          for f in ish tools/fakefsify tools/unfakefsify; do
+            if [ -x "$B/$f" ]; then
+              echo "ok: $B/$f"
+            else
+              echo "error: missing $B/$f (libarchive missing means fakefsify is not built)" >&2
+              exit 1
+            fi
+          done
+          # A zero-length libvdso.so.elf means meson fell back to the stub,
+          # which builds fine but leaves guest processes unable to run.
+          VDSO="$(find "$B" -name 'libvdso.so.elf' -size +0c | head -1)"
+          if [ -z "$VDSO" ]; then
+            echo "error: VDSO is a stub (empty libvdso.so.elf) — ld.lld did not take effect" >&2
+            exit 1
+          fi
+          echo "ok: real VDSO built at $VDSO"
+          ls -lh "$VDSO"
 
       - name: Build guest rootfs (Alpine + Node + dsh)
         if: steps.rootfs-cache.outputs.cache-hit != 'true'

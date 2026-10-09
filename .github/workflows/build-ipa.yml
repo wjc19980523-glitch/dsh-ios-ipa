@@ -1,0 +1,265 @@
+name: Build DSH IOS IPA (unsigned)
+
+# Builds DSHIOS (DeepSeek Harness on iPad/iPhone) into an unsigned .ipa on a
+# GitHub-hosted Apple Silicon macOS runner, so it can be re-signed on any
+# machine (including Windows) with Sideloadly / AltStore / lldid / TrollStore.
+#
+# Pipeline (mirrors the project's own Makefile, which is macOS-only):
+#   make emulator  -> iSH-ARM64 CLI + fakefsify (needs meson, ninja, ld.lld)
+#   make rootfs    -> build/root.tar.gz (Alpine 3.21 + Node 22 + dsh)
+#   make project   -> regenerate DSH.xcodeproj (needs the xcodeproj gem)
+#   xcodebuild archive (CODE_SIGNING_ALLOWED=NO) -> Payload/DSH.app -> .ipa
+#
+# No Apple ID, certificate or provisioning profile is used anywhere.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "macOS runner label (xcode-27 = Xcode 27 preview, macos-26 = Xcode 26 stable)"
+        type: choice
+        options:
+          - xcode-27
+          - macos-26
+          - macos-15
+        default: xcode-27
+      xcode_path:
+        description: "Explicit Xcode path (leave empty to auto-pick: Xcode 27 first, then newest)"
+        type: string
+        default: ""
+      force_rootfs:
+        description: "Rebuild the guest rootfs even if the cache hits"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-ipa.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-ipa-${{ github.ref }}-${{ github.event.inputs.runner_label || 'xcode-27' }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_ENV_HINTS: "1"
+  HOMEBREW_NO_ANALYTICS: "1"
+
+jobs:
+  build-ipa:
+    name: Build unsigned IPA (${{ github.event.inputs.runner_label || 'xcode-27' }})
+    runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
+    timeout-minutes: 180
+    env:
+      INPUT_XCODE_PATH: ${{ github.event.inputs.xcode_path }}
+      INPUT_FORCE_ROOTFS: ${{ github.event.inputs.force_rootfs }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Host info
+        run: |
+          set -x
+          sw_vers
+          uname -m
+          df -h /
+          echo "--- runner labels ---"
+          echo "ImageOS=$ImageOS  ImageVersion=$ImageVersion"
+          echo "--- installed Xcodes ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          xcodebuild -version || true
+
+      - name: Select Xcode
+        id: xcode
+        run: |
+          set -euo pipefail
+          XC=""
+          if [ -n "${INPUT_XCODE_PATH:-}" ] && [ -d "${INPUT_XCODE_PATH}" ]; then
+            XC="${INPUT_XCODE_PATH}"
+          else
+            for cand in /Applications/Xcode_27*.app /Applications/Xcode_26*.app /Applications/Xcode.app; do
+              if [ -d "$cand" ]; then XC="$cand"; break; fi
+            done
+          fi
+          if [ -z "$XC" ]; then
+            echo "error: no Xcode.app found under /Applications" >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$XC/Contents/Developer"
+          echo "selected: $XC"
+          xcode-select -p
+          xcodebuild -version
+          echo "xcode_path=$XC" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools (meson ninja lld)
+        run: |
+          set -euo pipefail
+          brew install meson ninja lld
+          LLD_BIN="$(brew --prefix lld)/bin"
+          echo "$LLD_BIN" >> "$GITHUB_PATH"
+          export PATH="$LLD_BIN:$PATH"
+          echo "--- toolchain ---"
+          command -v meson && meson --version
+          command -v ninja && ninja --version
+          command -v ld.lld && ld.lld --version
+          command -v node && node -v
+          command -v npm && npm -v
+          command -v python3 && python3 -V
+
+      - name: Ensure xcodeproj gem
+        run: |
+          set -euo pipefail
+          if ruby -e 'require "xcodeproj"' 2>/dev/null; then
+            echo "xcodeproj gem already available to $(command -v ruby)"
+          else
+            gem install xcodeproj --no-document || sudo gem install xcodeproj --no-document
+          fi
+          ruby -e 'require "xcodeproj"; puts "xcodeproj #{Xcodeproj::VERSION}"'
+
+      - name: Restore guest rootfs cache
+        id: rootfs-cache
+        if: ${{ github.event.inputs.force_rootfs != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: build/root.tar.gz
+          key: rootfs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rootfs/staging/package.json', 'rootfs/staging/package-lock.json', 'scripts/build-rootfs.sh', 'rootfs/overlay/**', 'ish-arm64/app/RootfsPatch.bundle/**') }}
+
+      - name: Build iSH-ARM64 emulator
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs
+          make emulator 2>&1 | tee cilogs/01-emulator.log
+
+      - name: Build guest rootfs (Alpine + Node + dsh)
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs
+          make rootfs 2>&1 | tee cilogs/02-rootfs.log
+
+      - name: Verify rootfs
+        run: |
+          set -euo pipefail
+          ls -lh build/root.tar.gz
+          shasum -a 256 build/root.tar.gz
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs
+          make project 2>&1 | tee cilogs/03-project.log
+
+      - name: Archive app (unsigned)
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs
+          set -o pipefail
+          xcodebuild \
+            -project DSH.xcodeproj \
+            -scheme DSH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/DSH.xcarchive" \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            archive 2>&1 | tee cilogs/04-archive.log
+
+      - name: Package unsigned IPA
+        id: package
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^MARKETING_VERSION = //p' app/AppDSH.xcconfig | tr -d ' \r')"
+          BUILD_NO="$(sed -n 's/^CURRENT_PROJECT_VERSION = //p' app/AppDSH.xcconfig | tr -d ' \r')"
+          echo "version=$VERSION build=$BUILD_NO"
+
+          APP="build/DSH.xcarchive/Products/Applications/DSH.app"
+          if [ ! -d "$APP" ]; then
+            echo "error: $APP not found" >&2
+            find build/DSH.xcarchive -maxdepth 4 2>/dev/null | head -40 >&2
+            exit 1
+          fi
+
+          rm -rf build/ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          find build/ipa -name '._*' -delete
+
+          IPA_NAME="DSH-${VERSION}-build${BUILD_NO}-unsigned.ipa"
+          ( cd build/ipa && zip -qry "../${IPA_NAME}" Payload )
+
+          ls -lh "build/${IPA_NAME}"
+          shasum -a 256 "build/${IPA_NAME}" | tee build/ipa.sha256
+          echo "ipa_path=build/${IPA_NAME}" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify IPA contents
+        run: |
+          set -euo pipefail
+          IPA="build/ipa/Payload"
+          echo "=== zip listing (top) ==="
+          unzip -l "build/${{ steps.package.outputs.ipa_name }}" | head -25
+          echo
+          echo "=== embedded .app size ==="
+          du -sh "$IPA/DSH.app"
+          echo
+          echo "=== executable architecture (must contain arm64) ==="
+          lipo -info "$IPA/DSH.app/DSH" || file "$IPA/DSH.app/DSH"
+          echo
+          echo "=== Info.plist ==="
+          plutil -p "$IPA/DSH.app/Info.plist" \
+            | grep -E '"CFBundleIdentifier"|"CFBundleShortVersionString"|"CFBundleVersion"|"MinimumOSVersion"|"CFBundleExecutable"|"CFBundleName"' || true
+          echo
+          echo "=== bundled guest image ==="
+          ls -lh "$IPA/DSH.app/root.tar.gz" "$IPA/DSH.app/root.tar.gz.sha256" 2>/dev/null || true
+          echo
+          echo "=== signature status (unsigned is expected) ==="
+          codesign -dvvv "$IPA/DSH.app" 2>&1 || echo "(no code signature — expected; re-sign before installing)"
+          echo
+          echo "=== top-level bundle entries ==="
+          ls "$IPA/DSH.app" | head -40
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-unsigned-ipa
+          path: |
+            build/${{ steps.package.outputs.ipa_name }}
+            build/ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: cilogs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## DSHIOS unsigned IPA build"
+            echo
+            echo "- runner: \`${{ github.event.inputs.runner_label || 'xcode-27' }}\`"
+            echo "- Xcode: \`${{ steps.xcode.outputs.xcode_path }}\`"
+            echo "- rootfs cache hit: \`${{ steps.rootfs-cache.outputs.cache-hit }}\`"
+            echo "- IPA: \`${{ steps.package.outputs.ipa_name }}\`"
+            echo
+            echo "Download it from the **Artifacts** section of this run."
+          } >> "$GITHUB_STEP_SUMMARY"

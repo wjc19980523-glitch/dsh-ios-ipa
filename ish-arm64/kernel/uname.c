@@ -23,7 +23,14 @@ void do_uname(struct uname *uts) {
 
     memset(uts, 0, sizeof(struct uname));
     strcpy(uts->system, "Linux");
-    strcpy(uts->hostname, hostname);
+    // Bounded on purpose. The guest field is UNAME_LENGTH (65) bytes, the way
+    // Linux defines the ABI, but the host nodename is not bounded the same way
+    // (macOS allows 255 bytes, and uname_hostname_override is arbitrary). Apple's
+    // libc instruments this strcpy with __strcpy_chk, so a host name longer than
+    // the field raises __chk_fail_overflow (SIGTRAP) and kills the process --
+    // which is exactly what the CLI does on a build machine with a long host
+    // name. Truncating is what Linux itself does with a too-long host name.
+    snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);
     strcpy(uts->release, "4.20.69-ish");
     snprintf(uts->version, sizeof(uts->version), "%s %s %s", uname_version, __DATE__, __TIME__);
 #if defined(GUEST_ARM64)

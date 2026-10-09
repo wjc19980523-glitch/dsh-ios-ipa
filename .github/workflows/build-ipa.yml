@@ -304,3 +304,87 @@ jobs:
             echo
             echo "Download it from the **Artifacts** section of this run."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The IPA proves the app links and packages. This job proves the *guest image*
+  # inside it actually bootstraps: it imports root.tar.gz the way the app does
+  # (fakefsify), runs the project's own suites, and boots dsh-serve so the web UI
+  # can be fetched over host loopback -- the same path the app's WKWebView uses.
+  # Runs as its own job so a guest regression cannot invalidate a good IPA.
+  verify-guest:
+    name: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
+    needs: build-ipa
+    runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build tools (meson ninja lld libarchive)
+        run: |
+          set -euo pipefail
+          brew install meson ninja lld libarchive
+          LLD_BIN="$(brew --prefix lld)/bin"
+          echo "$LLD_BIN" >> "$GITHUB_PATH"
+          export PATH="$LLD_BIN:$PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
+      - name: Restore guest rootfs cache
+        id: rootfs-cache
+        uses: actions/cache@v4
+        with:
+          path: build/root.tar.gz
+          key: rootfs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rootfs/staging/package.json', 'rootfs/staging/package-lock.json', 'scripts/build-rootfs.sh', 'rootfs/overlay/**', 'ish-arm64/app/RootfsPatch.bundle/**') }}
+
+      - name: Build iSH-ARM64 emulator
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs-verify
+          make emulator 2>&1 | tee cilogs-verify/01-emulator.log
+
+      - name: Build guest rootfs (only if the cache did not restore it)
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs-verify
+          make rootfs 2>&1 | tee cilogs-verify/02-rootfs.log
+
+      - name: Verify rootfs present
+        run: |
+          set -euo pipefail
+          ls -lh build/root.tar.gz
+          shasum -a 256 build/root.tar.gz
+
+      - name: Project test suites (emulator regressions + guest integration)
+        run: |
+          set -uo pipefail
+          mkdir -p cilogs-verify
+          rc_emu=0
+          rc_rootfs=0
+          echo "::group::tests/emu-test.sh"
+          tests/emu-test.sh 2>&1 | tee cilogs-verify/03-emu-test.log || rc_emu=$?
+          echo "::endgroup::"
+          echo "::group::tests/rootfs-test.sh"
+          tests/rootfs-test.sh 2>&1 | tee cilogs-verify/04-rootfs-test.log || rc_rootfs=$?
+          echo "::endgroup::"
+          {
+            echo
+            echo "## Guest verification"
+            echo
+            echo "| suite | exit |"
+            echo "|---|---|"
+            echo "| tests/emu-test.sh (NEON gadgets, waitpid, fetch polyfill) | ${rc_emu} |"
+            echo "| tests/rootfs-test.sh (boots dsh-serve, every bridge tool) | ${rc_rootfs} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$rc_emu" = 0 && test "$rc_rootfs" = 0
+
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-verification-logs
+          path: cilogs-verify/
+          if-no-files-found: warn
+          retention-days: 30

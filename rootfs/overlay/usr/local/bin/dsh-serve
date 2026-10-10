@@ -61,6 +61,10 @@ cd "$DSH_WORKSPACE"
 
 # --expose-internals: cordis-plugin-hmr needs Node internals; the prebuilt
 # node-addon-require-builtin shim has no musl build, so use the flag instead.
+#
+# --no-open: dsh would otherwise try to launch a "default browser" inside the
+# guest, which has no desktop session and nothing to launch. The app points its
+# own WKWebView at the URL dsh prints.
 exec node --expose-internals \
     /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
-    web --host 127.0.0.1 --port "$PORT" "$@"
+    web --host 127.0.0.1 --port "$PORT" --no-open "$@"

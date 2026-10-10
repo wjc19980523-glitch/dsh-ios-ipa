@@ -68,7 +68,10 @@ extern NSNotificationName const DSHHarnessStateDidChangeNotification;
 @property (nonatomic, copy) NSDictionary<NSString *, NSString *> *extraEnvironment;
 /// First port tried; default 3080. Up to 20 consecutive ports are probed.
 @property (nonatomic) uint16_t preferredPort;
-/// Seconds to wait for the first HTTP answer before declaring failure. Default 240.
+/// Seconds to wait for the first HTTP answer before declaring failure. Default 600.
+/// This is the budget for the whole boot, not for one request; the dsh 0.2.x
+/// guest takes roughly three minutes to compose its web plugin graph on an
+/// emulated CPU, against ~30s under 0.1.x.
 @property (nonatomic) NSTimeInterval startupTimeout;
 /// Consecutive crashes tolerated before giving up. Default 4.
 @property (nonatomic) NSUInteger maxConsecutiveCrashes;

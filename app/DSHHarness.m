@@ -11,7 +11,11 @@
 
 NSNotificationName const DSHHarnessStateDidChangeNotification = @"DSHHarnessStateDidChangeNotification";
 static NSString *const kExpectedStartupKey = @"DSHExpectedStartupDuration";
-static const NSTimeInterval kDefaultExpectedStartup = 25;
+// Only seeds the progress overlay's estimate before the first successful boot
+// has been measured; -expectedStartupDuration replaces it with a smoothed real
+// sample afterwards. dsh 0.2.x takes about three minutes on an emulated CPU,
+// so the old 25s (a 0.1.x figure) made the bar sit at 100% for minutes.
+static const NSTimeInterval kDefaultExpectedStartup = 180;
 static NSString *const kRecentFailuresKey = @"DSHHarnessRecentFailures.1";
 static const NSTimeInterval kPersistentFailureWindow = 10 * 60;
 /// One resume produces several "we are foreground now" signals. Within this
@@ -83,12 +87,27 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
         _serverExecutable = @"/usr/local/bin/dsh-serve";
         _extraEnvironment = @{};
         _preferredPort = 3080;
-        _startupTimeout = 240;
+        // Budget for the whole guest boot, not for one request: the probe fails
+        // only when its wall clock exceeds this (see -[DSHReadinessProbe tick]);
+        // each individual request is capped at 3s.
+        //
+        // dsh 0.2.x needs far more time than 0.1.x did. The older image booted
+        // and served in ~30s on an emulated CPU, so 240s looked generous. The
+        // 0.2.x image scans 289 @deepseek-ai packages (71 of them client
+        // packages) and composes the web plugin graph before it binds, which
+        // costs roughly 180s on the CI runner -- and a real iPad is slower than
+        // that runner, not faster. 240s left about 25% headroom and would have
+        // reported a healthy but slow guest as dead, killing it and restarting
+        // in a loop. 600s keeps the failure mode (a genuinely hung guest) while
+        // removing the false one.
+        _startupTimeout = 600;
         _maxConsecutiveCrashes = 4;
-        // The guest boots in ~40s on an iPad. Immediately afterwards the
-        // emulated CPU is cold and the JIT is still warming, so a 5-second
-        // budget for a single HEAD was optimistic enough to be wrong: it
-        // reported healthy servers dead and rebooted a working guest in a loop.
+        // The guest boots in about three minutes on a real iPad under dsh
+        // 0.2.x (see _startupTimeout above; it was ~40s under 0.1.x).
+        // Immediately afterwards the emulated CPU is cold and the JIT is still
+        // warming, so a 5-second budget for a single HEAD was optimistic enough
+        // to be wrong: it reported healthy servers dead and rebooted a working
+        // guest in a loop.
         _healthCheckTimeout = 15;
         _healthCheckFailuresBeforeRestart = 3;
         _healthCheckRetryDelay = 2;
@@ -224,7 +243,7 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
     [self.log append:[NSString stringWithFormat:@"[dsh-ios] guest pid %d", pid]];
 
     // A shorter interval trims up to 250 ms from the visible startup tail
-    // without adding meaningful work during the roughly 20-second guest boot.
+    // without adding meaningful work during the multi-minute guest boot.
     self.probe = [[DSHReadinessProbe alloc] initWithURL:self.baseURL interval:0.25 timeout:self.startupTimeout];
     [self.probe startWithHandler:^(BOOL ready, NSTimeInterval elapsed) {
         typeof(self) self = weakSelf;

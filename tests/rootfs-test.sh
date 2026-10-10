@@ -15,7 +15,10 @@ WORK="${WORK:-$ROOT/build/rootfs-test}"
 PORT="${DSH_TEST_PORT:-3181}"
 MOCK_PORT="${DSH_MOCK_PORT:-3199}"
 BRIDGE_PORT="${DSH_BRIDGE_PORT:-3197}"
-BOOT_TIMEOUT="${DSH_BOOT_TIMEOUT:-300}"
+# dsh 0.2.x composes its web plugin graph before binding and takes ~180s to
+# serve on this emulated CPU (0.1.x managed it in ~30s), so the old 300s left
+# little room for a loaded runner.
+BOOT_TIMEOUT="${DSH_BOOT_TIMEOUT:-600}"
 GUEST_TIMEOUT="${DSH_GUEST_TIMEOUT:-90}"
 
 pass=0; fail=0
@@ -249,9 +252,20 @@ start=$(date +%s)
 ( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
 up=0
 prev_bytes=0
+# dsh 0.2.x serves the UI on a process-token URL: it prints
+#   dsh web: http://127.0.0.1:PORT/?token=<43 chars>
+# and refuses an unauthenticated GET. The old check curled the bare path with
+# `-f`, so a healthy server looked dead and the suite failed after burning the
+# whole timeout. Read the token out of the announcement instead, and keep the
+# bare path as the fallback so an older guest that needs no token still passes.
+serve_url=""
 for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
-    if curl -fs -o "$WORK/index.html" "http://127.0.0.1:$PORT/"; then up=1; break; fi
+    if [ -z "$serve_url" ]; then
+        serve_url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$WORK/dsh-serve.log" 2>/dev/null | head -1)
+    fi
+    target="${serve_url:-http://127.0.0.1:$PORT/}"
+    if curl -fs -o "$WORK/index.html" "$target"; then up=1; break; fi
     # A heartbeat every 20s separates "the guest is slow" from "the guest is
     # stuck": if the byte count keeps moving, the boot is progressing and the
     # timeout is simply too tight for an emulated CPU; if it stops, the boot
@@ -264,6 +278,8 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
 done
 elapsed=$(( $(date +%s) - start ))
 check "web UI reachable from host loopback (${elapsed}s)" test "$up" = 1
+# Everything after this point needs the same token the check above used.
+base_url="${serve_url:-http://127.0.0.1:$PORT/}"
 if [ "$up" != 1 ]; then
     # The timeout burns five minutes, so surface why instead of making the next
     # run wait for it again. The serve log is short: dsh prints its boot
@@ -274,10 +290,14 @@ if [ "$up" != 1 ]; then
 fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"
 plugin_url=$(grep -o '/plugins/[^"]*client.js?rev=[0-9a-f]*' "$WORK/index.html" | head -1)
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT$plugin_url")
+# The bundle route is relative to the origin, so re-attach the token.
+token_qs="${base_url#*\?}"
+bundle_url="http://127.0.0.1:$PORT$plugin_url"
+[ "$token_qs" != "$base_url" ] && bundle_url="$bundle_url&$token_qs"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$bundle_url")
 check "client plugin bundle served ($plugin_url -> $code)" test "$code" = 200
 sleep 5
-check "server still alive after 5s" curl -fs -o /dev/null "http://127.0.0.1:$PORT/"
+check "server still alive after 5s" curl -fs -o /dev/null "$base_url"
 grep -Eq 'fatal|Error:' "$WORK/dsh-serve.log"; noerr=$?
 check "no fatal error in dsh-serve log" test "$noerr" != 0
 

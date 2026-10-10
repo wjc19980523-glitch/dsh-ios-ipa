@@ -206,8 +206,8 @@ static const int64_t kQueryTimeoutSeconds = 5;
     NSDate *start = [self startForDays:days];
 
     // These independent HealthKit reads used to run serially. On a waking or
-    // busy device that could consume 15 seconds of the guest's 20-second
-    // bridge budget. Run them together; the same per-query bound still applies.
+    // busy device that could consume most of the per-query bridge budget. Run
+    // them together; the same per-query bound still applies.
     __block HKStatisticsCollection *steps;
     __block HKStatisticsCollection *distance;
     __block HKStatisticsCollection *energy;

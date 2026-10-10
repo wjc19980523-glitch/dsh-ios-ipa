@@ -88,6 +88,26 @@ for native_module in koffi node-pty sharp; do
           test -d "$WORK/fakefs/data/usr/local/lib/node_modules/$native_module"
 done
 check "dsh-selftest passes"     grep -q 'SELFTEST OK' "$WORK/sanity.txt"
+# The 0.2.x boot path installs a runtime module-resolution interception whose
+# original code called the node-addon-require-builtin native addon
+# unconditionally.  On linux-arm64-musl that addon loads a binary the iSH JIT
+# cannot execute (`illegal instruction at 0x69850`), killing the guest before the
+# web UI answered.  build-rootfs.sh patches dsh-app-boot to prefer
+# --expose-internals; these assertions prove the patch reached the image.
+#
+# Assert on the staged file too, not only on the selftest output, so a guest that
+# dies before printing still reports the real cause as a failure.
+check "dsh-app-boot patch applied (index.js)" \
+      grep -q 'dsh-ios: prefer --expose-internals' \
+      "$WORK/fakefs/data/usr/local/lib/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js"
+check "dsh-app-boot patch applied (profile-resolution-bootstrap.js)" \
+      grep -q 'dsh-ios: prefer --expose-internals' \
+      "$WORK/fakefs/data/usr/local/lib/node_modules/@deepseek-ai/dsh-app-boot/lib/worker/profile-resolution-bootstrap.js"
+check "dsh-app-boot does not call requireBuiltin unconditionally" \
+      bash -c "! grep -q 'addon.requireBuiltin(\"internal/modules/esm/loader\")' \
+               '$WORK/fakefs/data/usr/local/lib/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'"
+check "expose-internals module loader reachable in guest" \
+      grep -q 'expose-internals exposes the module loader' "$WORK/sanity.txt"
 check "sharp keeps musl arm64 runtime" test -d "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linuxmusl-arm64"
 check "sharp drops unusable glibc runtime" test ! -e "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linux-arm64"
 check "sharp drops unusable wasm fallback" test ! -e "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-wasm32"

@@ -54,6 +54,17 @@ on:
     branches: [main, feature/plus-v1.1]
     paths:
       - ".github/workflows/build-ipa.yml"
+      # Anything that shapes the guest image.  Without these, a lockfile or
+      # overlay fix pushes without triggering a build and has to be dispatched
+      # by hand -- which is how the stale 0.2.0-rc.2 lockfile slipped through
+      # unverified on the first attempt.
+      - "scripts/build-rootfs.sh"
+      - "rootfs/**"
+      - "tests/rootfs-test.sh"
+      - "ish-arm64/**"
+      - "app/**"
+      - "scripts/gen-xcode-project.rb"
+      - "DSH.xcodeproj/**"
 
 permissions:
   contents: read

@@ -101,6 +101,97 @@ for native_module in koffi node-pty sharp; do
 done
 log "staged dsh $installed_dsh_version with native modules present"
 
+# ---------------------------------------------------------------------------
+# Patch dsh-app-boot so its runtime module-resolution interception can reach
+# Node's internals without the node-addon-require-builtin native addon.
+#
+# Why: `internalModules()` in @deepseek-ai/dsh-app-boot (lib/index.js and the
+# duplicate in lib/worker/profile-resolution-bootstrap.js) called
+# `requireBuiltin()` unconditionally.  Up to node-addon-require-builtin 0.1.5
+# that was harmless on Alpine because the package shipped no linux-arm64-musl
+# binary and failed closed into JS.  0.1.9 (pulled in by dsh 0.2.0-rc.2) does
+# ship one, so the addon loads `prebuilt/linux-arm64-musl-napi-v9.node` inside
+# the iSH JIT, which cannot execute it: the guest dies with
+# `illegal instruction at 0x69850: insn=0x00000000` before the web UI ever
+# answers, cascading into ~27 failed assertions.
+#
+# Disabling the optional package (NARB_DISABLE_OPTIONAL_PACKAGE=1) is NOT a fix:
+# loadEntry() then falls through to a local-build search and throws
+# `No usable native binding found`, turning the SIGILL into an uncaught
+# module-load failure on the boot path -- verified on both hosts.
+#
+# The supported alternative already exists and is already in use: dsh-serve
+# launches node with `--expose-internals`, which makes `require("internal/...")`
+# work directly.  @deepseek-ai/cordis-plugin-loader has always done exactly this
+# two-step lookup.  We apply the same lookup to app-boot: prefer the flag, keep
+# the addon as the fallback so builds without the flag are unaffected.
+#
+# The replacement is textually exact and version-checked: if an upstream release
+# changes these lines the build fails here, loudly, instead of shipping a guest
+# that SIGILLs.
+# ---------------------------------------------------------------------------
+log "Patch dsh-app-boot to prefer --expose-internals over the native addon"
+app_boot_dir="stage/node_modules/@deepseek-ai/dsh-app-boot"
+[ -d "$app_boot_dir" ] || die "dsh-app-boot is not in the staged tree"
+for app_boot_file in "$app_boot_dir/lib/index.js" "$app_boot_dir/lib/worker/profile-resolution-bootstrap.js"; do
+    [ -f "$app_boot_file" ] || die "$app_boot_file is missing"
+    node - "$app_boot_file" <<'PATCHEOF'
+const fs = require("fs");
+const file = process.argv[2];
+const original = fs.readFileSync(file, "utf8");
+const target = [
+	'	const addon = createRequire(import.meta.url)("node-addon-require-builtin");',
+	'	const esmModule = addon.requireBuiltin("internal/modules/esm/loader");',
+	'	const cjsModule = addon.requireBuiltin("internal/modules/cjs/loader");',
+	'	const cjsHelpers = addon.requireBuiltin("internal/modules/helpers");',
+	'	const esmUtils = addon.requireBuiltin("internal/modules/esm/utils");',
+	'	const esmResolve = addon.requireBuiltin("internal/modules/esm/resolve");',
+].join("\n");
+const marker = "// dsh-ios: prefer --expose-internals";
+if (original.includes(marker)) {
+	process.stdout.write("already patched: " + file + "\n");
+	process.exit(0);
+}
+if (!original.includes(target)) {
+	process.stderr.write(
+		"cannot patch " + file + ": the internalModules() body did not match.\n" +
+		"Upstream changed it; re-derive the patch before shipping.\n");
+	process.exit(1);
+}
+const replacement = [
+	'	// dsh-ios: prefer --expose-internals, then fall back to the native addon.',
+	'	// The prebuilt node-addon-require-builtin musl binary cannot execute under',
+	'	// the iSH JIT, so the flag is the only working path inside the guest.',
+	'	const loadInternal = (id) => {',
+	'		if (process.execArgv.includes("--expose-internals")) {',
+	'			try { return createRequire(import.meta.url)(id); } catch {}',
+	'		}',
+	'		return createRequire(import.meta.url)("node-addon-require-builtin").requireBuiltin(id);',
+	'	};',
+	'	const esmModule = loadInternal("internal/modules/esm/loader");',
+	'	const cjsModule = loadInternal("internal/modules/cjs/loader");',
+	'	const cjsHelpers = loadInternal("internal/modules/helpers");',
+	'	const esmUtils = loadInternal("internal/modules/esm/utils");',
+	'	const esmResolve = loadInternal("internal/modules/esm/resolve");',
+].join("\n");
+fs.writeFileSync(file, original.replace(target, replacement));
+process.stdout.write("patched: " + file + "\n");
+PATCHEOF
+done
+# Prove the patched files still parse and the marker really landed.
+for app_boot_file in "$app_boot_dir/lib/index.js" "$app_boot_dir/lib/worker/profile-resolution-bootstrap.js"; do
+    grep -q "dsh-ios: prefer --expose-internals" "$app_boot_file" \
+        || die "patch marker missing from $app_boot_file"
+    node --input-type=module --check < "$app_boot_file" \
+        || die "$app_boot_file does not parse after patching"
+done
+# The unconditional addon call must be gone from both copies.
+grep -q 'addon.requireBuiltin("internal/modules/esm/loader")' "$app_boot_dir/lib/index.js" \
+    && die "lib/index.js still calls requireBuiltin unconditionally"
+grep -q 'addon.requireBuiltin("internal/modules/esm/loader")' "$app_boot_dir/lib/worker/profile-resolution-bootstrap.js" \
+    && die "profile-resolution-bootstrap.js still calls requireBuiltin unconditionally"
+log "dsh-app-boot patched (flag first, addon as fallback)"
+
 log "Guest phase 1: packages"
 ish <<'EOF'
 set -e

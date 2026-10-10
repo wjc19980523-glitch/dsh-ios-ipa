@@ -10,7 +10,17 @@ step "node $(node -v 2>/dev/null)"
 [ -x /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js ] || die "dsh missing"
 step "dsh $(dsh --version 2>/dev/null)"
 cd /usr/local/lib/node_modules || die "node_modules missing"
-node -e "require('node-pty'); require('koffi'); require('@vscode/ripgrep'); require('sharp')" 2>/dev/null || die "native modules do not load"
+# Load the native modules one at a time, with stderr visible.
+#
+# The single combined `require(...)` used to hide which module broke: one
+# SIGILL inside any of them aborted the whole node process before the others
+# ran, and `2>/dev/null` swallowed the emulator's illegal-instruction dump, so
+# the only symptom was "native modules do not load".  Loading separately names
+# the culprit and lets the emulator's diagnostic reach the log.
+for native_module in node-pty koffi @vscode/ripgrep sharp; do
+    node -e "require('$native_module')" || die "native module $native_module fails to load"
+    step "native module $native_module loads"
+done
 step "native modules load"
 node -e "
 const p=require('node-pty');
@@ -18,13 +28,44 @@ const t=p.spawn('/bin/sh',['-c','echo pty-ok; sleep 0.3'],{name:'xterm',cols:80,
 let out='';t.onData(d=>out+=d);
 t.onExit(e=>setTimeout(()=>{ process.exit(out.includes('pty-ok')&&e.exitCode===0?0:1); },300));
 setTimeout(()=>process.exit(1),20000);
-" 2>/dev/null || die "node-pty cannot spawn a shell"
+" || die "node-pty cannot spawn a shell"
 step "node-pty spawns"
 node -e "
 const s=require('sharp');
 s({create:{width:8,height:8,channels:3,background:'#f00'}}).resize(4,4).png().toBuffer().then(b=>process.exit(b.length>20?0:1)).catch(()=>process.exit(1));
-" 2>/dev/null || die "sharp cannot encode a PNG"
+" || die "sharp cannot encode a PNG"
 step "sharp encodes"
 [ -f /root/.dsh/profiles/web/cordis.patch.yml ] || die "profile patch missing"
 step "profile patch present"
+
+# The 0.2.x boot path installs a runtime module-resolution interception that used
+# to call node-addon-require-builtin unconditionally.  On linux-arm64-musl that
+# addon loads a native binary the iSH JIT cannot execute, so the guest died with
+# `illegal instruction at 0x69850: insn=0x00000000` before the web UI answered.
+# build-rootfs.sh patches dsh-app-boot to prefer --expose-internals; these two
+# checks prove that patch reached the image and that the flag really exposes the
+# internals it needs, so a future regression fails here instead of at boot.
+for boot_file in \
+    /usr/local/lib/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js \
+    /usr/local/lib/node_modules/@deepseek-ai/dsh-app-boot/lib/worker/profile-resolution-bootstrap.js
+do
+    [ -f "$boot_file" ] || die "missing $boot_file"
+    grep -q "dsh-ios: prefer --expose-internals" "$boot_file" \
+        || die "$boot_file is not patched -- the guest would SIGILL at boot"
+done
+step "dsh-app-boot patched to prefer --expose-internals"
+node --expose-internals -e "
+const ids = [
+  'internal/modules/esm/loader',
+  'internal/modules/cjs/loader',
+  'internal/modules/helpers',
+  'internal/modules/esm/utils',
+  'internal/modules/esm/resolve',
+];
+for (const id of ids) require(id);
+const esm = require('internal/modules/esm/loader').getOrInitializeCascadedLoader();
+if (typeof esm.resolveSync !== 'function') throw new Error('loader has no resolveSync');
+" || die "internal module resolution is unavailable under --expose-internals"
+step "expose-internals exposes the module loader"
+
 echo "SELFTEST OK"

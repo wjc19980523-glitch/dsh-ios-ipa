@@ -419,7 +419,7 @@ int_t sys_listen(fd_t sock_fd, int_t backlog) {
     int err = listen(sock->real_fd, backlog);
     if (err < 0)
         return errno_map();
-    sockrestart_begin_listen(sock);
+    sockrestart_begin_listen(sock, backlog);
     return err;
 }
 

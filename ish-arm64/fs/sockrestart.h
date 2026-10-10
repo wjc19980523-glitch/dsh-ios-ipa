@@ -10,13 +10,20 @@
 // to restart the wait.
 // This file contains hooks into various other places to do all that.
 // https://developer.apple.com/library/archive/technotes/tn2277/_index.html
+//
+// The record has to carry the backlog too: a socket only accepts connections
+// after listen() has been called, and the rebuild below used to bind() the new
+// fd and dup2() it into place without ever listening on it again. The guest's
+// server then looked alive to the kernel but every connection was refused, so
+// the app spent a full ~40s harness restart recovering from a socket that was
+// one missing syscall away from working.
 #ifndef FS_SOCKRESTART_H
 #define FS_SOCKRESTART_H
 #include <stdbool.h>
 #include "util/list.h"
 struct fd;
 
-void sockrestart_begin_listen(struct fd *sock);
+void sockrestart_begin_listen(struct fd *sock, int backlog);
 void sockrestart_end_listen(struct fd *sock);
 void sockrestart_begin_listen_wait(struct fd *sock);
 void sockrestart_end_listen_wait(struct fd *sock);
@@ -26,6 +33,7 @@ void sockrestart_on_resume(void);
 
 struct fd_sockrestart {
     struct list listen;
+    int backlog;
 };
 
 struct task_sockrestart {

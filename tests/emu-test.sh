@@ -85,6 +85,21 @@ else
     echo "  skip: node not installed on host"
 fi
 
+echo "== socket preservation wiring (host-side source checks)"
+# iOS frees the backing socket of every listening fd while the app is
+# suspended (Apple TN2277).  iSH's sockrestart keeps a record of the listening
+# sockets and rebuilds them on resume, but the rebuild used to bind() the new fd
+# and dup2() it into place without calling listen() again -- so the guest's
+# server came back with a socket that refused every connection, and the app paid
+# a full ~40s harness restart to recover.  These checks pin down the three parts
+# of the contract that a regression would silently break.
+check "listen() registers the socket for preservation" \
+      grep -q 'sockrestart_begin_listen(sock, backlog)' "$ISH_SRC/fs/sock.c"
+check "resume rebuilds the socket and re-listens" \
+      grep -q 'listen(new_sock, saved->backlog)' "$ISH_SRC/fs/sockrestart.c"
+check "the backlog survives suspension" \
+      grep -q 'saved->backlog = sock->sockrestart.backlog' "$ISH_SRC/fs/sockrestart.c"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = 0 ]

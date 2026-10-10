@@ -61,6 +61,7 @@ on:
       - "scripts/build-rootfs.sh"
       - "rootfs/**"
       - "tests/rootfs-test.sh"
+      - "tests/emu-test.sh"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"

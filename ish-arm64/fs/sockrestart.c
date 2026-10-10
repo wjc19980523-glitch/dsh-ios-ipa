@@ -11,11 +11,18 @@ extern const struct fd_ops socket_fdops;
 static lock_t sockrestart_lock = LOCK_INITIALIZER;
 static struct list listen_fds = LIST_INITIALIZER(listen_fds);
 
-void sockrestart_begin_listen(struct fd *sock) {
+void sockrestart_begin_listen(struct fd *sock, int backlog) {
     if (sock->ops != &socket_fdops)
         return;
     lock(&sockrestart_lock);
-    list_add(&listen_fds, &sock->sockrestart.listen);
+    // listen() may legally be called again on an already-listening socket to
+    // change its backlog.  Adding the same node to listen_fds twice would
+    // corrupt the list, so only register the socket once and refresh the
+    // backlog instead.  This also mirrors list_remove_safe() in end_listen(),
+    // which treats a NULL next/prev pair as "not registered".
+    if (list_null(&sock->sockrestart.listen))
+        list_add(&listen_fds, &sock->sockrestart.listen);
+    sock->sockrestart.backlog = backlog;
     unlock(&sockrestart_lock);
 }
 
@@ -61,6 +68,7 @@ struct saved_socket {
     struct fd *sock;
     int type;
     int proto;
+    int backlog;
     union {
         char name[128];
         struct sockaddr name_addr;
@@ -83,6 +91,7 @@ void sockrestart_on_suspend() {
             continue; // better than a crash
         saved->sock = fd_retain(sock);
         saved->proto = sock->socket.protocol;
+        saved->backlog = sock->sockrestart.backlog;
         unsigned size = sizeof(saved->type);
         // iOS may already have torn the socket down by the time the app is
         // told it is going to the background, which makes these two calls fail.
@@ -124,6 +133,15 @@ void sockrestart_on_resume() {
         }
         if (bind(new_sock, (struct sockaddr *) &saved->name, saved->name_len) < 0) {
             printk("rebinding socket failed: %s\n", strerror(errno));
+            goto thank_u_next;
+        }
+        // bind() alone leaves a passive socket unable to accept: the kernel
+        // refuses every connection until listen() is called. The rebuild used to
+        // skip this, so the guest's server came back "successfully" with a
+        // socket that answered nothing, and the app paid a full harness restart
+        // to recover. Restore the exact backlog the original listen() used.
+        if (listen(new_sock, saved->backlog) < 0) {
+            printk("re-listening on socket failed: %s\n", strerror(errno));
             goto thank_u_next;
         }
         dup2(new_sock, saved->sock->real_fd);

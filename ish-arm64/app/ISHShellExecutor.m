@@ -347,27 +347,65 @@ static BOOL _guestBooted;
 // a paired flag keeps the two in step.
 static BOOL _guestSuspended;
 
-+ (void)handleAppSuspend {
-#if !ISH_LINUX
-    if (!_guestBooted)
-        return;
+/// Counts completed suspend/resume pairs. Read by the log line below and by
+/// -[ISHShellExecutor lifecycleSuspendCount]/lifecycleResumeCount.
+static NSUInteger _suspendCount;
+static NSUInteger _resumeCount;
+
++ (NSUInteger)lifecycleSuspendCount {
+    return _suspendCount;
+}
+
++ (NSUInteger)lifecycleResumeCount {
+    return _resumeCount;
+}
+
++ (BOOL)handleAppSuspend {
+#if ISH_LINUX
+    return NO;
+#else
+    if (!_guestBooted) {
+        NSLog(@"[dsh-ios] lifecycle: suspension, but the guest is not booted; skipping socket preservation");
+        return NO;
+    }
     // Never suspend twice: the guest's saved_sockets list is only drained by
-    // the matching resume, so a second suspend would trip its assert.
-    if (_guestSuspended)
-        return;
+    // the matching resume, so a second suspend would trip its assert. Log it
+    // rather than returning silently -- a duplicate callback with no matching
+    // resume is exactly the shape of the bug this guards against, and it should
+    // be visible in a bug report instead of inferred.
+    if (_guestSuspended) {
+        NSLog(@"[dsh-ios] lifecycle: suspension already recorded, ignoring duplicate");
+        return NO;
+    }
     _guestSuspended = YES;
     sockrestart_on_suspend();
+    _suspendCount++;
+    NSLog(@"[dsh-ios] lifecycle: guest sockets recorded before suspension (suspend #%lu)",
+          (unsigned long) _suspendCount);
+    return YES;
 #endif
 }
 
-+ (void)handleAppResume {
-#if !ISH_LINUX
-    if (!_guestBooted)
-        return;
-    if (!_guestSuspended)
-        return;   // never suspended, so there is nothing to rebuild
++ (BOOL)handleAppResume {
+#if ISH_LINUX
+    return NO;
+#else
+    if (!_guestBooted) {
+        NSLog(@"[dsh-ios] lifecycle: resume, but the guest is not booted; nothing to rebuild");
+        return NO;
+    }
+    if (!_guestSuspended) {
+        // Never suspended, so there is nothing to rebuild. This is the normal
+        // case for a plain launch and for the second of iOS's foreground
+        // notifications, and it must not be reported as a rebuild.
+        return NO;
+    }
     _guestSuspended = NO;
     sockrestart_on_resume();
+    _resumeCount++;
+    NSLog(@"[dsh-ios] lifecycle: guest sockets rebuilt after suspension (resume #%lu)",
+          (unsigned long) _resumeCount);
+    return YES;
 #endif
 }
 

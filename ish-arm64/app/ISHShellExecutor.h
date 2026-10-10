@@ -105,12 +105,28 @@ typedef void (^ISHShellCompletionCallback)(ISHShellExecutionResult *result);
 ///
 /// This records the listening sockets so they can be recreated on resume.
 /// See ish-arm64/fs/sockrestart.c and Apple TN2277.
-+ (void)handleAppSuspend;
+///
+/// @return YES if sockets were recorded. NO if there was nothing to do: the
+///         guest is not booted, or a previous suspension has not been resumed
+///         yet (a duplicate callback). Each log line says which.
++ (BOOL)handleAppSuspend;
 
 /// Must be called when the app is resumed, before anything tries to use the
 /// guest's network. Recreates the sockets recorded by -handleAppSuspend and
 /// wakes any thread blocked on accept.
-+ (void)handleAppResume;
+///
+/// @return YES only if sockets were actually rebuilt, i.e. a real suspension
+///         preceded this call. A plain launch, or the second of iOS's several
+///         foreground notifications, returns NO and changes nothing. Callers
+///         use this to decide whether the guest's network was invalidated.
++ (BOOL)handleAppResume;
+
+/// Number of suspensions that actually recorded sockets since launch, and the
+/// number of matching rebuilds. Equal counts mean every suspend was resumed.
+/// Exposed so a bug report can show whether the lifecycle hooks ran at all --
+/// which is precisely what could not be told from the earlier logs.
++ (NSUInteger)lifecycleSuspendCount;
++ (NSUInteger)lifecycleResumeCount;
 
 @end
 

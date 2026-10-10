@@ -103,6 +103,21 @@ extern NSNotificationName const DSHHarnessStateDidChangeNotification;
 /// 5xx) restarts immediately, so real crashes still recover on the first try.
 - (void)verifyAliveWithCompletion:(nullable void (^)(BOOL alive))completion;
 
+/// Like -verifyAliveWithCompletion:, but for a caller that has just rebuilt the
+/// guest's listening sockets and therefore knows the answer this method is
+/// about to produce is worthless: whatever the guest reported a moment ago was
+/// measured against sockets that iOS had already destroyed.
+///
+/// It drops that cached answer — including "connection refused", which is the
+/// *expected* result while the sockets are being recreated — so the check that
+/// runs is a real one, and it bypasses the foreground debounce that would
+/// otherwise re-assert the same stale answer without probing at all.
+///
+/// Use this exactly once per resume, from the scene lifecycle. A caller that
+/// only wants an advisory check (say, the web view noticing a load error) should
+/// keep using -verifyAliveWithCompletion: so it can still coalesce.
+- (void)verifyAliveAfterResumeWithCompletion:(nullable void (^)(BOOL alive))completion;
+
 @end
 
 NS_ASSUME_NONNULL_END

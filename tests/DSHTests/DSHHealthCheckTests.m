@@ -341,6 +341,148 @@
     [server stop];
 }
 
+#pragma mark - Resuming from the background
+
+/// The device's second symptom. The log showed:
+///
+///     health check: unreachable via GET after 0.01s (NSURLErrorDomain -1004)
+///     health check failed 1 time(s) (server unreachable); restarting server
+///
+/// A "refused connection" is normally conclusive, so one of them restarts the
+/// server. But straight after a resume that is the *expected* answer: it is what
+/// the probe sees while the guest's sockets are being recreated. Counting it
+/// towards the ladder turns every return from the background into a 40-second
+/// reboot, which is the whole complaint.
+///
+/// This is the regression: after a real resume, a stale failure must no longer
+/// be able to restart the server on its own.
+- (void)testResumeClearsFailureRecordedBeforeSuspension {
+    DSHFakeGuestLauncher *launcher = [DSHFakeGuestLauncher new];
+    DSHTestHTTPServer *__strong server = nil;
+    DSHHarness *h = [self harnessOnPort:39000 timeout:5 launcher:launcher serverSlot:&server];
+    h.healthCheckFailuresBeforeRestart = 3;
+    h.healthCheckRetryDelay = 5;   // long enough that no retry can muddy the count
+    [self waitReady:h];
+    XCTAssertNotNil(server);
+
+    // Simulate the moment iOS has already freed the socket: the probe is
+    // refused, which the harness treats as proof the server is dead.
+    server.stalls = YES;
+    [server stop];
+    server = nil;
+
+    XCTestExpectation *failed = [self expectationForNotification:DSHHarnessStateDidChangeNotification
+                                                          object:h
+                                                         handler:^BOOL(NSNotification *n) {
+        return h.healthCheckFailures > 0;
+    }];
+    failed.assertForOverFulfill = NO;
+    [h verifyAliveWithCompletion:nil];
+    [self waitForExpectations:@[failed] timeout:15];
+    XCTAssertEqual(h.healthCheckFailures, 1u, @"the unreachable probe was recorded");
+
+    NSUInteger launchesBefore = launcher.launches.count;
+    NSUInteger restartsBefore = h.restartCount;
+
+    // The app comes back. The sockets are rebuilt, so the harness must forget
+    // that answer -- it measured a guest whose socket no longer exists.
+    [h verifyAliveAfterResumeWithCompletion:nil];
+
+    XCTAssertEqual(h.restartCount, restartsBefore,
+                   @"a resume must not turn a pre-suspension failure into a restart");
+    XCTAssertEqual(launcher.launches.count, launchesBefore,
+                   @"no new guest process is started just because the app was resumed");
+}
+
+/// A resume must produce a *real* check, not a debounced echo of the answer
+/// taken before the suspension. The earlier code would have returned the cached
+/// "healthy" verdict without probing at all, which is how a guest whose sockets
+/// had been destroyed could look fine until the next unrelated check.
+- (void)testResumeForcesAFreshProbeRatherThanTrustingTheCache {
+    DSHFakeGuestLauncher *launcher = [DSHFakeGuestLauncher new];
+    DSHTestHTTPServer *__strong server = nil;
+    DSHHarness *h = [self harnessOnPort:39100 timeout:5 launcher:launcher serverSlot:&server];
+    h.healthCheckRetryDelay = 1;
+    [self waitReady:h];
+    XCTAssertNotNil(server);
+
+    XCTestExpectation *first = [self expectationWithDescription:@"first check"];
+    [h verifyAliveWithCompletion:^(BOOL alive) {
+        XCTAssertTrue(alive);
+        [first fulfill];
+    }];
+    [self waitForExpectations:@[first] timeout:10];
+    NSUInteger afterFirst = server.requestCount;
+    XCTAssertGreaterThan(afterFirst, 0u);
+
+    // Well inside the debounce window: an ordinary foreground notification
+    // would answer from cache here.
+    XCTestExpectation *resumed = [self expectationWithDescription:@"resume check"];
+    [h verifyAliveAfterResumeWithCompletion:^(BOOL alive) {
+        XCTAssertTrue(alive);
+        [resumed fulfill];
+    }];
+    [self waitForExpectations:@[resumed] timeout:10];
+
+    XCTAssertGreaterThan(server.requestCount, afterFirst,
+                         @"a resume must probe again; the cached verdict predates the suspension");
+    [server stop];
+}
+
+/// Resuming when the guest is genuinely gone must still recover. The fix must
+/// not buy a quiet log at the price of never restarting a dead server.
+- (void)testResumeStillRestartsWhenServerIsReallyGone {
+    DSHFakeGuestLauncher *launcher = [DSHFakeGuestLauncher new];
+    DSHTestHTTPServer *__strong server = nil;
+    DSHHarness *h = [self harnessOnPort:39200 timeout:2 launcher:launcher serverSlot:&server];
+    h.healthCheckFailuresBeforeRestart = 3;
+    h.healthCheckRetryDelay = 0.2;
+    [self waitReady:h];
+    XCTAssertNotNil(server);
+
+    // Nothing listens any more, and this time it is not a suspension artefact.
+    [server stop];
+    server = nil;
+    NSUInteger launchesBefore = launcher.launches.count;
+
+    XCTestExpectation *restarting = [self expectationForNotification:DSHHarnessStateDidChangeNotification
+                                                             object:h
+                                                            handler:^BOOL(NSNotification *n) {
+        return h.state == DSHHarnessStateRestarting || h.state == DSHHarnessStateStopped;
+    }];
+    restarting.assertForOverFulfill = NO;
+    [h verifyAliveAfterResumeWithCompletion:nil];
+    [self waitForExpectations:@[restarting] timeout:20];
+
+    XCTAssertGreaterThanOrEqual(h.restartCount, 1u, @"a dead server is still restarted after a resume");
+    XCTAssertGreaterThan(launcher.launches.count, launchesBefore, @"and a new guest process is launched");
+    XCTAssertNotNil(h.lastHealthCheck, @"the result is kept for diagnosis");
+    XCTAssertTrue(h.lastHealthCheck.indicatesDeadServer);
+}
+
+/// A resume with no preceding suspension must be inert: it happens on every
+/// plain launch (sceneWillEnterForeground fires before the guest has booted) and
+/// on the second of iOS's foreground notifications.
+- (void)testResumeWithoutSuspensionIsInert {
+    DSHFakeGuestLauncher *launcher = [DSHFakeGuestLauncher new];
+    DSHTestHTTPServer *__strong server = nil;
+    DSHHarness *h = [self harnessOnPort:39300 timeout:5 launcher:launcher serverSlot:&server];
+    h.healthCheckRetryDelay = 1;
+    [self waitReady:h];
+    XCTAssertNotNil(server);
+
+    XCTestExpectation *checked = [self expectationWithDescription:@"check"];
+    [h verifyAliveAfterResumeWithCompletion:^(BOOL alive) {
+        XCTAssertTrue(alive);
+        [checked fulfill];
+    }];
+    [self waitForExpectations:@[checked] timeout:10];
+
+    XCTAssertEqual(h.restartCount, 0u, @"nothing to recover from, so no restart");
+    XCTAssertEqual(h.healthCheckFailures, 0u);
+    [server stop];
+}
+
 #pragma mark - Crash recovery is intact
 
 /// The original crash-handling behaviour must survive the change: a process

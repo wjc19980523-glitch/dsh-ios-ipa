@@ -15,6 +15,13 @@ name: Build DSH IOS IPA (unsigned)
 # Revision 2: rebuild for the foreground restart-loop fix (guest listening
 # sockets are now preserved across suspension; the health check retries instead
 # of restarting on a single timeout).
+#
+# Revision 3: rebuild 1.0.16 (19). The socket preservation added in revision 2
+# was wired into UIApplicationDelegate, but the app declares
+# UIApplicationSceneManifest, so UIKit never calls those methods and the hooks
+# never ran on device. They are now on DSHSceneDelegate's sceneDidEnterBackground:
+# / sceneWillEnterForeground:, and a resume no longer counts the "connection
+# refused" seen while sockets are being rebuilt as a server failure.
 
 on:
   workflow_dispatch:

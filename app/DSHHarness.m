@@ -60,6 +60,9 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 
 - (void)runHealthCheck;
 - (void)finishHealthCheckWithResult:(nullable DSHProbeResult *)result completionsSucceeded:(BOOL)succeeded;
+/// Shared body of the two public entry points; see DSHHarness.h for what
+/// `trustCachedAnswer` means.
+- (void)verifyAliveWithCachedAnswer:(BOOL)trustCachedAnswer completion:(void (^)(BOOL))completion;
 @end
 
 @implementation DSHHarness
@@ -318,20 +321,40 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 }
 
 - (void)verifyAliveWithCompletion:(void (^)(BOOL))completion {
+    [self verifyAliveWithCachedAnswer:YES completion:completion];
+}
+
+- (void)verifyAliveAfterResumeWithCompletion:(void (^)(BOOL))completion {
+    [self verifyAliveWithCachedAnswer:NO completion:completion];
+}
+
+- (void)verifyAliveWithCachedAnswer:(BOOL)trustCachedAnswer completion:(void (^)(BOOL))completion {
     if (self.state != DSHHarnessStateReady || self.baseURL == nil) {
         if (completion) completion(NO);
         return;
     }
-    // Both UIApplicationDelegate and UISceneDelegate report foregrounding, and
-    // the web view's error path adds a third caller. Coalesce them so one
-    // resume cannot race several probes into several restarts, and so a probe
-    // that already ran a moment ago is not repeated while its answer is still
-    // valid: iOS delivers willEnterForeground and sceneDidBecomeActive within
-    // milliseconds of each other, and the second one used to start a fresh
-    // 5-second countdown against a server the first one had just confirmed.
-    if (self.lastHealthCheckAt != nil &&
-        self.healthCheckFailures == 0 &&
-        -self.lastHealthCheckAt.timeIntervalSinceNow < kHealthCheckDebounce) {
+    if (!trustCachedAnswer) {
+        // A resume invalidates the previous answer: it described sockets that
+        // iOS had already deregistered. In particular a "connection refused"
+        // recorded just before suspension must not count towards the failure
+        // ladder now, or one background cycle could restart a healthy guest.
+        // Clearing the in-flight flag too, since the caller is asking for a
+        // check that is known to be actionable; any probe still outstanding
+        // reports into a generation that no longer matches and is dropped.
+        self.healthCheckFailures = 0;
+        self.healthCheckInFlight = NO;
+        [self.healthCheckCompletions removeAllObjects];
+    } else if (self.lastHealthCheckAt != nil &&
+               self.healthCheckFailures == 0 &&
+               -self.lastHealthCheckAt.timeIntervalSinceNow < kHealthCheckDebounce) {
+        // Both UIApplicationDelegate and UISceneDelegate report foregrounding,
+        // and the web view's error path adds a third caller. Coalesce them so
+        // one resume cannot race several probes into several restarts, and so a
+        // probe that already ran a moment ago is not repeated while its answer
+        // is still valid: iOS delivers willEnterForeground and
+        // sceneDidBecomeActive within milliseconds of each other, and the
+        // second one used to start a fresh 5-second countdown against a server
+        // the first one had just confirmed.
         if (completion) completion(YES);
         return;
     }

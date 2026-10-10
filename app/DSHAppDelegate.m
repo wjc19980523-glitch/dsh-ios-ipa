@@ -7,7 +7,6 @@
 #import "DSHBootCoordinator.h"
 #import "DSHHarness.h"
 #import "DSHRootViewController.h"
-#import "ISHShellExecutor.h"
 
 static NSString *const kCapabilityPreferenceRepair = @"DSHCapabilityPreferenceRepair.2";
 
@@ -54,24 +53,13 @@ static void DSHRepairPreferencesPollutedByLegacyTests(void) {
     return YES;
 }
 
-- (void)applicationDidEnterBackground:(UIApplication *)application {
-    // iOS frees the backing socket of every listening fd this process owns
-    // while it is suspended. Without this, the guest's dsh-serve keeps a
-    // listen() fd that looks valid but can never accept again: the app returns
-    // to the foreground, the health check correctly finds it unreachable, and
-    // the harness reboots a guest that was never broken. Recording the
-    // sockets here lets -applicationWillEnterForeground rebuild them.
-    [ISHShellExecutor handleAppSuspend];
-}
-
-- (void)applicationWillEnterForeground:(UIApplication *)application {
-    // Rebuild the guest's listening sockets before anything probes them,
-    // then confirm the server answers. DSHHarness tolerates a single late
-    // answer and restarts only after repeated failures, so returning to the
-    // app cannot reboot a healthy guest.
-    // See -[DSHHarness verifyAliveWithCompletion:] and ish-arm64/fs/sockrestart.c.
-    [ISHShellExecutor handleAppResume];
-    [DSHHarness.shared verifyAliveWithCompletion:nil];
-}
+// There is deliberately no -applicationDidEnterBackground: /
+// -applicationWillEnterForeground: here. Info.plist declares
+// UIApplicationSceneManifest, so this app runs the UIScene lifecycle and UIKit
+// does not call these two methods at all. Keeping the socket hooks here meant
+// they never ran on device, and every return from the background paid a full
+// ~40-second harness restart. They live in -[DSHSceneDelegate
+// sceneDidEnterBackground:] / -sceneWillEnterForeground: now; see
+// DSHSceneDelegate.m for the details.
 
 @end

@@ -15,6 +15,10 @@
 @property (nonatomic) dispatch_queue_t queue;
 @property (nonatomic, readwrite) uint16_t port;
 @property (atomic, readwrite) NSUInteger requestCount;
+@property (atomic, readwrite) NSUInteger headRequestCount;
+@property (atomic, readwrite) NSUInteger getRequestCount;
+/// Sockets accepted while stalling, kept open so the client waits.
+@property (nonatomic) NSMutableArray<NSNumber *> *stalledClients;
 @end
 
 @implementation DSHTestHTTPServer
@@ -22,6 +26,7 @@
 - (instancetype)initWithPort:(uint16_t)port {
     if (self = [super init]) {
         _statusCode = 200;
+        _stalledClients = [NSMutableArray array];
         _queue = dispatch_queue_create("dsh.test.http", DISPATCH_QUEUE_CONCURRENT);
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
@@ -54,11 +59,25 @@
     if (client < 0)
         return;
     self.requestCount++;
+    if (self.stalls) {
+        // Hold the socket open without answering. The connection is
+        // established, so the client sees a live peer that never speaks --
+        // exactly the shape of a timeout rather than a refusal.
+        @synchronized (self.stalledClients) {
+            [self.stalledClients addObject:@(client)];
+        }
+        return;
+    }
     NSInteger status = self.statusCode;
     dispatch_async(self.queue, ^{
         char buf[4096];
         // Read the request head (best effort), then answer.
-        recv(client, buf, sizeof(buf), 0);
+        ssize_t n = recv(client, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strncmp(buf, "HEAD ", 5) == 0) self.headRequestCount++;
+            else if (strncmp(buf, "GET ", 4) == 0) self.getRequestCount++;
+        }
         NSString *body = @"ok";
         NSString *head = [NSString stringWithFormat:@"HTTP/1.1 %ld %@\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@",
                           (long) status, status == 200 ? @"OK" : @"Error", (unsigned long) body.length, body];
@@ -76,6 +95,11 @@
     if (self.listenFD >= 0) {
         close(self.listenFD);
         self.listenFD = -1;
+    }
+    @synchronized (self.stalledClients) {
+        for (NSNumber *fd in self.stalledClients)
+            close(fd.intValue);
+        [self.stalledClients removeAllObjects];
     }
 }
 

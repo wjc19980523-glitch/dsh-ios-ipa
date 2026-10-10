@@ -20,6 +20,7 @@
 #import "DSHActivityCapability.h"
 #import "DSHStartupMetrics.h"
 #import "AppDelegate.h"
+#import "ISHShellExecutor.h"
 #import <UIKit/UIKit.h>
 
 NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidChangeNotification";
@@ -109,6 +110,12 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
                   progress:-1];
             return;
         }
+
+        // From here the kernel is live, so the suspend/resume socket hooks are
+        // safe to use. Without this the guest's listening sockets would be
+        // freed by iOS on every suspension and never rebuilt, leaving
+        // dsh-serve permanently unreachable after the first background cycle.
+        [ISHShellExecutor setGuestBooted:YES];
 
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{

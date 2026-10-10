@@ -14,6 +14,9 @@ static NSString *const kExpectedStartupKey = @"DSHExpectedStartupDuration";
 static const NSTimeInterval kDefaultExpectedStartup = 25;
 static NSString *const kRecentFailuresKey = @"DSHHarnessRecentFailures.1";
 static const NSTimeInterval kPersistentFailureWindow = 10 * 60;
+/// One resume produces several "we are foreground now" signals. Within this
+/// window a fresh check adds nothing but load.
+static const NSTimeInterval kHealthCheckDebounce = 2;
 
 NSString *DSHHarnessStateName(DSHHarnessState state) {
     switch (state) {
@@ -44,6 +47,19 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 @property (nonatomic) BOOL healthCheckInFlight;
 @property (nonatomic) NSMutableArray<void (^)(BOOL)> *healthCheckCompletions;
 @property (nonatomic) BOOL tracksPersistentFailures;
+/// Consecutive failed health checks since the server last proved healthy.
+@property (nonatomic, readwrite) NSUInteger healthCheckFailures;
+/// Generation the pending health-check retry belongs to, so a restart or a new
+/// launch cancels it instead of piling on.
+@property (nonatomic) NSUInteger healthCheckRetryGeneration;
+/// Last probe result, kept for the UI and for tests.
+@property (nonatomic, readwrite, nullable) DSHProbeResult *lastHealthCheck;
+/// When the last health check finished; used to coalesce the several
+/// foreground notifications iOS delivers for one resume.
+@property (nonatomic) NSDate *lastHealthCheckAt;
+
+- (void)runHealthCheck;
+- (void)finishHealthCheckWithResult:(nullable DSHProbeResult *)result completionsSucceeded:(BOOL)succeeded;
 @end
 
 @implementation DSHHarness
@@ -66,6 +82,13 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
         _preferredPort = 3080;
         _startupTimeout = 240;
         _maxConsecutiveCrashes = 4;
+        // The guest boots in ~40s on an iPad. Immediately afterwards the
+        // emulated CPU is cold and the JIT is still warming, so a 5-second
+        // budget for a single HEAD was optimistic enough to be wrong: it
+        // reported healthy servers dead and rebooted a working guest in a loop.
+        _healthCheckTimeout = 15;
+        _healthCheckFailuresBeforeRestart = 3;
+        _healthCheckRetryDelay = 2;
         _state = DSHHarnessStateIdle;
         _healthCheckCompletions = [NSMutableArray array];
         _tracksPersistentFailures = [launcher isKindOfClass:DSHGuestLauncher.class];
@@ -117,8 +140,16 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
     NSAssert(NSThread.isMainThread, @"stop on main");
     self.userStopped = YES;
     self.launchGeneration++;
+    self.healthCheckRetryGeneration++;
     [self.probe cancel];
     self.probe = nil;
+    self.healthCheckInFlight = NO;
+    self.healthCheckFailures = 0;
+    // Anyone waiting on a check that will now never run must be told.
+    NSArray<void (^)(BOOL)> *completions = [self.healthCheckCompletions copy];
+    [self.healthCheckCompletions removeAllObjects];
+    for (void (^callback)(BOOL) in completions)
+        callback(NO);
     if (self.guestPid > 0) {
         [self.launcher killProcess:self.guestPid signal:SIGTERM];
         self.guestPid = 0;
@@ -143,6 +174,9 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 
 - (void)launch {
     self.launchGeneration++;
+    self.healthCheckRetryGeneration++;
+    self.healthCheckInFlight = NO;
+    self.healthCheckFailures = 0;
     NSUInteger generation = self.launchGeneration;
 
     // Keep the previous port if it is still free so a restart lands on the
@@ -288,32 +322,96 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
         if (completion) completion(NO);
         return;
     }
-    // Both UIApplicationDelegate and UISceneDelegate report foregrounding.
-    // Coalesce them so one resume cannot race two failed probes into two
-    // restarts (or make the loopback server do duplicate work while waking).
+    // Both UIApplicationDelegate and UISceneDelegate report foregrounding, and
+    // the web view's error path adds a third caller. Coalesce them so one
+    // resume cannot race several probes into several restarts, and so a probe
+    // that already ran a moment ago is not repeated while its answer is still
+    // valid: iOS delivers willEnterForeground and sceneDidBecomeActive within
+    // milliseconds of each other, and the second one used to start a fresh
+    // 5-second countdown against a server the first one had just confirmed.
+    if (self.lastHealthCheckAt != nil &&
+        self.healthCheckFailures == 0 &&
+        -self.lastHealthCheckAt.timeIntervalSinceNow < kHealthCheckDebounce) {
+        if (completion) completion(YES);
+        return;
+    }
     if (completion)
         [self.healthCheckCompletions addObject:[completion copy]];
     if (self.healthCheckInFlight)
         return;
     self.healthCheckInFlight = YES;
+    [self runHealthCheck];
+}
+
+- (void)runHealthCheck {
     NSUInteger generation = self.launchGeneration;
+    NSUInteger retryGeneration = self.healthCheckRetryGeneration;
     NSURL *url = self.baseURL;
+    if (url == nil) {
+        [self finishHealthCheckWithResult:nil completionsSucceeded:NO];
+        return;
+    }
     __weak typeof(self) weakSelf = self;
-    [DSHReadinessProbe checkURL:url timeout:5 completion:^(BOOL alive) {
+    [DSHReadinessProbe checkURL:url timeout:self.healthCheckTimeout completion:^(DSHProbeResult *result) {
         typeof(self) self = weakSelf;
         if (self == nil)
             return;
-        self.healthCheckInFlight = NO;
-        NSArray<void (^)(BOOL)> *completions = [self.healthCheckCompletions copy];
-        [self.healthCheckCompletions removeAllObjects];
-        BOOL stillCurrent = generation == self.launchGeneration && self.state == DSHHarnessStateReady;
-        if (!alive && stillCurrent) {
-            [self.log append:@"[dsh-ios] health check failed; restarting server"];
-            [self restart];
+        // A restart, a stop, or a fresh launch invalidates this answer.
+        if (generation != self.launchGeneration || retryGeneration != self.healthCheckRetryGeneration) {
+            [self finishHealthCheckWithResult:result completionsSucceeded:NO];
+            return;
         }
-        for (void (^callback)(BOOL) in completions)
-            callback(alive && stillCurrent);
+        self.lastHealthCheck = result;
+        self.lastHealthCheckAt = NSDate.date;
+        [self.log append:[NSString stringWithFormat:@"[dsh-ios] health check: %@", result.summary]];
+
+        if (result.alive) {
+            self.healthCheckFailures = 0;
+            [self finishHealthCheckWithResult:result completionsSucceeded:YES];
+            return;
+        }
+
+        self.healthCheckFailures++;
+        NSUInteger failures = self.healthCheckFailures;
+
+        // A refused connection or a 5xx proves nothing is serving; waiting for
+        // two more failures would only delay recovery.
+        BOOL conclusive = result.indicatesDeadServer;
+        if (conclusive || failures >= self.healthCheckFailuresBeforeRestart) {
+            [self.log append:[NSString stringWithFormat:@"[dsh-ios] health check failed %lu time(s) (%@); restarting server",
+                              (unsigned long) failures, conclusive ? @"server unreachable" : @"repeated timeouts"]];
+            [self finishHealthCheckWithResult:result completionsSucceeded:NO];
+            [self restart];
+            return;
+        }
+
+        [self.log append:[NSString stringWithFormat:@"[dsh-ios] health check failed (%@); retrying in %.1fs (attempt %lu/%lu)",
+                          result.summary, self.healthCheckRetryDelay,
+                          (unsigned long) failures, (unsigned long) self.healthCheckFailuresBeforeRestart]];
+        NSUInteger retryFor = retryGeneration;
+        NSUInteger launchFor = generation;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (self.healthCheckRetryDelay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (self == nil || self.userStopped) return;
+            if (launchFor != self.launchGeneration) return;
+            if (retryFor != self.healthCheckRetryGeneration) return;
+            if (self.state != DSHHarnessStateReady) return;
+            if (!self.healthCheckInFlight) return;
+            [self runHealthCheck];
+        });
     }];
+}
+
+/// Delivers the pending completions and clears the in-flight flag. Kept in one
+/// place so every exit path from a health check releases the coalescing lock;
+/// leaving it set would silently disable all future checks.
+- (void)finishHealthCheckWithResult:(nullable DSHProbeResult *)result completionsSucceeded:(BOOL)succeeded {
+    self.healthCheckInFlight = NO;
+    NSArray<void (^)(BOOL)> *completions = [self.healthCheckCompletions copy];
+    [self.healthCheckCompletions removeAllObjects];
+    for (void (^callback)(BOOL) in completions)
+        callback(succeeded);
 }
 
 @end

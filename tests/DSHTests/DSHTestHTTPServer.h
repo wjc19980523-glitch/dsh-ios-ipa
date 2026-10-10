@@ -17,6 +17,15 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSURL *baseURL;
 @property (atomic) NSInteger statusCode;   // default 200
 @property (atomic, readonly) NSUInteger requestCount;
+/// Accept the connection but never write a response. Simulates the emulator's
+/// guest being wedged mid-boot, which is what a too-short health-check timeout
+/// misreads as "the server is dead".
+@property (atomic) BOOL stalls;
+/// Count of requests that arrived with a HEAD method, so tests can assert the
+/// probe actually used the cheap method.
+@property (atomic, readonly) NSUInteger headRequestCount;
+/// Count of requests that arrived with a GET method (the fallback path).
+@property (atomic, readonly) NSUInteger getRequestCount;
 - (void)stop;
 @end
 

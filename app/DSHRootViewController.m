@@ -301,6 +301,8 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 - (void)sceneDidBecomeActive {
     // After a suspension the page's websocket may be gone; the client
     // reconnects on its own, but a dead server needs a restart + reload.
+    // Only the harness decides whether to restart — this path just marks the
+    // page stale and lets the harness's retry ladder do its job.
     if (DSHHarness.shared.state == DSHHarnessStateReady && self.pageLoaded) {
         __weak typeof(self) weakSelf = self;
         [DSHHarness.shared verifyAliveWithCompletion:^(BOOL alive) {
@@ -533,14 +535,22 @@ static const NSTimeInterval kActivityIndicatorVisible = 6;
     [DSHHarness.shared.log append:[NSString stringWithFormat:@"[dsh-ios] page load failed: %@", error.localizedDescription]];
     [self.overlay showStarting:@"Waiting for the harness…"];
     // The server was answering a moment ago; give it a beat and retry, and
-    // let the harness restart it if it is really gone.
+    // let the harness restart it if it is really gone. The harness owns the
+    // health-check retry ladder, so a failed page load only asks once and
+    // never restarts on its own.
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         typeof(self) self = weakSelf;
         if (self == nil || self.pageLoaded || generation != self.pageLoadGeneration)
             return;
         [DSHHarness.shared verifyAliveWithCompletion:^(BOOL alive) {
-            if (alive) [self loadHarness];
+            if (!alive)
+                return;
+            // The check may have taken a while; only reload if nothing newer
+            // has started a load in the meantime.
+            if (self.pageLoaded || generation != self.pageLoadGeneration)
+                return;
+            [self loadHarness];
         }];
     });
 }

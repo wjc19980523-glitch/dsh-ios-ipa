@@ -9,6 +9,7 @@
 
 #import <Foundation/Foundation.h>
 #import "DSHLogBuffer.h"
+#import "DSHReadinessProbe.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -71,9 +72,22 @@ extern NSNotificationName const DSHHarnessStateDidChangeNotification;
 @property (nonatomic) NSTimeInterval startupTimeout;
 /// Consecutive crashes tolerated before giving up. Default 4.
 @property (nonatomic) NSUInteger maxConsecutiveCrashes;
+/// Budget for one foreground health check. Default 15. Deliberately generous:
+/// the check runs through an emulated CPU that may be cold or busy right after
+/// a resume, and a late answer is not a dead server.
+@property (nonatomic) NSTimeInterval healthCheckTimeout;
+/// Failed health checks in a row before the server is restarted. Default 3.
+/// A single timeout must never cost a 40-second guest reboot.
+@property (nonatomic) NSUInteger healthCheckFailuresBeforeRestart;
+/// Delay between health-check retries. Default 2.
+@property (nonatomic) NSTimeInterval healthCheckRetryDelay;
 /// Failures retained across app launches inside the ten-minute crash-loop
 /// window. Test harness instances do not write this production state.
 @property (nonatomic, readonly) NSUInteger recentPersistentFailureCount;
+/// Diagnostic detail of the most recent health check (nil before the first).
+@property (nonatomic, readonly, nullable) DSHProbeResult *lastHealthCheck;
+/// Consecutive health-check failures observed so far.
+@property (nonatomic, readonly) NSUInteger healthCheckFailures;
 
 - (void)start;
 - (void)stop;
@@ -81,6 +95,12 @@ extern NSNotificationName const DSHHarnessStateDidChangeNotification;
 
 /// Runs a health check; if the server stopped answering while the process is
 /// still up (should not happen) it is restarted. Safe to call on foreground.
+///
+/// Tolerates transient failures: a single timeout — routine right after the
+/// app resumes, or while the emulated CPU is loaded — is logged and retried,
+/// and only `healthCheckFailuresBeforeRestart` consecutive failures restart the
+/// server. A failure that proves the listener is gone (connection refused or a
+/// 5xx) restarts immediately, so real crashes still recover on the first try.
 - (void)verifyAliveWithCompletion:(nullable void (^)(BOOL alive))completion;
 
 @end

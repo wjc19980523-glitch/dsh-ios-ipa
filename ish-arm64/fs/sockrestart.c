@@ -84,10 +84,28 @@ void sockrestart_on_suspend() {
         saved->sock = fd_retain(sock);
         saved->proto = sock->socket.protocol;
         unsigned size = sizeof(saved->type);
-        getsockopt(sock->real_fd, SOL_SOCKET, SO_TYPE, &saved->type, &size);
-        assert(size == sizeof(saved->type));
+        // iOS may already have torn the socket down by the time the app is
+        // told it is going to the background, which makes these two calls fail.
+        // Asserting on that used to take the whole process down on every
+        // suspension; instead skip the socket, because a socket we cannot
+        // describe now cannot be rebuilt later either, and the guest can
+        // recover by restarting its server.
+        if (getsockopt(sock->real_fd, SOL_SOCKET, SO_TYPE, &saved->type, &size) < 0 ||
+            size != sizeof(saved->type)) {
+            printk("sockrestart: SO_TYPE for fd %d failed (%s); not saving\n",
+                   sock->real_fd, strerror(errno));
+            fd_close(saved->sock);
+            free(saved);
+            continue;
+        }
         saved->name_len = sizeof(saved->name);
-        getsockname(sock->real_fd, (struct sockaddr *) &saved->name, &saved->name_len);
+        if (getsockname(sock->real_fd, (struct sockaddr *) &saved->name, &saved->name_len) < 0) {
+            printk("sockrestart: getsockname for fd %d failed (%s); not saving\n",
+                   sock->real_fd, strerror(errno));
+            fd_close(saved->sock);
+            free(saved);
+            continue;
+        }
         list_add(&saved_sockets, &saved->saved);
     }
     unlock(&sockrestart_lock);

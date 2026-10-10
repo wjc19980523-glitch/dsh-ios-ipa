@@ -87,6 +87,31 @@ typedef void (^ISHShellCompletionCallback)(ISHShellExecutionResult *result);
 /// @return YES if process was found and signaled
 + (BOOL)killProcess:(int)pid withSignal:(int)signal;
 
+#pragma mark - App lifecycle
+
+/// Marks the guest kernel as booted, enabling the suspend/resume socket hooks.
+/// Call once the kernel is up; before that there are no listening sockets to
+/// preserve and the hooks' locking assumes a live kernel.
++ (void)setGuestBooted:(BOOL)booted;
+
+/// Must be called when the app is about to be suspended.
+///
+/// iOS frees the underlying socket of every listening socket the process owns
+/// while suspended, leaving the guest's `listen()` fd a socket in name only:
+/// `accept()` can never return and a client can never connect. The guest side
+/// of that is invisible to the guest, so a server started before the suspend
+/// looks alive while being permanently unreachable -- which is what made the
+/// harness restart a healthy `dsh-serve` on every return to the foreground.
+///
+/// This records the listening sockets so they can be recreated on resume.
+/// See ish-arm64/fs/sockrestart.c and Apple TN2277.
++ (void)handleAppSuspend;
+
+/// Must be called when the app is resumed, before anything tries to use the
+/// guest's network. Recreates the sockets recorded by -handleAppSuspend and
+/// wakes any thread blocked on accept.
++ (void)handleAppResume;
+
 @end
 
 NS_ASSUME_NONNULL_END

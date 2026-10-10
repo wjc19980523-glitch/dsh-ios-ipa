@@ -7,6 +7,7 @@
 #import "DSHBootCoordinator.h"
 #import "DSHHarness.h"
 #import "DSHRootViewController.h"
+#import "ISHShellExecutor.h"
 
 static NSString *const kCapabilityPreferenceRepair = @"DSHCapabilityPreferenceRepair.2";
 
@@ -53,9 +54,23 @@ static void DSHRepairPreferencesPollutedByLegacyTests(void) {
     return YES;
 }
 
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    // iOS frees the backing socket of every listening fd this process owns
+    // while it is suspended. Without this, the guest's dsh-serve keeps a
+    // listen() fd that looks valid but can never accept again: the app returns
+    // to the foreground, the health check correctly finds it unreachable, and
+    // the harness reboots a guest that was never broken. Recording the
+    // sockets here lets -applicationWillEnterForeground rebuild them.
+    [ISHShellExecutor handleAppSuspend];
+}
+
 - (void)applicationWillEnterForeground:(UIApplication *)application {
-    // Suspension may have broken the guest's sockets. Confirm the server still
-    // answers; DSHHarness restarts it otherwise and the UI reloads.
+    // Rebuild the guest's listening sockets before anything probes them,
+    // then confirm the server answers. DSHHarness tolerates a single late
+    // answer and restarts only after repeated failures, so returning to the
+    // app cannot reboot a healthy guest.
+    // See -[DSHHarness verifyAliveWithCompletion:] and ish-arm64/fs/sockrestart.c.
+    [ISHShellExecutor handleAppResume];
     [DSHHarness.shared verifyAliveWithCompletion:nil];
 }
 

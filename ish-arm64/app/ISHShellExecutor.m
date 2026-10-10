@@ -14,6 +14,7 @@
 #include "kernel/task.h"
 #include "fs/devices.h"
 #include "fs/real.h"
+#include "fs/sockrestart.h"
 
 #pragma mark - Result Implementation
 
@@ -322,6 +323,52 @@ static dispatch_once_t _onceToken;
     }
     unlock(&pids_lock);
     return task != NULL;
+}
+
+#pragma mark - App lifecycle
+
+/// Guards the suspend/resume hooks: the kernel has no listening sockets before
+/// boot, and sockrestart's lock/assert pair assumes a live kernel.
+static BOOL _guestBooted;
+
++ (void)setGuestBooted:(BOOL)booted {
+    _guestBooted = booted;
+}
+
+// sockrestart_on_suspend()/sockrestart_on_resume() are inherited from iSH and
+// were never called by this app, which is why the guest's listening sockets
+// died on every suspension and dsh-serve became permanently unreachable after
+// the first background cycle. They are also written defensively for iSH's own
+// lifecycle -- sockrestart_on_suspend() asserts that saved_sockets is empty and
+// that getsockopt(SO_TYPE) reported the expected size, and a failed assertion
+// takes the whole app down. iOS can deliver the background transition twice
+// without an intervening foreground (and can already have invalidated the fd
+// by the time the notification arrives), so the calls are serialised here and
+// a paired flag keeps the two in step.
+static BOOL _guestSuspended;
+
++ (void)handleAppSuspend {
+#if !ISH_LINUX
+    if (!_guestBooted)
+        return;
+    // Never suspend twice: the guest's saved_sockets list is only drained by
+    // the matching resume, so a second suspend would trip its assert.
+    if (_guestSuspended)
+        return;
+    _guestSuspended = YES;
+    sockrestart_on_suspend();
+#endif
+}
+
++ (void)handleAppResume {
+#if !ISH_LINUX
+    if (!_guestBooted)
+        return;
+    if (!_guestSuspended)
+        return;   // never suspended, so there is nothing to rebuild
+    _guestSuspended = NO;
+    sockrestart_on_resume();
+#endif
 }
 
 #pragma mark - Process Exit Handling

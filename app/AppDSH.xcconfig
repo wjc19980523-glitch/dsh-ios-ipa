@@ -44,24 +44,24 @@ ARCHS[sdk=iphonesimulator*] = arm64
 EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64 i386
 
 // DSHTests links against DSH.app/DSH through -bundle_loader, so it can only
-// reach symbols the executable exports. On iOS an executable exports no plain C
-// globals at all unless asked, and GCC_SYMBOLS_PRIVATE_EXTERN only relaxes that
-// for Objective-C classes. Each entry below was an "Undefined symbols for
-// architecture arm64" link failure, reported *after* every source file had
-// compiled cleanly -- which is what makes this class of mistake expensive.
+// reach symbols that executable exports. Two different mechanisms are needed,
+// and using the wrong one for a symbol class breaks the *other* class:
 //
-// The list is exactly the C symbols the tests read, no more:
-//   DSHHarnessTokenQueryKey / DSHHarnessAuthCookiePrefix  handshake protocol facts
-//   DSHDisplayValue        the text sanitiser DSHDisplayValueTests exercises
-//   DSHHarnessStateName    maps state to a name, asserted verbatim
-//   ...StateDidChangeNotification, ...LogBufferDidChangeNotification,
-//   ...TurnWasInterruptedNotification   the tests observe these by name
+//   Objective-C classes   -> GCC_SYMBOLS_PRIVATE_EXTERN = NO
+//   plain C globals       -> __attribute__((visibility("default"))) at the
+//                            declaration, i.e. the DSH_EXPORTED macro
 //
-// Every symbol must also be marked DSH_EXPORTED where it is declared, or it
-// stays hidden and this list has nothing to name. Adding a symbol here without
-// that attribute silently does nothing.
+// Do NOT add an exported-symbol allow-list to OTHER_LDFLAGS here. It is a trap:
+// the moment ld sees such a flag it switches to allow-list mode and exports
+// *only* the names given. Adding two of them for the handshake constants
+// silently removed all 25 Objective-C classes from the app's export table, and
+// DSHTests failed to link with 30 undefined symbols instead of 1 -- measured
+// between run 38066038064 (1 undefined, no allow-list) and run 38066579010
+// (30 undefined, allow-list of two). GCC_SYMBOLS_PRIVATE_EXTERN=NO was already
+// doing the right thing for the classes; the allow-list undid it.
 //
-// One OTHER_LDFLAGS line: a second assignment would discard the first, taking
-// the framework list with it.
+// A plain C global in an executable is not covered by GCC_SYMBOLS_PRIVATE_EXTERN,
+// which is why the attribute is required rather than optional. Both halves are
+// asserted in tests/scripts-test.sh.
 GCC_SYMBOLS_PRIVATE_EXTERN = NO
-OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-exported_symbol,_DSHHarnessTokenQueryKey -Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix -Wl,-exported_symbol,_DSHDisplayValue -Wl,-exported_symbol,_DSHHarnessStateName -Wl,-exported_symbol,_DSHHarnessStateDidChangeNotification -Wl,-exported_symbol,_DSHLogBufferDidChangeNotification -Wl,-exported_symbol,_DSHTurnWasInterruptedNotification
+OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos

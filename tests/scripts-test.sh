@@ -150,30 +150,42 @@ grep -q '04b-build-for-testing.log' .github/workflows/build-ipa.yml || {
 
 printf 'ok  scripts: the workflow type-checks the DSHTests bundle\n'
 
-# DSHTests is hosted by the app and links against it, so any plain C global the
-# tests read must be exported from the executable. Objective-C classes link via
-# -bundle_loader regardless, which is why this only surfaced once a test
-# referenced a constant: every file compiled, and the link failed.
+# DSHTests is hosted by the app and links against DSH.app/DSH, so it can only
+# reach symbols the executable exports. Two symbol classes need two different
+# mechanisms, and this block asserts both -- because using the wrong one does
+# not fail loudly, it breaks the other class.
+#
+#   Objective-C classes  -> GCC_SYMBOLS_PRIVATE_EXTERN = NO
+#   plain C globals      -> __attribute__((visibility("default"))) on the
+#                           declaration (the DSH_EXPORTED macro)
+#
+# -Wl,-exported_symbol is the trap. One occurrence puts ld in allow-list mode:
+# only the named symbols are exported and everything else is hidden. Adding two
+# flags for the handshake constants silently dropped all 25 Objective-C classes
+# from the export table, turning a 1-undefined-symbol link failure into a
+# 30-undefined-symbol one (run 38066038064 -> run 38066579010).
+grep -q 'GCC_SYMBOLS_PRIVATE_EXTERN *= *NO' app/AppDSH.xcconfig || {
+  echo 'not ok: GCC_SYMBOLS_PRIVATE_EXTERN is no longer NO; the tests cannot see any DSH class' >&2
+  exit 1
+}
+if grep -q -- '-Wl,-exported_symbol' app/AppDSH.xcconfig; then
+  echo 'not ok: -Wl,-exported_symbol is back in AppDSH.xcconfig. It puts ld in' >&2
+  echo '        allow-list mode and hides every symbol not named, including all' >&2
+  echo '        Objective-C classes. Use DSH_EXPORTED instead.' >&2
+  exit 1
+fi
+
+printf 'ok  scripts: symbol export uses the attribute, not the linker allow-list\n'
+
+# Every plain C symbol the tests read must carry DSH_EXPORTED. Without it the
+# symbol stays hidden even though GCC_SYMBOLS_PRIVATE_EXTERN is NO -- that
+# setting does not reach plain C globals in an executable, which is how the
+# first link failure happened.
 grep -q 'DSHHarnessAuthCookiePrefix' app/DSHHarnessAuth.h || {
   echo 'not ok: DSHHarnessAuth no longer declares the cookie prefix the test server mimics' >&2
   exit 1
 }
-grep -q 'visibility("default")' app/DSHHarnessAuth.h || {
-  echo 'not ok: the handshake constants are no longer marked for export; DSHTests will fail to link' >&2
-  exit 1
-}
-grep -q -- '-Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix' app/AppDSH.xcconfig || {
-  echo 'not ok: the app no longer exports the cookie-prefix symbol to the test bundle' >&2
-  exit 1
-}
 
-printf 'ok  scripts: the handshake constants are exported to the test bundle\n'
-
-# The same trap caught a second symbol on the next run: DSHDisplayValue is a
-# plain C function in DSHCallConfirmation, read by DSHDisplayValueTests. Rather
-# than rediscover this one link error per CI cycle, the whole set the tests
-# read is asserted here. Adding a test that touches a new C symbol without
-# exporting it now fails fast and locally, naming the symbol.
 for sym in \
   DSHHarnessTokenQueryKey \
   DSHHarnessAuthCookiePrefix \
@@ -183,31 +195,22 @@ for sym in \
   DSHLogBufferDidChangeNotification \
   DSHTurnWasInterruptedNotification
 do
-  grep -q -- "-Wl,-exported_symbol,_$sym" app/AppDSH.xcconfig || {
-    echo "not ok: $sym is not exported; DSHTests will fail to link against it" >&2
-    exit 1
-  }
-done
-
-# ...and the other direction: an -exported_symbol with no DSH_EXPORTED on the
-# declaration is a no-op that reads as if it worked. ld warns, but only if you
-# read the log, so check the pairing.
-for sym in \
-  DSHDisplayValue \
-  DSHHarnessStateName \
-  DSHHarnessStateDidChangeNotification \
-  DSHLogBufferDidChangeNotification \
-  DSHTurnWasInterruptedNotification
-do
   if ! grep -q "DSH_EXPORTED[^;]*$sym" app/*.h; then
-    echo "not ok: $sym is in -exported_symbol but not marked DSH_EXPORTED in any header" >&2
+    echo "not ok: $sym is read by DSHTests but not marked DSH_EXPORTED; the link will fail" >&2
     exit 1
   fi
 done
 
-grep -q 'ifndef DSH_EXPORTED' app/DSHHarnessAuth.h || {
-  echo 'not ok: the DSH_EXPORTED macro is no longer guarded; four headers defining it would clash' >&2
+grep -q 'visibility("default")' app/DSHHarnessAuth.h || {
+  echo 'not ok: the DSH_EXPORTED macro no longer expands to a visibility attribute' >&2
   exit 1
 }
 
-printf 'ok  scripts: every C symbol the tests read is exported and marked\n'
+# Five headers define the macro. The guard is what keeps that from being a
+# redefinition error the moment two of them are imported together.
+grep -q 'ifndef DSH_EXPORTED' app/DSHHarnessAuth.h || {
+  echo 'not ok: the DSH_EXPORTED macro is no longer guarded; five headers defining it would clash' >&2
+  exit 1
+}
+
+printf 'ok  scripts: every C symbol the tests read is marked for export\n'

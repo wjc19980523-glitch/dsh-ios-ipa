@@ -251,6 +251,32 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             archive 2>&1 | tee cilogs/04-archive.log
 
+      # `archive` only builds the DSH target. The DSHTests target is part of the
+      # DSH scheme's TestAction, so it is compiled by `build-for-testing` and
+      # by nothing else in this workflow -- which is how the authentication
+      # tests reached a device-less CI without ever seeing a compiler. Building
+      # for testing here is cheap (the app target is already up to date) and it
+      # is the only thing that type-checks the unit tests.
+      - name: Build unit tests (type-checks DSHTests)
+        run: |
+          set -euo pipefail
+          mkdir -p cilogs
+          set -o pipefail
+          xcodebuild \
+            -project DSH.xcodeproj \
+            -scheme DSH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build-for-testing 2>&1 | tee cilogs/04b-build-for-testing.log
+
       - name: Package unsigned IPA
         id: package
         run: |

@@ -134,3 +134,18 @@ grep -q 'only passed because BOOT_TIMEOUT was raised' tests/rootfs-test.sh || {
 }
 
 printf 'ok  scripts: the guest boot reports a phase split instead of only a timeout bound\n'
+
+# The DSHTests target is only compiled by build-for-testing. `archive` builds the
+# DSH target alone, so without this step the unit tests are shipped to CI
+# without ever seeing a compiler -- which is exactly what happened to the
+# authentication tests on their first three runs.
+grep -q 'build-for-testing' .github/workflows/build-ipa.yml || {
+  echo 'not ok: the workflow no longer builds the test bundle; DSHTests would stop being type-checked' >&2
+  exit 1
+}
+grep -q '04b-build-for-testing.log' .github/workflows/build-ipa.yml || {
+  echo 'not ok: the build-for-testing log is not captured' >&2
+  exit 1
+}
+
+printf 'ok  scripts: the workflow type-checks the DSHTests bundle\n'

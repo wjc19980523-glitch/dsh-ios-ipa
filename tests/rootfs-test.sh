@@ -87,6 +87,18 @@ for native_module in koffi node-pty sharp; do
     check "native module $native_module is staged" \
           test -d "$WORK/fakefs/data/usr/local/lib/node_modules/$native_module"
 done
+# koffi must ship the libc probe.  dsh 0.2.0-rc.2 pins koffi 3.1.1, whose Linux
+# loader requires the GLIBC binary first and only falls back to the musl one from
+# a catch block -- but a SIGILL is a process signal, not a JS exception, so the
+# fallback never runs and `require("koffi")` kills the guest at
+# `illegal instruction at 0x69850`.  rootfs/staging/package.json overrides it to
+# 3.1.6, which reads the ELF interpreter and chooses correctly.  Assert on the
+# staged loader itself so the regression cannot come back silently.
+koffi_loader="$WORK/fakefs/data/usr/local/lib/node_modules/@koromix/koffi-linux-arm64/index.js"
+check "koffi loader probes libc instead of assuming glibc" \
+      grep -q 'ld-musl-' "$koffi_loader"
+koffi_version="$(node -p "require('$WORK/fakefs/data/usr/local/lib/node_modules/koffi/package.json').version" 2>/dev/null || true)"
+check "koffi is not the 3.1.1 regression ($koffi_version)" test "$koffi_version" != "3.1.1"
 check "dsh-selftest passes"     grep -q 'SELFTEST OK' "$WORK/sanity.txt"
 # The 0.2.x boot path installs a runtime module-resolution interception whose
 # original code called the node-addon-require-builtin native addon

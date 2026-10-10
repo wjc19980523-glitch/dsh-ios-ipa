@@ -99,7 +99,38 @@ for native_module in koffi node-pty sharp; do
         exit 1
     }
 done
-log "staged dsh $installed_dsh_version with native modules present"
+
+# koffi must carry the libc probe, or the guest SIGILLs on the first require.
+#
+# dsh 0.2.0-rc.2 pins `"koffi": "3.1.1"`, and 3.1.1's Linux loader requires
+# ./linux_arm64/koffi.node (the GLIBC binary) first and only falls back to
+# ./musl_arm64/koffi.node in a catch block.  Under the iSH JIT that load is a
+# hard `illegal instruction at 0x69850: insn=0x00000000` -- a SIGILL is a
+# process signal, not a JS exception, so the catch never runs and the guest dies
+# inside `require("koffi")` before anything else starts.  dsh 0.1.x declared
+# `"koffi": "^3.1.0"` and so resolved 3.1.5, which reads the ELF PT_INTERP and
+# picks ld-musl-* correctly; the exact pin in 0.2.x is what regressed.
+#
+# rootfs/staging/package.json therefore overrides koffi to 3.1.6.  Assert both
+# halves of that here: the version, and the probe actually being in the shipped
+# loader.  Without this the failure only shows up as a guest crash.
+koffi_version=$(node -p "require('./stage/node_modules/koffi/package.json').version" 2>/dev/null || true)
+if [ "$koffi_version" = "3.1.1" ]; then
+    echo "staged koffi is 3.1.1, whose loader tries the glibc binary first and" >&2
+    echo "SIGILLs under the iSH JIT -- rootfs/staging/package.json must override it" >&2
+    exit 1
+fi
+koffi_loader="stage/node_modules/@koromix/koffi-linux-arm64/index.js"
+[ -f "$koffi_loader" ] || {
+    echo "missing $koffi_loader" >&2
+    exit 1
+}
+grep -q 'ld-musl-' "$koffi_loader" || {
+    echo "staged koffi ($koffi_version) has no libc probe in $koffi_loader;" >&2
+    echo "it would load the glibc binary from Alpine and SIGILL" >&2
+    exit 1
+}
+log "staged dsh $installed_dsh_version with native modules present (koffi $koffi_version, libc probe OK)"
 
 # ---------------------------------------------------------------------------
 # Patch dsh-app-boot so its runtime module-resolution interception can reach

@@ -416,6 +416,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: guest-verification-logs
-          path: cilogs-verify/
+          path: |
+            cilogs-verify/
+            build/rootfs-test/dsh-serve.log
+            build/rootfs-test/*.txt
+            build/rootfs-test/*.yml
+            build/rootfs-test/*.log
           if-no-files-found: warn
           retention-days: 30

@@ -248,12 +248,30 @@ echo "== boot dsh-serve on 127.0.0.1:$PORT (timeout ${BOOT_TIMEOUT}s)"
 start=$(date +%s)
 ( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
 up=0
-for _ in $(seq 1 "$BOOT_TIMEOUT"); do
+prev_bytes=0
+for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
     if curl -fs -o "$WORK/index.html" "http://127.0.0.1:$PORT/"; then up=1; break; fi
+    # A heartbeat every 20s separates "the guest is slow" from "the guest is
+    # stuck": if the byte count keeps moving, the boot is progressing and the
+    # timeout is simply too tight for an emulated CPU; if it stops, the boot
+    # deadlocked and the log's last line names where.
+    if [ $((i % 20)) = 0 ]; then
+        now_bytes=$(wc -c < "$WORK/dsh-serve.log" 2>/dev/null || echo 0)
+        echo "     [${i}s] dsh-serve.log ${now_bytes} bytes ($([ "$now_bytes" = "$prev_bytes" ] && echo stalled || echo growing))"
+        prev_bytes=$now_bytes
+    fi
 done
 elapsed=$(( $(date +%s) - start ))
 check "web UI reachable from host loopback (${elapsed}s)" test "$up" = 1
+if [ "$up" != 1 ]; then
+    # The timeout burns five minutes, so surface why instead of making the next
+    # run wait for it again. The serve log is short: dsh prints its boot
+    # progress and usually the reason it never bound the port.
+    echo "     --- dsh-serve.log (last 60 lines) ---"
+    tail -60 "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/     /'
+    echo "     --- end dsh-serve.log ---"
+fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"
 plugin_url=$(grep -o '/plugins/[^"]*client.js?rev=[0-9a-f]*' "$WORK/index.html" | head -1)
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT$plugin_url")

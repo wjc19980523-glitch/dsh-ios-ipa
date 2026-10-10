@@ -4,6 +4,7 @@
 //
 
 #import "DSHLogBuffer.h"
+#import "DSHHarnessAuth.h"
 #import <UIKit/UIKit.h>
 #import "DSHStartupMetrics.h"
 
@@ -85,25 +86,31 @@ NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHLogBufferDidCh
 }
 
 + (NSString *)redactedLine:(NSString *)line {
-    NSMutableString *safe = [line mutableCopy];
+    // The launch token goes first and is removed by value rather than by key:
+    // dsh prints it as a query parameter, not as `SOMETHING=secret`, so the
+    // key/value heuristic below would walk straight past it. Under dsh 0.2.x
+    // this line is written to every launch log and included in diagnostics
+    // reports the user can share, so it is the one that matters most.
+    NSString *safe = [DSHHarnessAuth redactingTokenInLine:line];
+    NSMutableString *mutable = [safe mutableCopy];
     NSArray<NSString *> *keys = @[@"DEEPSEEK_API_KEY", @"DSH_HOST_BRIDGE_TOKEN", @"Authorization: Bearer"];
     for (NSString *key in keys) {
-        NSRange search = NSMakeRange(0, safe.length);
+        NSRange search = NSMakeRange(0, mutable.length);
         while (search.length > 0) {
-            NSRange hit = [safe rangeOfString:key options:NSCaseInsensitiveSearch range:search];
+            NSRange hit = [mutable rangeOfString:key options:NSCaseInsensitiveSearch range:search];
             if (hit.location == NSNotFound)
                 break;
             NSUInteger valueStart = NSMaxRange(hit);
-            while (valueStart < safe.length && [@" =:\t" containsString:[safe substringWithRange:NSMakeRange(valueStart, 1)]])
+            while (valueStart < mutable.length && [@" =:\t" containsString:[mutable substringWithRange:NSMakeRange(valueStart, 1)]])
                 valueStart++;
             NSUInteger valueEnd = valueStart;
-            while (valueEnd < safe.length && ![NSCharacterSet.whitespaceAndNewlineCharacterSet characterIsMember:[safe characterAtIndex:valueEnd]])
+            while (valueEnd < mutable.length && ![NSCharacterSet.whitespaceAndNewlineCharacterSet characterIsMember:[mutable characterAtIndex:valueEnd]])
                 valueEnd++;
-            [safe replaceCharactersInRange:NSMakeRange(valueStart, valueEnd - valueStart) withString:@"<redacted>"];
-            search = NSMakeRange(MIN(NSMaxRange(hit) + 10, safe.length), safe.length - MIN(NSMaxRange(hit) + 10, safe.length));
+            [mutable replaceCharactersInRange:NSMakeRange(valueStart, valueEnd - valueStart) withString:@"<redacted>"];
+            search = NSMakeRange(MIN(NSMaxRange(hit) + 10, mutable.length), mutable.length - MIN(NSMaxRange(hit) + 10, mutable.length));
         }
     }
-    return safe;
+    return mutable;
 }
 
 + (BOOL)isNoiseLine:(NSString *)line {

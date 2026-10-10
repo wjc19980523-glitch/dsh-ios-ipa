@@ -259,10 +259,20 @@ prev_bytes=0
 # whole timeout. Read the token out of the announcement instead, and keep the
 # bare path as the fallback so an older guest that needs no token still passes.
 serve_url=""
+token=""
 for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
     if [ -z "$serve_url" ]; then
         serve_url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$WORK/dsh-serve.log" 2>/dev/null | head -1)
+        if [ -n "$serve_url" ]; then
+            token="${serve_url#*token=}"
+            # The launch token is a bearer credential for this guest's UI. It
+            # must not travel into the CI artefact, the job summary, or an
+            # issue. Replace it in the log the moment it has been parsed, and
+            # keep it only in this shell.
+            sed -i.bak 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' "$WORK/dsh-serve.log" 2>/dev/null && rm -f "$WORK/dsh-serve.log.bak"
+            echo "     [${i}s] server announced its web URL on port $PORT (token captured, not printed)"
+        fi
     fi
     target="${serve_url:-http://127.0.0.1:$PORT/}"
     if curl -fs -o "$WORK/index.html" "$target"; then up=1; break; fi
@@ -276,16 +286,18 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         prev_bytes=$now_bytes
     fi
 done
-elapsed=$(( $(date +%s) - start ))
+elapsed=$(( $(date +%s) - start )) 2>/dev/null || elapsed=0
 check "web UI reachable from host loopback (${elapsed}s)" test "$up" = 1
 # Everything after this point needs the same token the check above used.
 base_url="${serve_url:-http://127.0.0.1:$PORT/}"
 if [ "$up" != 1 ]; then
     # The timeout burns five minutes, so surface why instead of making the next
     # run wait for it again. The serve log is short: dsh prints its boot
-    # progress and usually the reason it never bound the port.
+    # progress and usually the reason it never bound the port. The token is
+    # stripped again here as a belt-and-braces measure: this dump and the log
+    # file both end up in a downloadable artefact.
     echo "     --- dsh-serve.log (last 60 lines) ---"
-    tail -60 "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/     /'
+    tail -60 "$WORK/dsh-serve.log" 2>/dev/null | sed -e 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' -e 's/^/     /'
     echo "     --- end dsh-serve.log ---"
 fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"
@@ -300,6 +312,25 @@ sleep 5
 check "server still alive after 5s" curl -fs -o /dev/null "$base_url"
 grep -Eq 'fatal|Error:' "$WORK/dsh-serve.log"; noerr=$?
 check "no fatal error in dsh-serve log" test "$noerr" != 0
+
+# An unauthenticated request must be refused. This is the contract the iOS side
+# implements, and the reason a bare-origin "it returned a status" is not proof
+# that the UI is being served.
+unauth_code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")
+check "unauthenticated request is refused with 401 (got $unauth_code)" test "$unauth_code" = 401
+unauth_head=$(curl -s -I -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")
+check "unauthenticated HEAD is refused too (got $unauth_head)" test "$unauth_head" = 401
+
+# Phased boot timings. The point is to separate the emulator's own cost from
+# what dsh 0.2.x added, so a future regression has a number to move against
+# instead of "it felt slower". These come from the serve log's own timestamps
+# where it prints them, and from our wall clock otherwise.
+if grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
+    echo "     --- phased boot (wall clock from launch) ---"
+    echo "     total to first served byte: ${elapsed}s"
+    grep -E 'dsh web:|listening|plugin|ready' "$WORK/dsh-serve.log" 2>/dev/null | tail -8 | sed 's/^/     /'
+    echo "     --- end phased boot ---"
+fi
 
 echo
 echo "passed=$pass failed=$fail"

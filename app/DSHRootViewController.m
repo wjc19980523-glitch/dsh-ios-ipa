@@ -34,6 +34,12 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 @property (nonatomic) uint16_t loadedPort;
 @property (nonatomic) BOOL pageLoaded;
 @property (nonatomic) NSUInteger pageLoadGeneration;
+/// Authentication generation the in-flight (or last successful) navigation
+/// used. The harness bumps its own counter whenever the server mints a new
+/// launch token, so a mismatch means the page was loaded with a credential
+/// that no longer applies and the next load must redo the handshake.
+@property (nonatomic) NSUInteger loadedAuthGeneration;
+@property (nonatomic) BOOL sawHarnessContent;
 @property (nonatomic) NSMutableDictionary<NSValue *, NSURL *> *downloadDestinations;
 @end
 
@@ -190,8 +196,25 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     restart.attributes = UIMenuElementAttributesDestructive;
     UIAction *repair = [UIAction actionWithTitle:@"Repair Linux Environment" image:[UIImage systemImageNamed:@"wrench.and.screwdriver"] identifier:@"dsh.repair" handler:^(UIAction *a) { [weakSelf confirmRepair]; }];
     UIAction *safari = [UIAction actionWithTitle:@"Open in Safari" image:[UIImage systemImageNamed:@"safari"] identifier:@"dsh.safari" handler:^(UIAction *a) {
-        NSURL *url = DSHHarness.shared.baseURL;
-        if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+        // Safari has its own cookie jar, so opening the bare origin would land
+        // on the same 401 page the web view used to show. Hand it the entry
+        // URL instead: Safari performs the token exchange itself and then has
+        // the cookie for the authority, exactly like the in-app web view.
+        //
+        // This does pass the launch token to another application through the
+        // URL. That is inherent to the feature — it is a loopback server only
+        // this device can reach, and the user asked for this browser — but it
+        // is still never logged.
+        NSURL *url = DSHHarness.shared.authenticatedEntryURL;
+        if (url == nil) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Not ready yet"
+                message:@"The harness has not finished announcing its web address. Try again once the interface has loaded."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [weakSelf presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
     }];
     UIAction *about = [UIAction actionWithTitle:@"About DSH" image:[UIImage systemImageNamed:@"info.circle"] identifier:@"dsh.about" handler:^(UIAction *a) { [weakSelf presentAbout]; }];
     NSMutableArray<UIMenuElement *> *children = [NSMutableArray arrayWithObjects:reload, terminal, nil];
@@ -270,7 +293,7 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
             self.pageLoaded = NO;
             break;
         case DSHHarnessStateReady:
-            if (!self.pageLoaded || self.loadedPort != h.port)
+            if ([self needsReauthentication])
                 [self loadHarness];
             else
                 [self.overlay hide];
@@ -285,17 +308,50 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 }
 
 - (void)loadHarness {
-    NSURL *url = DSHHarness.shared.baseURL;
-    if (url == nil)
+    // Never load the bare origin. Under dsh 0.2.x it answers 401 with a
+    // one-line plain-text body, which is what "the app shows a blank page and
+    // the health checks all report green" looked like. Entering through the
+    // authenticated URL is the handshake: the server answers 303 with
+    // `location: ./` and the auth cookie, and every later load of the same
+    // authority is served normally.
+    NSURL *url = DSHHarness.shared.authenticatedEntryURL;
+    if (url == nil) {
+        // The token has not been announced yet. Say so rather than loading a
+        // URL that is known to fail; -applyHarnessState runs again when the
+        // harness captures the token or changes state.
+        [self.overlay showStarting:@"Authenticating with the harness…"];
+        [self.overlay setProgressStartedAt:DSHHarness.shared.launchStartedAt
+                                  expected:DSHHarness.shared.expectedStartupDuration];
         return;
+    }
     [self.overlay showStarting:@"Loading the interface…"];
     [self.overlay setProgressStartedAt:nil expected:0];
     self.loadedPort = DSHHarness.shared.port;
+    self.loadedAuthGeneration = DSHHarness.shared.authenticationGeneration;
     self.pageLoaded = NO;
+    self.sawHarnessContent = NO;
     self.pageLoadGeneration++;
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     [self.webView loadRequest:req];
+}
+
+/// Whenever the harness captures a new launch token — the first boot, a
+/// restart, a crash recovery — the page in the web view was authorised by a
+/// credential that no longer exists on the server. It may keep working (the
+/// cookie is signed with a per-installation secret and survives a restart on
+/// the same authority) or it may not (the page was never authenticated, or the
+/// port changed). Re-entering through the current entry URL is correct in both
+/// cases: when the cookie is still valid the exchange is a cheap redirect,
+/// and when it is not this is the only way back in.
+- (BOOL)needsReauthentication {
+    if (DSHHarness.shared.state != DSHHarnessStateReady)
+        return NO;
+    if (!self.pageLoaded)
+        return YES;
+    if (self.loadedPort != DSHHarness.shared.port)
+        return YES;
+    return self.loadedAuthGeneration != DSHHarness.shared.authenticationGeneration;
 }
 
 - (void)sceneDidBecomeActive {
@@ -478,8 +534,11 @@ static const NSTimeInterval kActivityIndicatorVisible = 6;
 #pragma mark - WKNavigationDelegate
 
 - (BOOL)isHarnessURL:(NSURL *)url {
-    NSURL *base = DSHHarness.shared.baseURL;
-    return base != nil && [url.host isEqualToString:base.host] && [url.port isEqual:base.port ?: @80];
+    // Authority-based, so the authenticated entry URL (origin + ?token=) is
+    // recognised as ours and the navigation policy does not try to hand it to
+    // Safari. Handing the token to another app would also be a credential
+    // leak; keeping the comparison here means the check cannot drift.
+    return [DSHHarness.shared ownsURL:url];
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -498,6 +557,23 @@ static const NSTimeInterval kActivityIndicatorVisible = 6;
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)response decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
+    if ([response.response isKindOfClass:NSHTTPURLResponse.class]) {
+        NSHTTPURLResponse *http = (NSHTTPURLResponse *) response.response;
+        // An authenticated navigation must not leave a 401 body on screen.
+        // Catching it here, before the response is committed, is what makes
+        // the recovery invisible: re-enter through the current entry URL
+        // instead of rendering "dsh web authentication required".
+        if (http.statusCode == 401 || http.statusCode == 407) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:
+                @"[dsh-ios] the web view was refused (HTTP %ld) on %@; re-entering through the authenticated URL",
+                (long) http.statusCode, response.response.URL.path.length ? response.response.URL.path : @"/"]];
+            if ([DSHHarness.shared noteAuthenticationFailureForURL:response.response.URL]) {
+                decisionHandler(WKNavigationResponsePolicyCancel);
+                [self loadHarness];
+                return;
+            }
+        }
+    }
     if (!response.canShowMIMEType) {
         decisionHandler(WKNavigationResponsePolicyDownload);
         return;
@@ -517,6 +593,27 @@ static const NSTimeInterval kActivityIndicatorVisible = 6;
     [DSHHarness.shared.log append:[NSString stringWithFormat:@"[perf] web interface loaded (harness %.3fs)", DSHHarness.shared.lastStartupDuration]];
     [DSHStartupMetrics.shared mark:@"web_ready"];
     [self.overlay hide];
+}
+
+/// The client is a single-page app, so the first `didFinish` is the empty
+/// shell; the UI only exists once the client plugin has rendered into it. That
+/// distinction is what tells a successful login apart from a 401 page that
+/// still counts as a finished navigation.
+- (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+    __weak typeof(self) weakSelf = self;
+    [webView evaluateJavaScript:@"document.documentElement.outerHTML.length"
+              completionHandler:^(id result, NSError *error) {
+        typeof(self) self = weakSelf;
+        if (self == nil || error != nil)
+            return;
+        NSNumber *length = [result isKindOfClass:NSNumber.class] ? result : nil;
+        if (length.integerValue > 4000) {
+            self.sawHarnessContent = YES;
+            [DSHHarness.shared.log append:[NSString stringWithFormat:
+                @"[dsh-ios] web interface rendered (%ld bytes of document)", (long) length.integerValue]];
+            [DSHStartupMetrics.shared mark:@"web_rendered"];
+        }
+    }];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {

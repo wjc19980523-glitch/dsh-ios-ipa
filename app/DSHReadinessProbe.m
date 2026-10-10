@@ -26,7 +26,17 @@
     // can be mid-boot, mid-GC, or competing with the UI for the CPU and still
     // be perfectly healthy. Only a refused/reset connection or a real 5xx
     // proves nothing is serving.
+    //
+    // A 401 is equally not evidence: dsh 0.2.x answers every request without a
+    // valid launch-token cookie with 401, including the ones this app makes
+    // before it has authenticated. Treating that as "dead" would restart a
+    // perfectly healthy guest on every cold start -- and worse, would do it
+    // again on every restart, because a fresh process mints a fresh token.
     return self.outcome == DSHProbeOutcomeUnreachable || self.outcome == DSHProbeOutcomeBadStatus;
+}
+
+- (BOOL)requiresAuthentication {
+    return self.outcome == DSHProbeOutcomeUnauthorized;
 }
 
 - (NSString *)summary {
@@ -43,6 +53,9 @@
                                               self.method, self.duration];
         case DSHProbeOutcomeCancelled:
             return @"cancelled before it completed";
+        case DSHProbeOutcomeUnauthorized:
+            return [NSString stringWithFormat:@"HTTP %ld via %@ in %.2fs (authentication required; the listener is up)",
+                                              (long) self.statusCode, self.method, self.duration];
     }
     return @"unknown";
 }
@@ -134,9 +147,12 @@
         BOOL ok = NO;
         if ([response isKindOfClass:NSHTTPURLResponse.class]) {
             NSInteger code = ((NSHTTPURLResponse *) response).statusCode;
-            // HEAD may be refused with 405 by some servers; any HTTP answer
-            // still proves the listener is up.
-            ok = code > 0 && code < 500;
+            // 2xx/3xx only. This used to accept anything below 500, which
+            // under dsh 0.2.x made the poll report "ready" the instant the
+            // server started answering 401 -- a UI that cannot be used. The
+            // distinction matters here as much as in the one-shot check: the
+            // caller is waiting to load a page, not to see a port bound.
+            ok = DSHProbeOutcomeForStatusCode(code) == DSHProbeOutcomeAnswered;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) self = weakSelf;
@@ -182,6 +198,26 @@ static DSHProbeOutcome DSHProbeOutcomeForError(NSError *error) {
     if ([error.domain isEqualToString:NSPOSIXErrorDomain])
         return DSHProbeOutcomeUnreachable;
     return DSHProbeOutcomeUnreachable;
+}
+
+/// Classify an HTTP status. Kept in one place because the readiness poll and
+/// the one-shot health check used to have their own copies of a `< 500 means
+/// healthy` test, and both of them were wrong once dsh started answering 401.
+///
+///   2xx/3xx  the document was served to this caller
+///   304      (not reachable: both request paths disable caching)
+///   401/407  the listener is up but is refusing this caller's credentials
+///   other 4xx the listener is up and answering (404 on `/favicon.ico` is not
+///           a dead server)
+///   5xx      a real server-side failure
+static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
+    if (code <= 0)
+        return DSHProbeOutcomeUnreachable;
+    if (code >= 500)
+        return DSHProbeOutcomeBadStatus;
+    if (code == 401 || code == 407)
+        return DSHProbeOutcomeUnauthorized;
+    return DSHProbeOutcomeAnswered;
 }
 
 /// One request round with a hard deadline enforced by us rather than trusting
@@ -260,8 +296,11 @@ static DSHProbeOutcome DSHProbeOutcomeForError(NSError *error) {
 
         if ([response isKindOfClass:NSHTTPURLResponse.class]) {
             NSInteger code = ((NSHTTPURLResponse *) response).statusCode;
+            // 2xx/3xx only: the document was actually handed over. A 401 means
+            // dsh answered but is withholding the UI behind its launch token,
+            // which is a "go and authenticate", never a "ready".
             result.statusCode = code;
-            result.outcome = code >= 500 ? DSHProbeOutcomeBadStatus : DSHProbeOutcomeAnswered;
+            result.outcome = DSHProbeOutcomeForStatusCode(code);
             completion(result);
             return;
         }
@@ -296,7 +335,7 @@ static DSHProbeOutcome DSHProbeOutcomeForError(NSError *error) {
             if ([retryResponse isKindOfClass:NSHTTPURLResponse.class]) {
                 NSInteger code = ((NSHTTPURLResponse *) retryResponse).statusCode;
                 retry.statusCode = code;
-                retry.outcome = code >= 500 ? DSHProbeOutcomeBadStatus : DSHProbeOutcomeAnswered;
+                retry.outcome = DSHProbeOutcomeForStatusCode(code);
             } else {
                 // Prefer the GET diagnosis unless it was merely late, in which
                 // case the HEAD timeout is the more informative story.

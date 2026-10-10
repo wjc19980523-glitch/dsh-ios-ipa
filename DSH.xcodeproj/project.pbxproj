@@ -37,6 +37,8 @@
 		2C179A1609D535CC1C926F4E /* DSHDisplayValueTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A18ABFAAA83A3F4BDA0923EE /* DSHDisplayValueTests.m */; };
 		2C91FE8DC56A57089F361542 /* rgb.png in Resources */ = {isa = PBXBuildFile; fileRef = EB9A45C7D65DAE01ED336E6F /* rgb.png */; };
 		2CF3CB69F0654A3284D6A3D3 /* DSHHarness.m in Sources */ = {isa = PBXBuildFile; fileRef = 8DBF761589E69D4C06A2039F /* DSHHarness.m */; };
+		880AA5FAA72BAB0FE33C4F3A /* DSHHarnessAuth.m in Sources */ = {isa = PBXBuildFile; fileRef = 2E0F3A6846F90B1497CCB548 /* DSHHarnessAuth.m */; };
+		C14BF597C19AABF12DF1870D /* DSHHarnessAuthenticationTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 6265E8AF30EA0709577796B5 /* DSHHarnessAuthenticationTests.m */; };
 		2EA6D78B99645EEBEC984D1F /* DSHContactsCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = E85A2FB4F24F775254CC6C7A /* DSHContactsCapability.m */; };
 		3127511DE08ECF1ACDD03995 /* DSHPhotosCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A399ED5187E12598E07C7AE /* DSHPhotosCapability.m */; };
 		35927E4C690D0399A0506280 /* ThemesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A2C577C726D2155CD2A6BA19 /* ThemesViewController.m */; };
@@ -292,6 +294,9 @@
 		8BB5F98EA25193DADE0552D7 /* DSHTestHTTPServer.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTestHTTPServer.m; sourceTree = "<group>"; };
 		8C56AD7CA395B458541B0204 /* DSHDeviceCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHDeviceCapability.m; sourceTree = "<group>"; };
 		8DBF761589E69D4C06A2039F /* DSHHarness.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHarness.m; sourceTree = "<group>"; };
+		2E0F3A6846F90B1497CCB548 /* DSHHarnessAuth.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHarnessAuth.m; sourceTree = "<group>"; };
+		A39D8F3FC2346684D15CD17A /* DSHHarnessAuth.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHHarnessAuth.h; sourceTree = "<group>"; };
+		6265E8AF30EA0709577796B5 /* DSHHarnessAuthenticationTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHarnessAuthenticationTests.m; sourceTree = "<group>"; };
 		8EFDD3153344302B070D40F1 /* home.patch.yml */ = {isa = PBXFileReference; includeInIndex = 1; path = home.patch.yml; sourceTree = "<group>"; };
 		8FE87C67F1631DE28894A046 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		9648290178AB9E96B54D82D3 /* DSHRootViewController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHRootViewController.h; sourceTree = "<group>"; };
@@ -749,6 +754,7 @@
 				AAA06D8C5B925DB9B93E37A4 /* DSHFilesCapability.m */,
 				AEEC198CBE55D18859854C72 /* DSHGuestLauncher.m */,
 				8DBF761589E69D4C06A2039F /* DSHHarness.m */,
+				2E0F3A6846F90B1497CCB548 /* DSHHarnessAuth.m */,
 				4801F0C7BC1393464CF66CAA /* DSHHealthCapability.m */,
 				87C2A422723A7E2FCB59C3E5 /* DSHHostBridge.m */,
 				9668660F1F1E540AC51FC94C /* DSHLocationCapability.m */,
@@ -781,6 +787,7 @@
 				CF846091953F53CFA032B2C5 /* DSHFilesCapability.h */,
 				1E4C4805F23D82850D299EFC /* DSHGuestLauncher.h */,
 				47CAB2BCAD1BF71ED2D0D354 /* DSHHarness.h */,
+				A39D8F3FC2346684D15CD17A /* DSHHarnessAuth.h */,
 				619B1A64E247FF5BEF499A03 /* DSHHealthCapability.h */,
 				7784797B4F8E35FB70565697 /* DSHHostBridge.h */,
 				E63770B638384E8931244DBB /* DSHLocationCapability.h */,
@@ -830,6 +837,7 @@
 				A283DC25C2F19F8FB24D83E8 /* DSHEventKitCapabilityTests.m */,
 				A86C746DB78A1EC1EA8D1C4D /* DSHGuestIntegrationTests.m */,
 				05FCEAC90314C3989F4C6C35 /* DSHHealthCapabilityTests.m */,
+				6265E8AF30EA0709577796B5 /* DSHHarnessAuthenticationTests.m */,
 				6246278FD4553457FF7C6E84 /* DSHHostBridgeTests.m */,
 				C14B3630BF1928E5F82D9CE1 /* DSHMockLLMServer.m */,
 				2A95A02BAE61EF533F180638 /* DSHPermissionPromptTests.m */,
@@ -1176,6 +1184,7 @@
 				FA3FCF2A46A7A75B449FB762 /* DSHEventKitCapabilityTests.m in Sources */,
 				594AE7B6BC92912523EABF74 /* DSHGuestIntegrationTests.m in Sources */,
 				6FA14D5EFC0C69B54A492C06 /* DSHHealthCapabilityTests.m in Sources */,
+				C14BF597C19AABF12DF1870D /* DSHHarnessAuthenticationTests.m in Sources */,
 				B5BF9B2CC50645F35153FD9B /* DSHHostBridgeTests.m in Sources */,
 				B76DC5FF0399A390278B0A79 /* DSHMockLLMServer.m in Sources */,
 				D769C15984692FEAF1F002C0 /* DSHPermissionPromptTests.m in Sources */,
@@ -1242,6 +1251,7 @@
 				3662B2E598FD5FF3338AE192 /* DSHFilesCapability.m in Sources */,
 				6DE304D20603FF18723FE80A /* DSHGuestLauncher.m in Sources */,
 				2CF3CB69F0654A3284D6A3D3 /* DSHHarness.m in Sources */,
+				880AA5FAA72BAB0FE33C4F3A /* DSHHarnessAuth.m in Sources */,
 				0DE147A664482359928B3351 /* DSHHealthCapability.m in Sources */,
 				10AFAEF8811D56ED35252301 /* DSHHostBridge.m in Sources */,
 				502A6C7027D086B14E0A702B /* DSHLocationCapability.m in Sources */,

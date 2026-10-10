@@ -4,6 +4,7 @@
 //
 
 #import "DSHHarness.h"
+#import "DSHHarnessAuth.h"
 #import "DSHPortAllocator.h"
 #import "DSHReadinessProbe.h"
 #import "DSHGuestLauncher.h"
@@ -61,6 +62,18 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 /// When the last health check finished; used to coalesce the several
 /// foreground notifications iOS delivers for one resume.
 @property (nonatomic) NSDate *lastHealthCheckAt;
+/// Launch token of the current server process, captured from the `dsh web:`
+/// announcement. Regenerated on every (re)start, never logged.
+@property (nonatomic, readwrite, nullable) NSString *launchToken;
+/// Bumped whenever a new token is captured. The web view keeps the generation
+/// it last authenticated with so a restart is detectable.
+@property (nonatomic, readwrite) NSUInteger authenticationGeneration;
+/// Whether the current launch is waiting for its authenticated URL before the
+/// readiness poll may be trusted to report success.
+@property (nonatomic) BOOL awaitingAuthentication;
+/// Generation of the launch whose token we are waiting for, so a token printed
+/// by a process that has already been replaced is discarded.
+@property (nonatomic) NSUInteger tokenGeneration;
 
 - (void)runHealthCheck;
 - (void)finishHealthCheckWithResult:(nullable DSHProbeResult *)result completionsSucceeded:(BOOL)succeeded;
@@ -133,6 +146,73 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
     return [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%u/", self.port]];
 }
 
+- (NSURL *)authenticatedEntryURL {
+    return [DSHHarnessAuth authenticatedEntryURLWithBaseURL:self.baseURL token:self.launchToken];
+}
+
+- (BOOL)authenticationReady {
+    return self.authenticatedEntryURL != nil;
+}
+
+- (BOOL)ownsURL:(NSURL *)url {
+    return [DSHHarnessAuth url:url sharesAuthorityWith:self.baseURL];
+}
+
+- (BOOL)noteAuthenticationFailureForURL:(NSURL *)url {
+    if (self.launchToken.length == 0) {
+        [self.log append:@"[dsh-ios] the server asked for authentication but has not announced a token yet"];
+        return NO;
+    }
+    // The cookie is authority-bound and is accepted again after a restart on
+    // the same port, so a 401 usually means the page was loaded from a stale
+    // entry URL (an old token) or the web content process was reused across a
+    // restart. Either way the fix is the same: go through the current entry
+    // URL again.
+    self.authenticationGeneration++;
+    [self.log append:[NSString stringWithFormat:@"[dsh-ios] re-authenticating: the server refused this page (token %@)",
+                      self.launchToken.length ? @"present" : @"absent"]];
+    return YES;
+}
+
+/// Captures the launch token out of a server log line. Split out so the log
+/// handler stays readable, and so the token is never part of what is stored.
+///
+/// Returns the line, redacted if it carried the credential, for the caller to
+/// pass to the log buffer.
+- (NSString *)handleServerLine:(NSString *)line generation:(NSUInteger)generation {
+    if (![DSHHarnessAuth isServeAnnouncementLine:line])
+        return line;
+
+    NSString *token = [DSHHarnessAuth tokenFromServeLogLine:line];
+    // A fake launcher emits this synchronously, so it can arrive while `launch`
+    // is still on the stack with the generation not yet published; the real
+    // launcher is asynchronous but the ordering must not matter either way.
+    // The token therefore belongs to the launch in progress whenever one is in
+    // progress, and is recorded against the current generation so the bookkeeping
+    // stays consistent with what a later stale-line guard will compare to.
+    BOOL forCurrentLaunch = self.awaitingAuthentication || generation == self.launchGeneration;
+    if (token.length > 0 && forCurrentLaunch &&
+        ![DSHHarnessAuth token:self.launchToken isEqualToToken:token]) {
+        self.launchToken = token;
+        self.authenticationGeneration++;
+        self.tokenGeneration = self.launchGeneration;
+        if (self.awaitingAuthentication) {
+            [DSHStartupMetrics.shared mark:@"auth_token"];
+            self.awaitingAuthentication = NO;
+            [self startReadinessPoll];
+        }
+        [self.log append:[NSString stringWithFormat:@"[dsh-ios] harness announced its web URL on port %u; authentication token captured",
+                          self.port]];
+    }
+    // Never let the credential reach the ring buffer, the on-disk launch log,
+    // or a diagnostics report that the user might share.
+    return [DSHHarnessAuth redactingTokenInLine:line];
+}
+
+- (void)ingestServerLineForTesting:(NSString *)line {
+    [self.log append:[self handleServerLine:line generation:self.launchGeneration]];
+}
+
 - (void)setState:(DSHHarnessState)state {
     if (_state == state)
         return;
@@ -167,6 +247,10 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
     self.probe = nil;
     self.healthCheckInFlight = NO;
     self.healthCheckFailures = 0;
+    // The token belongs to the process being torn down. Keeping it would let
+    // the UI replay a URL that is about to start returning 401.
+    self.launchToken = nil;
+    self.awaitingAuthentication = NO;
     // Anyone waiting on a check that will now never run must be told.
     NSArray<void (^)(BOOL)> *completions = [self.healthCheckCompletions copy];
     [self.healthCheckCompletions removeAllObjects];
@@ -215,6 +299,11 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
     self.port = port;
     self.lastError = nil;
     self.lastLaunchAt = NSDate.date;
+    // A restart mints a new token, and the old one is dead the moment the old
+    // process exits. Clearing it here is what makes the app re-authenticate
+    // instead of replaying a URL that now returns 401.
+    self.launchToken = nil;
+    self.awaitingAuthentication = YES;
     self.state = DSHHarnessStateStarting;
 
     NSMutableDictionary *env = [self.extraEnvironment mutableCopy];
@@ -226,7 +315,12 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
                                     arguments:@[]
                                   environment:env
                                          line:^(NSString *line, BOOL isStdErr) {
-        [weakSelf.log append:line];
+        typeof(self) self = weakSelf;
+        if (self == nil)
+            return;
+        // The token is captured here and stripped from the line before it can
+        // reach any durable store.
+        [self.log append:[self handleServerLine:line generation:generation]];
     } exit:^(int exitCode) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf processExitedWithCode:exitCode generation:generation];
@@ -236,15 +330,43 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
         self.lastError = [NSString stringWithFormat:@"Could not start %@ (error %d).", self.serverExecutable, pid];
         [self.log append:[@"[dsh-ios] " stringByAppendingString:self.lastError]];
         self.guestPid = 0;
+        self.awaitingAuthentication = NO;
         [self scheduleRelaunchAfterFailure];
         return;
     }
     self.guestPid = pid;
     [self.log append:[NSString stringWithFormat:@"[dsh-ios] guest pid %d", pid]];
 
+    // One supervisor for the whole boot. It only reports success once the
+    // server has both announced its token and served the authenticated entry
+    // URL; the poll itself is started by -startReadinessPoll when the token
+    // arrives, and by the deadline below if it never does.
+    [self armStartupDeadlineForGeneration:generation];
+}
+
+/// There is no readiness poll until there is an authenticated URL to poll.
+/// Waiting for the token first is not an optimisation: the bare origin answers
+/// 401 under dsh 0.2.x, so polling it would either spin for the whole boot
+/// budget or -- with the old `< 500` classification -- declare the app ready
+/// the instant the server started refusing, and the web view would then load a
+/// 401 body and stay there.
+- (void)startReadinessPoll {
+    NSAssert(NSThread.isMainThread, @"poll on main");
+    NSURL *url = self.authenticatedEntryURL;
+    if (url == nil || self.state != DSHHarnessStateStarting || self.probe != nil)
+        return;
+
+    NSUInteger generation = self.launchGeneration;
+    NSTimeInterval remaining = self.startupTimeout - -self.lastLaunchAt.timeIntervalSinceNow;
+    if (remaining <= 0) {
+        [self startupTimedOutForGeneration:generation];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
     // A shorter interval trims up to 250 ms from the visible startup tail
     // without adding meaningful work during the multi-minute guest boot.
-    self.probe = [[DSHReadinessProbe alloc] initWithURL:self.baseURL interval:0.25 timeout:self.startupTimeout];
+    self.probe = [[DSHReadinessProbe alloc] initWithURL:url interval:0.25 timeout:remaining];
     [self.probe startWithHandler:^(BOOL ready, NSTimeInterval elapsed) {
         typeof(self) self = weakSelf;
         if (self == nil || generation != self.launchGeneration)
@@ -261,15 +383,44 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
             [DSHStartupMetrics.shared mark:@"harness_ready"];
             self.state = DSHHarnessStateReady;
         } else if (self.state == DSHHarnessStateStarting) {
-            self.lastError = [NSString stringWithFormat:@"The harness did not answer within %.0f seconds.", self.startupTimeout];
-            [self.log append:[@"[dsh-ios] " stringByAppendingString:self.lastError]];
-            self.launchGeneration++;   // the kill below must not count as a second failure
-            if (self.guestPid > 0)
-                [self.launcher killProcess:self.guestPid signal:SIGKILL];
-            self.guestPid = 0;
-            [self scheduleRelaunchAfterFailure];
+            [self startupTimedOutForGeneration:generation];
         }
     }];
+}
+
+/// If the server never announces a token there is nothing to poll, and the
+/// launch must still fail on schedule rather than waiting forever. Under dsh
+/// 0.2.x that is a real failure mode worth naming precisely, because it is not
+/// a timeout -- the process is up but never came far enough to bind.
+- (void)armStartupDeadlineForGeneration:(NSUInteger)generation {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (self.startupTimeout * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (self == nil || generation != self.launchGeneration)
+            return;
+        if (self.awaitingAuthentication && self.state == DSHHarnessStateStarting) {
+            self.lastError = [NSString stringWithFormat:
+                              @"The harness did not announce its web URL within %.0f seconds.", self.startupTimeout];
+            [self.log append:[@"[dsh-ios] " stringByAppendingString:self.lastError]];
+            [self startupTimedOutForGeneration:generation];
+        }
+    });
+}
+
+- (void)startupTimedOutForGeneration:(NSUInteger)generation {
+    if (generation != self.launchGeneration || self.state != DSHHarnessStateStarting)
+        return;
+    self.awaitingAuthentication = NO;
+    self.lastError = [NSString stringWithFormat:@"The harness did not answer within %.0f seconds.", self.startupTimeout];
+    [self.log append:[@"[dsh-ios] " stringByAppendingString:self.lastError]];
+    self.launchGeneration++;   // the kill below must not count as a second failure
+    [self.probe cancel];
+    self.probe = nil;
+    if (self.guestPid > 0)
+        [self.launcher killProcess:self.guestPid signal:SIGKILL];
+    self.guestPid = 0;
+    [self scheduleRelaunchAfterFailure];
 }
 
 - (void)processExitedWithCode:(int)exitCode generation:(NSUInteger)generation {
@@ -348,7 +499,11 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 }
 
 - (void)verifyAliveWithCachedAnswer:(BOOL)trustCachedAnswer completion:(void (^)(BOOL))completion {
-    if (self.state != DSHHarnessStateReady || self.baseURL == nil) {
+    // A bare origin is not enough to answer "is the UI usable?": dsh 0.2.x
+    // answers 401 there. Requiring the authenticated URL means a caller is
+    // told "not ready" while the app is still waiting for the token, instead
+    // of being told "alive" about a page that cannot load.
+    if (self.state != DSHHarnessStateReady || self.authenticatedEntryURL == nil) {
         if (completion) completion(NO);
         return;
     }
@@ -388,7 +543,11 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
 - (void)runHealthCheck {
     NSUInteger generation = self.launchGeneration;
     NSUInteger retryGeneration = self.healthCheckRetryGeneration;
-    NSURL *url = self.baseURL;
+    // Probe the authenticated entry URL, not the bare origin: under dsh 0.2.x
+    // the origin answers 401 to everything, so a check aimed there can only
+    // ever prove that a listener exists -- never that the UI is usable, which
+    // is the question the health check is actually asked.
+    NSURL *url = self.authenticatedEntryURL ?: self.baseURL;
     if (url == nil) {
         [self finishHealthCheckWithResult:nil completionsSucceeded:NO];
         return;
@@ -406,6 +565,19 @@ NSString *DSHHarnessStateName(DSHHarnessState state) {
         self.lastHealthCheck = result;
         self.lastHealthCheckAt = NSDate.date;
         [self.log append:[NSString stringWithFormat:@"[dsh-ios] health check: %@", result.summary]];
+
+        // A 401 is neither "the UI is up" nor "the server is gone": the
+        // listener answered, so the process is healthy, but it is withholding
+        // the interface. Retrying on the failure ladder would restart a
+        // working guest after three tries; reporting success would let a page
+        // that cannot load count as loaded. Re-authenticating is the only
+        // correct response, and it costs one navigation.
+        if (result.requiresAuthentication && [self noteAuthenticationFailureForURL:url]) {
+            // Answer the caller honestly: the UI is not usable until the web
+            // view has been back through the entry URL.
+            [self finishHealthCheckWithResult:result completionsSucceeded:NO];
+            return;
+        }
 
         if (result.alive) {
             self.healthCheckFailures = 0;

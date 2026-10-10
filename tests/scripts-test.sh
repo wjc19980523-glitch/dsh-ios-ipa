@@ -70,3 +70,26 @@ if (new Set(tools).size !== tools.length) throw new Error('duplicate tool in cap
 NODE
 
 printf 'ok  scripts: capability manifest matches app and guest tools\n'
+
+# The launch token is a bearer credential for the guest's web UI, and the CI
+# job both prints and uploads the serve log. Redaction is a property of the
+# pipeline, not of one call site, so assert it is wired in everywhere that can
+# carry the line.
+grep -q 'token=<redacted>' tests/rootfs-test.sh || {
+  echo 'not ok: tests/rootfs-test.sh no longer redacts the launch token before it can reach the artefact' >&2
+  exit 1
+}
+grep -q 'redactingTokenInLine' app/DSHLogBuffer.m || {
+  echo 'not ok: DSHLogBuffer no longer strips launch tokens; they would reach the on-disk log and the diagnostics report' >&2
+  exit 1
+}
+grep -q 'DSHHarnessAuth' app/DSHHarness.m || {
+  echo 'not ok: DSHHarness no longer captures the launch token; dsh 0.2.x answers 401 to everything without it' >&2
+  exit 1
+}
+grep -q 'DSHProbeOutcomeUnauthorized' app/DSHReadinessProbe.m || {
+  echo 'not ok: DSHReadinessProbe no longer distinguishes a 401 from a served page' >&2
+  exit 1
+}
+
+printf 'ok  scripts: launch-token authentication is wired through app, log and CI\n'

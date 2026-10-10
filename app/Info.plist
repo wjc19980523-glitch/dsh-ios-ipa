@@ -30,6 +30,29 @@
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<!-- The bundled harness serves its web UI in plain HTTP on a loopback
+			     port only this app chooses. ATS grants no implicit exemption to
+			     numeric loopback addresses, and dsh 0.2.x puts its launch token
+			     in the URL of the redirect it uses to set the auth cookie, so
+			     the exchange has to survive as written. Scoped to the loopback
+			     literal and nothing else: no wildcard, no other host. -->
+			<key>127.0.0.1</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<false/>
+			</dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<false/>
+			</dict>
+		</dict>
 	</dict>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>DSH lets the agent read your calendar when you turn the Calendar capability on.</string>

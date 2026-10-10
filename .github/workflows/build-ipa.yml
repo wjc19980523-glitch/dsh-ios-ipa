@@ -62,6 +62,8 @@ on:
       - "rootfs/**"
       - "tests/rootfs-test.sh"
       - "tests/emu-test.sh"
+      - "tests/scripts-test.sh"
+      - "tests/DSHTests/**"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
@@ -388,12 +390,16 @@ jobs:
           ls -lh build/root.tar.gz
           shasum -a 256 build/root.tar.gz
 
-      - name: Project test suites (emulator regressions + guest integration)
+      - name: Project test suites (script contract + emulator regressions + guest integration)
         run: |
           set -uo pipefail
           mkdir -p cilogs-verify
+          rc_scripts=0
           rc_emu=0
           rc_rootfs=0
+          echo "::group::tests/scripts-test.sh"
+          tests/scripts-test.sh 2>&1 | tee cilogs-verify/02b-scripts-test.log || rc_scripts=$?
+          echo "::endgroup::"
           echo "::group::tests/emu-test.sh"
           tests/emu-test.sh 2>&1 | tee cilogs-verify/03-emu-test.log || rc_emu=$?
           echo "::endgroup::"
@@ -406,10 +412,28 @@ jobs:
             echo
             echo "| suite | exit |"
             echo "|---|---|"
+            echo "| tests/scripts-test.sh (project + token-hygiene contract) | ${rc_scripts} |"
             echo "| tests/emu-test.sh (NEON gadgets, waitpid, fetch polyfill) | ${rc_emu} |"
-            echo "| tests/rootfs-test.sh (boots dsh-serve, every bridge tool) | ${rc_rootfs} |"
+            echo "| tests/rootfs-test.sh (boots dsh-serve, authenticates, every bridge tool) | ${rc_rootfs} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$rc_emu" = 0 && test "$rc_rootfs" = 0
+          test "$rc_scripts" = 0 && test "$rc_emu" = 0 && test "$rc_rootfs" = 0
+
+      - name: Verify no launch token leaked into the artefacts
+        if: always()
+        run: |
+          set -uo pipefail
+          # `dsh web: .../?token=<43 chars>` is a bearer credential for the
+          # guest's UI. The serve log is printed and uploaded, so this is the
+          # one place that can prove the redaction actually held rather than
+          # trusting that every call site remembered.
+          if [ -d build/rootfs-test ]; then
+            hits=$(grep -rlE 'token=[A-Za-z0-9_-]{20,}' build/rootfs-test cilogs-verify 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "::error::launch token leaked into: $hits"
+              exit 1
+            fi
+          fi
+          echo "ok: no launch token in cilogs-verify/ or build/rootfs-test/"
 
       - name: Upload verification logs
         if: always()

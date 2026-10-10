@@ -79,6 +79,21 @@ grep -q 'token=<redacted>' tests/rootfs-test.sh || {
   echo 'not ok: tests/rootfs-test.sh no longer redacts the launch token before it can reach the artefact' >&2
   exit 1
 }
+# The capture must wait for the whole 43-character token. A partially written
+# announcement yields a short token, and then every request uses it: run
+# 38061283295 failed with 000s that looked like an unreachable server while the
+# server was serving fine.
+grep -q 'raw_token}" -ge 43' tests/rootfs-test.sh || {
+  echo 'not ok: the launch token is captured before all 43 characters have been written' >&2
+  exit 1
+}
+# The redaction pattern must be anchored to the token. `token=[A-Za-z0-9_-]*`
+# also matches the empty string, so a second pass turns an already-redacted line
+# into `token=<redacted><redacted>`.
+grep -qF 's/token=$token\$/token=<redacted>/g' tests/rootfs-test.sh || {
+  echo 'not ok: the launch-token redaction is unanchored and is not idempotent' >&2
+  exit 1
+}
 grep -q 'redactingTokenInLine' app/DSHLogBuffer.m || {
   echo 'not ok: DSHLogBuffer no longer strips launch tokens; they would reach the on-disk log and the diagnostics report' >&2
   exit 1

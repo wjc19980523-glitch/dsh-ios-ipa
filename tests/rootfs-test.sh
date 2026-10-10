@@ -277,16 +277,35 @@ idle=0
 for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
     if [ -z "$serve_url" ]; then
-        serve_url=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$WORK/dsh-serve.log" 2>/dev/null | head -1)
+        # The token is 43 base64url characters, and a 43-character line is not
+        # guaranteed to land in one write: the line below was first observed
+        # partially written, so a naive capture read 10 characters and every
+        # later request used a truncated token. The suite then failed with 000s
+        # that looked exactly like an unreachable server, and the log grew to
+        # 49 bytes instead of 82 (run 38061283295). Only accept the token once
+        # all 43 characters are present.
+        raw=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$WORK/dsh-serve.log" 2>/dev/null | head -1)
+        if [ -n "$raw" ]; then
+            raw_token="${raw#*token=}"
+            if [ "${#raw_token}" -ge 43 ]; then
+                serve_url="$raw"
+            fi
+        fi
         if [ -n "$serve_url" ]; then
             token="${serve_url#*token=}"
             # The launch token is a bearer credential for this guest's UI. It
             # must not travel into the CI artefact, the job summary, or an
-            # issue. Replace it in the log the moment it has been parsed, and
-            # keep it only in this shell.
-            sed -i.bak 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' "$WORK/dsh-serve.log" 2>/dev/null && rm -f "$WORK/dsh-serve.log.bak"
+            # issue. Replace it the moment it has been parsed, and keep it only
+            # in this shell.
+            #
+            # Anchor the pattern to the token itself rather than using
+            # `token=[A-Za-z0-9_-]*`. `*` matches zero characters too, so an
+            # unanchored pattern rewrites an already-redacted
+            # `token=<redacted>` into `token=<redacted><redacted>` on every
+            # later pass.
+            sed -i.bak "s/token=$token\$/token=<redacted>/g" "$WORK/dsh-serve.log" 2>/dev/null && rm -f "$WORK/dsh-serve.log.bak"
             server_noticed=$i
-            served_at="$i"
+            served_at=$i
             echo "     [${i}s] server announced its web URL on port $PORT (token captured, not printed)"
         fi
     fi

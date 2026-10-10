@@ -311,6 +311,17 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
     fi
     target="${serve_url:-http://127.0.0.1:$PORT/}"
     if curl -fs -o "$WORK/index.html" "$target"; then up=1; served_at="$i"; break; fi
+    # Do not stop early while the request is still failing. Announcing the URL
+    # and accepting on the port are two different moments: dsh prints its line
+    # as the listener is being prepared, and run 38067488275 showed the gap --
+    # announced at 162s, still refusing connections at 171s. An earlier version
+    # of this exit counted every failed second after the announcement as "idle"
+    # and gave up at the tenth, so `up` was never set and the suite reported an
+    # unreachable server that was in fact nine seconds from answering.
+    #
+    # The exit is only safe once we know the port is not coming back -- which
+    # is never -- so it is gated on `up` below instead.
+    #
     # A heartbeat every 20s separates "the guest is slow" from "the guest is
     # stuck": if the byte count keeps moving, the boot is progressing and the
     # timeout is simply too tight for an emulated CPU; if it stops, the boot
@@ -334,15 +345,24 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         echo "     [${i}s] dsh-serve.log ${now_bytes} bytes -- ${state}"
         prev_bytes=$now_bytes
     fi
-    # Once the server has announced its URL and the log has gone quiet, nothing
-    # more is coming: dsh is serving and waiting on stdin. Stop burning the
-    # clock. `$serve_url` being non-empty is what makes this safe — a log that
-    # merely stopped growing without ever announcing is still a boot in
-    # progress, and still gets the full BOOT_TIMEOUT.
-    if [ -n "$serve_url" ] && [ "$i" -gt "$SERVE_IDLE_GRACE" ]; then
+    # Once the server has announced its URL *and we have fetched it*, the wait
+    # is over: dsh is serving and waiting on stdin. Stop burning the clock.
+    #
+    # The `up` condition is the whole point. Without it this fired purely on
+    # the announcement, which happens before the listener accepts -- run
+    # 38067488275 announced at 162s and was still refusing at 171s, so the exit
+    # abandoned a server that was seconds from answering and reported it
+    # unreachable. `$serve_url` alone is not evidence that anything is
+    # listening; only a completed request is.
+    #
+    # The loop's own `break` on a successful curl already ends the wait in the
+    # healthy case, so this exists for the case where the fetch succeeded on a
+    # previous iteration -- kept for clarity, and because it must never fire
+    # while `up` is still 0.
+    if [ "$up" = 1 ] && [ -n "$serve_url" ] && [ "$i" -gt "$SERVE_IDLE_GRACE" ]; then
         idle=$((idle + 1))
         if [ "$idle" -ge "$SERVE_IDLE_GRACE" ]; then
-            echo "     [${i}s] serving and idle for ${SERVE_IDLE_GRACE}s; stopping the wait early"
+            echo "     [${i}s] served and idle for ${SERVE_IDLE_GRACE}s; stopping the wait early"
             break
         fi
     fi
@@ -369,7 +389,18 @@ if [ "$up" != 1 ]; then
         echo "     check that the capture waited for all 43 characters of the token."
     fi
     echo "     --- dsh-serve.log (last 60 lines) ---"
-    tail -60 "$WORK/dsh-serve.log" 2>/dev/null | sed -e 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' -e 's/^/     /'
+    # Redaction at the point of display, for the case where the file itself was
+    # never rewritten (the token was never captured, so line 306 never ran).
+    #
+    # The pattern is anchored to a 43-character token for the same reason as
+    # above: `token=[A-Za-z0-9_-]*` matches zero characters, so on a line that
+    # already reads `token=<redacted>` it inserts a second marker and the dump
+    # goes out as `token=<redacted><redacted>`. That is what run 38067488275
+    # printed, and it reads as if the token had been captured twice.
+    tail -60 "$WORK/dsh-serve.log" 2>/dev/null \
+        | sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
+              -e 's/token=<redacted>\+/token=<redacted>/g' \
+              -e 's/^/     /'
     echo "     --- end dsh-serve.log ---"
 fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"

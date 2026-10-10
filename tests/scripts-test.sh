@@ -116,8 +116,17 @@ grep -q 'SERVE_IDLE_GRACE' tests/rootfs-test.sh || {
   echo 'not ok: tests/rootfs-test.sh no longer stops waiting once the server is idle' >&2
   exit 1
 }
-grep -q 'stopping the wait early' tests/rootfs-test.sh || {
-  echo 'not ok: the early-exit path is no longer reported in the CI log' >&2
+grep -q 'served and idle for' tests/rootfs-test.sh || {
+  echo 'not ok: the success-path early exit is no longer reported in the CI log' >&2
+  exit 1
+}
+# The early exit must never fire while the fetch is still failing. Announcing
+# the URL is not the same moment as accepting on the port: run 38067488275
+# announced at 162s and was still refusing at 171s, and an exit gated on the
+# announcement alone abandoned it and reported an unreachable server.
+grep -q 'if \[ "\$up" = 1 \] && \[ -n "\$serve_url" \]' tests/rootfs-test.sh || {
+  echo 'not ok: the early exit is no longer gated on a successful fetch; it can' >&2
+  echo '        abandon a server that has announced but not yet accepted' >&2
   exit 1
 }
 grep -q 'component split:' tests/rootfs-test.sh || {

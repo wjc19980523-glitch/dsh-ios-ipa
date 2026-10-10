@@ -281,6 +281,26 @@ echo "     sanity.log: $(head -3 "$WORK/sanity.log" 2>/dev/null | tr '\n' ' ')"
 pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
 sleep 2
 
+# The plain server above proves iSH forwarding works, so the real dsh server's
+# failure to LISTEN is not a forwarding problem. Isolate the two remaining
+# deltas between "plain server (works)" and "dsh web (does not)": the
+# --expose-internals flag, and the async `await listen` shape dsh-host-webserver
+# uses. This runs on a second port so it cannot collide with the real boot.
+echo "== sanity 2: the dsh listen shape (--expose-internals + await) reaches the host"
+DSHLIKE_PORT=$((PORT + 1))
+dshlike_ok=0
+( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "node --expose-internals -e 'const http=require(\"http\"); const s=http.createServer((q,r)=>r.end(\"dshlike\")); (async()=>{ try { await new Promise((res,rej)=>{ s.once(\"error\",rej); s.listen($DSHLIKE_PORT,\"127.0.0.1\",()=>{ console.log(\"DSHLIKE_LISTENED \"+s.address().port); res(); }); }); } catch(e){ console.log(\"DSHLIKE_ERR \"+e.message); } })(); setTimeout(()=>process.exit(0),120000);'" 2>&1 | filter > "$WORK/dshlike.log" ) &
+for _j in $(seq 1 60); do
+    if curl -fs -o "$WORK/dshlike.html" "http://127.0.0.1:$DSHLIKE_PORT/" 2>/dev/null; then
+        dshlike_ok=1; break
+    fi
+    sleep 1
+done
+check "dsh listen shape (--expose-internals + await) reaches the host" test "$dshlike_ok" = 1
+echo "     dshlike.log: $(head -3 "$WORK/dshlike.log" 2>/dev/null | tr '\n' ' ')"
+pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
+sleep 2
+
 echo "== boot dsh-serve on 127.0.0.1:$PORT (timeout ${BOOT_TIMEOUT}s)"
 start=$(date +%s)
 ( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &

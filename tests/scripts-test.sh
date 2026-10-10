@@ -149,3 +149,22 @@ grep -q '04b-build-for-testing.log' .github/workflows/build-ipa.yml || {
 }
 
 printf 'ok  scripts: the workflow type-checks the DSHTests bundle\n'
+
+# DSHTests is hosted by the app and links against it, so any plain C global the
+# tests read must be exported from the executable. Objective-C classes link via
+# -bundle_loader regardless, which is why this only surfaced once a test
+# referenced a constant: every file compiled, and the link failed.
+grep -q 'DSHHarnessAuthCookiePrefix' app/DSHHarnessAuth.h || {
+  echo 'not ok: DSHHarnessAuth no longer declares the cookie prefix the test server mimics' >&2
+  exit 1
+}
+grep -q 'visibility("default")' app/DSHHarnessAuth.h || {
+  echo 'not ok: the handshake constants are no longer marked for export; DSHTests will fail to link' >&2
+  exit 1
+}
+grep -q -- '-Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix' app/AppDSH.xcconfig || {
+  echo 'not ok: the app no longer exports the cookie-prefix symbol to the test bundle' >&2
+  exit 1
+}
+
+printf 'ok  scripts: the handshake constants are exported to the test bundle\n'

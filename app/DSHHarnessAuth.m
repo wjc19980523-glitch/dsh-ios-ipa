@@ -7,8 +7,10 @@
 
 #import "DSHHarnessAuth.h"
 
-NSString *const DSHHarnessTokenQueryKey = @"token";
-NSString *const DSHHarnessAuthCookiePrefix = @"dsh-auth-";
+// DSH_EXPORTED (see the header) is what lets the DSHTests bundle resolve these
+// against the host app. Without it the sources compile and the link fails.
+DSH_EXPORTED NSString *const DSHHarnessTokenQueryKey = @"token";
+DSH_EXPORTED NSString *const DSHHarnessAuthCookiePrefix = @"dsh-auth-";
 
 /// The token is base64url over 32 random bytes: 43 characters from
 /// [A-Za-z0-9_-]. Scanning that alphabet rather than reading to end of line is

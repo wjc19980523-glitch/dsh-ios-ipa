@@ -42,11 +42,18 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /// The query parameter dsh puts its launch token in (`TOKEN_QUERY` upstream).
-extern NSString *const DSHHarnessTokenQueryKey;
+///
+/// `DSH_EXPORTED` keeps these two symbols in the app executable's dynamic
+/// symbol table. DSHTests is hosted by the app and links against it, so an
+/// unexported global is invisible to the test bundle: the build fails at link
+/// with "Undefined symbols for architecture arm64" even though every source
+/// file compiled. GCC_SYMBOLS_PRIVATE_EXTERN only covers Objective-C classes.
+#define DSH_EXPORTED __attribute__((visibility("default")))
+extern DSH_EXPORTED NSString *const DSHHarnessTokenQueryKey;
 /// Prefix of the cookie dsh sets (`COOKIE_PREFIX` upstream). The full name is
 /// `dsh-auth-<base64url(sha256(authority))>`, so the prefix is all we can match
 /// without reimplementing the server's hashing.
-extern NSString *const DSHHarnessAuthCookiePrefix;
+extern DSH_EXPORTED NSString *const DSHHarnessAuthCookiePrefix;
 
 @interface DSHHarnessAuth : NSObject
 

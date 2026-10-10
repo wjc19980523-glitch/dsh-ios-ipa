@@ -37,12 +37,18 @@ DSH_ROOTFS_TARBALL = $(SRCROOT)/build/root.tar.gz
 
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) DSH_APP=1
 HEADER_SEARCH_PATHS = $(ISH_SRC) $(ISH_SRC)/app $(ISH_SRC)/deps/libarchive/libarchive $(SRCROOT)/app
-OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos
 
 // The AArch64 gadgets are host arm64 assembly: only Apple Silicon simulators
 // can run the emulator, so never build x86_64 slices.
 ARCHS[sdk=iphonesimulator*] = arm64
 EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64 i386
 
-// Keep ObjC classes visible so DSHTests can link against the app (bundle loader).
+// GCC_SYMBOLS_PRIVATE_EXTERN covers Objective-C classes, not plain C globals.
+// An executable exports no C symbols at all unless asked, so DSHTests linking
+// against DSH.app/DSH could not see `DSHHarnessAuthCookiePrefix` and failed
+// with "Undefined symbols for architecture arm64" at the link step -- after
+// every source file had compiled cleanly. Export the handshake constants
+// explicitly; they are protocol facts (the query key and cookie prefix dsh
+// 0.2.x uses), so the tests are entitled to read them rather than restate them.
 GCC_SYMBOLS_PRIVATE_EXTERN = NO
+OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-exported_symbol,_DSHHarnessTokenQueryKey -Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix

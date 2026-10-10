@@ -343,6 +343,17 @@ if [ "$up" != 1 ]; then
     # progress and usually the reason it never bound the port. The token is
     # stripped again here as a belt-and-braces measure: this dump and the log
     # file both end up in a downloadable artefact.
+    #
+    # `served_at` was set when the URL was announced, so it does not mean a byte
+    # was served. Report the reachability status the request actually got, or
+    # the phase split below reads as "the HTTP round trip took 0s" when in fact
+    # the request never succeeded.
+    probe_code=$(curl -s -o /dev/null -w '%{http_code}' "$base_url" 2>/dev/null || echo 000)
+    echo "     the authenticated URL answered HTTP ${probe_code:-000} (000 means no connection at all)"
+    if [ "${probe_code:-000}" = "401" ]; then
+        echo "     a 401 here means the token was wrong, not that the server is down;"
+        echo "     check that the capture waited for all 43 characters of the token."
+    fi
     echo "     --- dsh-serve.log (last 60 lines) ---"
     tail -60 "$WORK/dsh-serve.log" 2>/dev/null | sed -e 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' -e 's/^/     /'
     echo "     --- end dsh-serve.log ---"
@@ -377,11 +388,19 @@ check "unauthenticated HEAD is refused too (got $unauth_head)" test "$unauth_hea
 if [ -n "$serve_url" ] || grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
     echo "     --- phased boot (wall clock from launch) ---"
     echo "     announced the web URL at:  ${server_noticed}s"
-    echo "     first served byte at:      ${served_at}s  (HTTP round trip $((${served_at:-0} - ${server_noticed:-0}))s)"
-    echo "     total to first served byte:${elapsed}s"
     echo "     component split:"
     echo "       emulator + node + plugin graph  ${server_noticed}s"
-    echo "       first HTTP response            $((${served_at:-0} - ${server_noticed:-0}))s"
+    # Only claim an HTTP round trip when a request actually succeeded. On the
+    # failure path `served_at` holds the announcement tick, and reporting the
+    # difference would print "first HTTP response 0s" for a request that never
+    # connected.
+    if [ "$up" = 1 ]; then
+        echo "       first served byte at:           ${served_at}s (round trip $((${served_at} - ${server_noticed}))s)"
+        echo "     total to first served byte:${elapsed}s"
+    else
+        echo "       first served byte:              never (no successful request)"
+        echo "     total spent waiting:       ${elapsed}s"
+    fi
     grep -E 'dsh web:|listening|plugin|ready' "$WORK/dsh-serve.log" 2>/dev/null | tail -8 | sed 's/^/       /'
     echo "     --- end phased boot ---"
 fi

@@ -64,4 +64,17 @@ EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64 i386
 // which is why the attribute is required rather than optional. Both halves are
 // asserted in tests/scripts-test.sh.
 GCC_SYMBOLS_PRIVATE_EXTERN = NO
-OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos
+
+// The app is linked with -dead_strip, so a symbol nothing inside the app
+// references is removed before the visibility attribute can matter. Every C
+// symbol the tests read is used by app code -- except one.
+// DSHHarnessAuthCookiePrefix has exactly one occurrence in app/: its own
+// definition in DSHHarnessAuth.m. Nothing there reads it, because it exists for
+// the tests: DSHTestHTTPServer mimics the real cookie name. -dead_strip duly
+// dropped it and the link failed on it alone, after the other six had resolved.
+//
+// -u keeps it. This is not the same tool that caused the earlier trouble: -u
+// adds one symbol to the keep-list and leaves everything else exported, whereas
+// -exported_symbol *replaces* the export set. The iSH build already uses -u for
+// the same purpose, so the pattern is proven here rather than novel.
+OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-u,_DSHHarnessAuthCookiePrefix

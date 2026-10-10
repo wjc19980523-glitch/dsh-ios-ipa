@@ -206,6 +206,27 @@ grep -q 'visibility("default")' app/DSHHarnessAuth.h || {
   exit 1
 }
 
+# DSHHarnessAuthCookiePrefix is the one C symbol the tests read that app code
+# never touches -- nothing in app/ mentions it but its own definition. The app
+# is linked -dead_strip, so it is removed before visibility can matter, and the
+# link fails on that symbol alone. -u keeps it. Check both halves: the keep-flag
+# and the absence of any in-app reader, which is what makes the flag necessary
+# rather than decorative.
+grep -q -- '-Wl,-u,_DSHHarnessAuthCookiePrefix' app/AppDSH.xcconfig || {
+  echo 'not ok: DSHHarnessAuthCookiePrefix is no longer kept with -u; -dead_strip' >&2
+  echo '        will drop it and DSHTests will fail to link' >&2
+  exit 1
+}
+if grep -rq 'DSHHarnessAuthCookiePrefix' app/DSHHarnessAuth.m app/DSHHarness.m \
+     app/DSHRootViewController.m app/DSHReadinessProbe.m 2>/dev/null; then
+  # Only the definition line counts; anything else means app code reads it and
+  # -u may no longer be needed. Not an error -- just worth knowing.
+  refs=$(grep -rn 'DSHHarnessAuthCookiePrefix' app/*.m | grep -v 'const DSHHarnessAuthCookiePrefix' | wc -l)
+  if [ "$refs" -gt 0 ]; then
+    printf 'note: DSHHarnessAuthCookiePrefix now has %s in-app reader(s); -u may be redundant\n' "$refs"
+  fi
+fi
+
 # Five headers define the macro. The guard is what keeps that from being a
 # redefinition error the moment two of them are imported together.
 grep -q 'ifndef DSH_EXPORTED' app/DSHHarnessAuth.h || {

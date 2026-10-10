@@ -60,9 +60,46 @@ log "Stage dsh node_modules on the host (linux/arm64/musl)"
 rm -rf stage && mkdir stage
 cp "$ROOT/rootfs/staging/package.json" stage/
 [ -f "$ROOT/rootfs/staging/package-lock.json" ] && cp "$ROOT/rootfs/staging/package-lock.json" stage/
-( cd stage && npm ci --os=linux --cpu=arm64 --libc=musl --ignore-scripts --no-audit --no-fund 2>&1 | tail -3 \
-  || npm install "@deepseek-ai/dsh@${DSH_VERSION}" --os=linux --cpu=arm64 --libc=musl --ignore-scripts --no-audit --no-fund )
-cp stage/package-lock.json "$ROOT/rootfs/staging/package-lock.json"
+# `npm ci` installs strictly from package-lock.json and fails outright when the
+# lockfile disagrees with package.json.  That failure used to be swallowed by a
+# `|| npm install @deepseek-ai/dsh@${DSH_VERSION}` fallback, which silently
+# produced an unpinned tree: bumping the version here without regenerating the
+# lockfile gave a guest that reported the new `dsh --version` while every
+# transitive dependency -- including the native koffi/sharp builds -- still came
+# from the old tree.  On 0.2.0-rc.2 that mismatch SIGILL'd inside the emulator at
+# guest startup, and the 27 downstream assertions only ever reported the symptom.
+#
+# Keep the fallback (offline/registry-flake recovery needs it) but make it loud
+# and verify the result, so a stale lockfile can never pass silently again.
+if ( cd stage && npm ci --os=linux --cpu=arm64 --libc=musl --ignore-scripts --no-audit --no-fund 2>&1 | tail -3 ); then
+    :
+else
+    echo "WARNING: 'npm ci' failed; falling back to an unpinned 'npm install'." >&2
+    echo "WARNING: if the cause was a stale package-lock.json, regenerate it:" >&2
+    echo "WARNING:   (cd rootfs/staging && npm install --package-lock-only --os=linux --cpu=arm64 --libc=musl --ignore-scripts)" >&2
+    npm install "@deepseek-ai/dsh@${DSH_VERSION}" --os=linux --cpu=arm64 --libc=musl --ignore-scripts --no-audit --no-fund \
+        --prefix "$WORK/stage" 2>&1 | tail -3
+fi
+# Persist whatever tree we ended up with back into the repo pin.  A successful
+# `npm ci` leaves the lockfile byte-identical; the fallback rewrites it, which is
+# how a stale pin gets corrected -- review the diff, then commit it.
+[ -f stage/package-lock.json ] && cp stage/package-lock.json "$ROOT/rootfs/staging/package-lock.json"
+
+# The installed tree must actually advertise the version we pinned, and must
+# carry the four native modules the guest selftest loads.  Checking here turns a
+# guest-side SIGILL into a host-side build failure with a readable reason.
+installed_dsh_version=$(node -p "require('./stage/node_modules/@deepseek-ai/dsh/package.json').version" 2>/dev/null || true)
+if [ "$installed_dsh_version" != "$DSH_VERSION" ]; then
+    echo "staged dsh is '$installed_dsh_version' but DSH_VERSION is '$DSH_VERSION' -- the lockfile is stale" >&2
+    exit 1
+fi
+for native_module in koffi node-pty sharp; do
+    [ -d "stage/node_modules/$native_module" ] || {
+        echo "staged tree is missing the native module '$native_module'" >&2
+        exit 1
+    }
+done
+log "staged dsh $installed_dsh_version with native modules present"
 
 log "Guest phase 1: packages"
 ish <<'EOF'

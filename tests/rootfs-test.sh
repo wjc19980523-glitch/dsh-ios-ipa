@@ -72,6 +72,21 @@ check "node >= 22.19 in guest" grep -Eq '^v(22\.(19|[2-9][0-9])|2[3-9]|[3-9][0-9
 # 0.2.x, not 0.1.x: only 0.2.x ships dsh-client-locale (the zh GUI) and the
 # corrected `deepseek-flash` model id. See scripts/build-rootfs.sh.
 check "dsh 0.2.x in guest"      grep -Eq '^0\.2\.' "$WORK/sanity.txt"
+# Exact match against the pin, not just the major line.  A stale
+# rootfs/staging/package-lock.json makes `npm ci` fail, and the build script's
+# `npm install` fallback once installed 0.2.0-rc.2's top-level package over a
+# 0.1.0-rc.7 dependency tree: `dsh --version` looked right while koffi/sharp
+# stayed old, and the mismatch SIGILL'd in the emulator.  Comparing the full
+# string catches any future recurrence of a partially-upgraded tree.
+expected_dsh_version="$(sed -n 's/^DSH_VERSION="\${DSH_VERSION:-\(.*\)}"$/\1/p' "$ROOT/scripts/build-rootfs.sh")"
+check "guest dsh matches the pinned DSH_VERSION ($expected_dsh_version)" \
+      grep -Fqx "$expected_dsh_version" "$WORK/sanity.txt"
+# The four native modules dsh-selftest loads must be present as installed
+# packages, independently of whether the selftest got far enough to prove it.
+for native_module in koffi node-pty sharp; do
+    check "native module $native_module is staged" \
+          test -d "$WORK/fakefs/data/usr/local/lib/node_modules/$native_module"
+done
 check "dsh-selftest passes"     grep -q 'SELFTEST OK' "$WORK/sanity.txt"
 check "sharp keeps musl arm64 runtime" test -d "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linuxmusl-arm64"
 check "sharp drops unusable glibc runtime" test ! -e "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linux-arm64"

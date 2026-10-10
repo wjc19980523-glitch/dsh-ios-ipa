@@ -274,7 +274,7 @@
     h.preferredPort = 39400;
     h.startupTimeout = 5;
 
-    DSHTestHTTPServer *__strong server = nil;
+    __block DSHTestHTTPServer *server = nil;
     launcher.onLaunch = ^(NSDictionary *env) {
         server = [[DSHTestHTTPServer alloc] initWithPort:(uint16_t) [env[@"DSH_PORT"] intValue]];
         // Bind a listener that refuses everything, like a pre-handshake dsh.
@@ -309,8 +309,15 @@
 
     XCTAssertEqualObjects(h.launchToken, @"boot-token-0001");
     XCTAssertNotNil(h.authenticatedEntryURL);
+    // Parenthesise the nested message send, the way DSHCoreTests.m already
+    // does for the same shape. XCTAssertEqualObjects is a variadic macro that
+    // stringifies its arguments and appends __VA_ARGS__; a bare
+    // `[NSString stringWithFormat:..., h.port]` as the second argument makes
+    // clang report "expected identifier or '('" at the inner call's closing
+    // paren, followed by a cascade of bogus brace errors.
     XCTAssertEqualObjects(h.authenticatedEntryURL.absoluteString,
-                          [NSString stringWithFormat:@"http://127.0.0.1:%u/?token=boot-token-0001", h.port]);
+                          ([NSString stringWithFormat:@"http://127.0.0.1:%u/?token=boot-token-0001",
+                                                      h.port]));
     [server stop];
 }
 
@@ -348,7 +355,7 @@
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
     h.preferredPort = 39420;
     h.startupTimeout = 60;
-    DSHTestHTTPServer *__strong server = nil;
+    __block DSHTestHTTPServer *server = nil;
     launcher.onLaunch = ^(NSDictionary *env) {
         server = [[DSHTestHTTPServer alloc] initWithPort:(uint16_t) [env[@"DSH_PORT"] intValue]];
     };
@@ -421,7 +428,7 @@
 /// original defect was precisely "the app never fetched the token URL".
 - (void)testFullHandshakeAgainstADshLikeServer {
     DSHScriptedGuestLauncher *launcher = [DSHScriptedGuestLauncher new];
-    DSHTestHTTPServer *__strong server = nil;
+    __block DSHTestHTTPServer *server = nil;
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
     h.preferredPort = 39460;
     h.startupTimeout = 20;
@@ -477,7 +484,7 @@
 /// URL — which is now just a wrong credential — must not be reused.
 - (void)testHandshakeRedoesAfterARestartWithANewToken {
     DSHScriptedGuestLauncher *launcher = [DSHScriptedGuestLauncher new];
-    DSHTestHTTPServer *__strong server = nil;
+    __block DSHTestHTTPServer *server = nil;
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
     h.preferredPort = 39470;
     h.startupTimeout = 60;

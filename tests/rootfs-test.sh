@@ -258,6 +258,29 @@ guest "export HOME=/root; node --expose-internals /usr/local/lib/node_modules/@d
 check "plugin loads without bridge environment" grep -q 'host-bridge' "$WORK/config-nobridge.yml"
 kill $STUB_PID $MOCK_PID 2>/dev/null
 
+# Decisive split before blaming dsh: does a *plain* node http server inside the
+# guest reach the host loopback at all? run 38072139491 showed the real dsh
+# server never LISTENs on the host (lsof/netstat empty) even though dsh printed
+# its URL, which means dsh believed its listen succeeded. This test separates
+# "iSH socket forwarding is broken" (a plain server also fails) from "dsh
+# 0.2.x's own startup path never listens" (a plain server succeeds). Both point
+# at different fixes, and guessing between them is how the last several runs
+# went nowhere.
+echo "== sanity: a plain node http server in the guest must reach the host"
+sanity_ok=0
+( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "node -e 'const h=require(\"http\").createServer((q,s)=>s.end(\"sanity-ok\")); h.listen($PORT, \"127.0.0.1\", ()=>console.log(\"LISTENED\")); setTimeout(()=>process.exit(0), 120000);'" 2>&1 | filter > "$WORK/sanity.log" ) &
+for _j in $(seq 1 60); do
+    if curl -fs -o "$WORK/sanity.html" "http://127.0.0.1:$PORT/" 2>/dev/null; then
+        sanity_ok=1; break
+    fi
+    sleep 1
+done
+check "plain node http server in the guest reaches the host loopback" test "$sanity_ok" = 1
+echo "     sanity.log: $(head -3 "$WORK/sanity.log" 2>/dev/null | tr '\n' ' ')"
+# Tear the sanity server down and let the port drain before the real boot.
+pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
+sleep 2
+
 echo "== boot dsh-serve on 127.0.0.1:$PORT (timeout ${BOOT_TIMEOUT}s)"
 start=$(date +%s)
 ( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &

@@ -11,6 +11,10 @@ name: Build DSH IOS IPA (unsigned)
 #   xcodebuild archive (CODE_SIGNING_ALLOWED=NO) -> Payload/DSH.app -> .ipa
 #
 # No Apple ID, certificate or provisioning profile is used anywhere.
+#
+# Revision 2: rebuild for the foreground restart-loop fix (guest listening
+# sockets are now preserved across suspension; the health check retries instead
+# of restarting on a single timeout).
 
 on:
   workflow_dispatch:

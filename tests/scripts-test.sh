@@ -93,3 +93,29 @@ grep -q 'DSHProbeOutcomeUnauthorized' app/DSHReadinessProbe.m || {
 }
 
 printf 'ok  scripts: launch-token authentication is wired through app, log and CI\n'
+
+# The boot wait must not be a fixed sleep against the ceiling. A run that
+# returns only because BOOT_TIMEOUT was raised proves nothing about the cold
+# start, and the CI record must show the phase split, not just a bound.
+grep -q 'SERVE_IDLE_GRACE' tests/rootfs-test.sh || {
+  echo 'not ok: tests/rootfs-test.sh no longer stops waiting once the server is idle' >&2
+  exit 1
+}
+grep -q 'stopping the wait early' tests/rootfs-test.sh || {
+  echo 'not ok: the early-exit path is no longer reported in the CI log' >&2
+  exit 1
+}
+grep -q 'component split:' tests/rootfs-test.sh || {
+  echo 'not ok: the phased boot no longer reports emulator cost separately from the HTTP response' >&2
+  exit 1
+}
+grep -q 'announced the web URL at' tests/rootfs-test.sh || {
+  echo 'not ok: the phased boot no longer reports when dsh announced its URL' >&2
+  exit 1
+}
+grep -q 'only passed because BOOT_TIMEOUT was raised' tests/rootfs-test.sh || {
+  echo 'not ok: a pass that only held because of the raised ceiling would go unreported' >&2
+  exit 1
+}
+
+printf 'ok  scripts: the guest boot reports a phase split instead of only a timeout bound\n'

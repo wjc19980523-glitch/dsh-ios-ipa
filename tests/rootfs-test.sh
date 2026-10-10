@@ -18,7 +18,18 @@ BRIDGE_PORT="${DSH_BRIDGE_PORT:-3197}"
 # dsh 0.2.x composes its web plugin graph before binding and takes ~180s to
 # serve on this emulated CPU (0.1.x managed it in ~30s), so the old 300s left
 # little room for a loaded runner.
+#
+# 600s is a *guard against a false negative*, not a completion criterion, and
+# not a performance budget: a run that only passes because the ceiling is high
+# has taught us nothing about the cold start. The wait loop reports the phase
+# boundaries it actually observed (see "phased boot" below).
 BOOT_TIMEOUT="${DSH_BOOT_TIMEOUT:-600}"
+# dsh prints its serve announcement and then keeps running in the foreground
+# with nothing else to say. Reaching that line means the boot is over; waiting
+# out the remaining BOOT_TIMEOUT seconds would be dead time (it cost 420s in the
+# run that first exposed this). So the loop gives up early on a log that has
+# both announced its URL and stopped growing for this many consecutive seconds.
+SERVE_IDLE_GRACE="${DSH_SERVE_IDLE_GRACE:-10}"
 GUEST_TIMEOUT="${DSH_GUEST_TIMEOUT:-90}"
 
 pass=0; fail=0
@@ -252,6 +263,8 @@ start=$(date +%s)
 ( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
 up=0
 prev_bytes=0
+server_noticed=0
+served_at=""
 # dsh 0.2.x serves the UI on a process-token URL: it prints
 #   dsh web: http://127.0.0.1:PORT/?token=<43 chars>
 # and refuses an unauthenticated GET. The old check curled the bare path with
@@ -260,6 +273,7 @@ prev_bytes=0
 # bare path as the fallback so an older guest that needs no token still passes.
 serve_url=""
 token=""
+idle=0
 for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
     if [ -z "$serve_url" ]; then
@@ -271,11 +285,13 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
             # issue. Replace it in the log the moment it has been parsed, and
             # keep it only in this shell.
             sed -i.bak 's/token=[A-Za-z0-9_-]*/token=<redacted>/g' "$WORK/dsh-serve.log" 2>/dev/null && rm -f "$WORK/dsh-serve.log.bak"
+            server_noticed=$i
+            served_at="$i"
             echo "     [${i}s] server announced its web URL on port $PORT (token captured, not printed)"
         fi
     fi
     target="${serve_url:-http://127.0.0.1:$PORT/}"
-    if curl -fs -o "$WORK/index.html" "$target"; then up=1; break; fi
+    if curl -fs -o "$WORK/index.html" "$target"; then up=1; served_at="$i"; break; fi
     # A heartbeat every 20s separates "the guest is slow" from "the guest is
     # stuck": if the byte count keeps moving, the boot is progressing and the
     # timeout is simply too tight for an emulated CPU; if it stops, the boot
@@ -284,6 +300,18 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         now_bytes=$(wc -c < "$WORK/dsh-serve.log" 2>/dev/null || echo 0)
         echo "     [${i}s] dsh-serve.log ${now_bytes} bytes ($([ "$now_bytes" = "$prev_bytes" ] && echo stalled || echo growing))"
         prev_bytes=$now_bytes
+    fi
+    # Once the server has announced its URL and the log has gone quiet, nothing
+    # more is coming: dsh is serving and waiting on stdin. Stop burning the
+    # clock. `$serve_url` being non-empty is what makes this safe — a log that
+    # merely stopped growing without ever announcing is still a boot in
+    # progress, and still gets the full BOOT_TIMEOUT.
+    if [ -n "$serve_url" ] && [ "$i" -gt "$SERVE_IDLE_GRACE" ]; then
+        idle=$((idle + 1))
+        if [ "$idle" -ge "$SERVE_IDLE_GRACE" ]; then
+            echo "     [${i}s] serving and idle for ${SERVE_IDLE_GRACE}s; stopping the wait early"
+            break
+        fi
     fi
 done
 elapsed=$(( $(date +%s) - start )) 2>/dev/null || elapsed=0
@@ -323,13 +351,25 @@ check "unauthenticated HEAD is refused too (got $unauth_head)" test "$unauth_hea
 
 # Phased boot timings. The point is to separate the emulator's own cost from
 # what dsh 0.2.x added, so a future regression has a number to move against
-# instead of "it felt slower". These come from the serve log's own timestamps
-# where it prints them, and from our wall clock otherwise.
-if grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
+# instead of "it felt slower". `server_noticed` is the wall-clock second at
+# which dsh 0.2.x printed its URL; everything before it is emulator + Node +
+# plugin-graph cost, everything after is the HTTP round trip. The two numbers
+# together are the cold start, and they must be reported, not just bounded.
+if [ -n "$serve_url" ] || grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
     echo "     --- phased boot (wall clock from launch) ---"
-    echo "     total to first served byte: ${elapsed}s"
-    grep -E 'dsh web:|listening|plugin|ready' "$WORK/dsh-serve.log" 2>/dev/null | tail -8 | sed 's/^/     /'
+    echo "     announced the web URL at:  ${server_noticed}s"
+    echo "     first served byte at:      ${served_at}s  (HTTP round trip $((${served_at:-0} - ${server_noticed:-0}))s)"
+    echo "     total to first served byte:${elapsed}s"
+    echo "     component split:"
+    echo "       emulator + node + plugin graph  ${server_noticed}s"
+    echo "       first HTTP response            $((${served_at:-0} - ${server_noticed:-0}))s"
+    grep -E 'dsh web:|listening|plugin|ready' "$WORK/dsh-serve.log" 2>/dev/null | tail -8 | sed 's/^/       /'
     echo "     --- end phased boot ---"
+fi
+# The bound is a guard, so make it loud when it is the only thing that held.
+if [ "$up" = 1 ] && [ "$served_at" -ge "$BOOT_TIMEOUT" ]; then
+    echo "     note: only passed because BOOT_TIMEOUT was raised; treat as a"
+    echo "           performance regression, not a green light."
 fi
 
 echo

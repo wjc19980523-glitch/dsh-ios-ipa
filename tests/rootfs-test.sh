@@ -69,7 +69,9 @@ echo "== guest sanity"
 guest 'node -v; dsh --version; dsh-selftest' > "$WORK/sanity.txt"
 sed 's/^/     /' "$WORK/sanity.txt"
 check "node >= 22.19 in guest" grep -Eq '^v(22\.(19|[2-9][0-9])|2[3-9]|[3-9][0-9])' "$WORK/sanity.txt"
-check "dsh 0.1.x in guest"      grep -Eq '^0\.1\.' "$WORK/sanity.txt"
+# 0.2.x, not 0.1.x: only 0.2.x ships dsh-client-locale (the zh GUI) and the
+# corrected `deepseek-flash` model id. See scripts/build-rootfs.sh.
+check "dsh 0.2.x in guest"      grep -Eq '^0\.2\.' "$WORK/sanity.txt"
 check "dsh-selftest passes"     grep -q 'SELFTEST OK' "$WORK/sanity.txt"
 check "sharp keeps musl arm64 runtime" test -d "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linuxmusl-arm64"
 check "sharp drops unusable glibc runtime" test ! -e "$WORK/fakefs/data/usr/local/lib/node_modules/@img/sharp-linux-arm64"
@@ -85,6 +87,24 @@ guest 'export HOME=/root; node --expose-internals /usr/local/lib/node_modules/@d
 grep -A4 '^- id: sandbox-policy' "$WORK/config.yml" > "$WORK/sandbox-row.yml"
 check "sandbox-policy patched to danger-full-access" grep -q 'danger-full-access' "$WORK/sandbox-row.yml"
 check "hmr row present (needs --expose-internals)"    grep -q 'cordis-plugin-hmr' "$WORK/config.yml"
+
+# The GUI language is seeded in the image so a fresh install opens in Simplified
+# Chinese rather than following WKWebView's en-US navigator languages. Assert on
+# the composed config, not just the patch file, so a silently-rejected locale
+# section is caught here instead of on a device.
+check "locale row composed from the profile patch"   grep -q '^- id: locale' "$WORK/config.yml"
+check "locale preference is zh"                      grep -A3 '^- id: locale' "$WORK/config.yml" | grep -q 'preference: zh'
+check "locale plugin shipped (zh GUI available)"     grep -q 'dsh-client-locale' "$WORK/config.yml"
+
+# The retired id must not come back: DeepSeek still accepts `deepseek-v4-flash`
+# and quietly serves V4.1 from it, so a regression here would look like it works.
+if grep -q 'deepseek-v4-flash' "$WORK/config.yml"; then
+    bad "model catalog advertises the retired deepseek-v4-flash id"
+else
+    ok "model catalog does not advertise the retired deepseek-v4-flash id"
+fi
+check "model catalog advertises deepseek-flash"      grep -q 'deepseek-flash' "$WORK/config.yml"
+check "model catalog keeps deepseek-v4-pro"          grep -q 'deepseek-v4-pro' "$WORK/config.yml"
 
 echo "== headless LLM round trip through mock DeepSeek server (SSE via fetch polyfill)"
 node "$HERE/mock-deepseek.mjs" "$MOCK_PORT" > "$WORK/mock.log" 2>&1 &

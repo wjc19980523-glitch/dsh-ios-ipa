@@ -19,7 +19,14 @@ ALPINE_VER=3.21
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VER}.0-aarch64.tar.gz"
 ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/releases/aarch64/${ALPINE_TARBALL}"
 # Pinned dsh release; bump together with package-lock.json under rootfs/staging.
-DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
+#
+# 0.2.0-rc.2 rather than 0.1.0-rc.7: the 0.1.x tree ships neither
+# @deepseek-ai/dsh-client-locale (the shipped zh/en GUI) nor the corrected
+# `deepseek-flash` model id -- 0.1.x advertises the retired `deepseek-v4-flash`,
+# which DeepSeek still accepts but routes to the V4.1 model without saying so.
+# 0.2.x keeps `cordis.patch.yml` as the profile patch layer, so the guest's
+# existing home layout and settings survive the upgrade.
+DSH_VERSION="${DSH_VERSION:-0.2.0-rc.2}"
 
 log() { printf '\033[1;34m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -106,6 +113,17 @@ test -f build/Release/pty.node
 # then drop in our patch layer.
 node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --dump-config >/dev/null
 install -m 0644 /usr/local/share/dsh/cordis.patch.yml /root/.dsh/profiles/web/cordis.patch.yml
+# Seed the GUI language so a fresh install opens in Simplified Chinese instead of
+# following WKWebView's en-US navigator languages. dsh-client-locale validates
+# this against a BCP 47 pattern and treats an absent value as "ask the browser".
+cat >> /root/.dsh/profiles/web/cordis.patch.yml <<'PATCHEOF'
+
+# Seeded by build-rootfs.sh. Changing the language in Settings rewrites this
+# section; deleting it falls back to the browser's languages.
+- id: locale
+  config:
+    preference: zh
+PATCHEOF
 # Home-level layer: applies to every profile (see rootfs/overlay/.../home.patch.yml).
 install -m 0644 /usr/local/share/dsh/home.patch.yml /root/.dsh/cordis.patch.yml
 mkdir -p /root/workspace

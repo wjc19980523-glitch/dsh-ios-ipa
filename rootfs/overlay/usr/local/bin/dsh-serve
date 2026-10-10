@@ -7,20 +7,55 @@
 #   DSH_PORT       listen port (default 3080)
 #   DSH_WORKSPACE  initial working directory offered as the workspace
 #   DSH_HOME       harness home (default /root/.dsh)
+#   DSH_LOCALE     GUI language to select on first run (default zh)
 export HOME=/root
 export DSH_HOME="${DSH_HOME:-/root/.dsh}"
 export DSH_WORKSPACE="${DSH_WORKSPACE:-/root/workspace}"
 PORT="${DSH_PORT:-3080}"
+LOCALE_DEFAULT="${DSH_LOCALE:-zh}"
 
 mkdir -p "$DSH_WORKSPACE"
 
-# Keep the patches this image ships in place. A harness home migrated from an
-# older image (see DSHRootUpgrader) carries that image's copies, which would
-# silently pin old settings — and would drop plugins this image adds, such as
-# the host bridge.
+# ---------------------------------------------------------------------------
+# Patch layers.
+#
+# Two different files with two different owners live under $DSH_HOME, and
+# conflating them is what this block exists to avoid:
+#
+#   $DSH_HOME/cordis.patch.yml                    (home layer, ours)
+#   $DSH_HOME/profiles/web/cordis.patch.yml       (profile layer, SHARED)
+#
+# The home layer is purely ours: it only registers the host-bridge plugin, so
+# the image can rewrite it on every start and a migrated home from an older
+# image cannot pin a stale copy.
+#
+# The profile layer is NOT purely ours. Since dsh 0.2.x the GUI writes the
+# user's language choice into exactly this file, so overwriting it on every boot
+# would reset the language each launch. It is written once, when absent, and
+# then owned by the user; DSH_FORCE_PATCH=1 restores the shipped version if a
+# bad edit ever breaks the profile. A broken profile fails loudly at boot, and
+# `dsh --profile web --dump-config` is the recovery diagnostic.
+# ---------------------------------------------------------------------------
 mkdir -p "$DSH_HOME"
 install -m 0644 /usr/local/share/dsh/home.patch.yml "$DSH_HOME/cordis.patch.yml"
-[ -d "$DSH_HOME/profiles/web" ] && install -m 0644 /usr/local/share/dsh/cordis.patch.yml "$DSH_HOME/profiles/web/cordis.patch.yml"
+
+PROFILE_DIR="$DSH_HOME/profiles/web"
+mkdir -p "$PROFILE_DIR"
+if [ ! -f "$PROFILE_DIR/cordis.patch.yml" ] || [ "${DSH_FORCE_PATCH:-0}" = "1" ]; then
+    install -m 0644 /usr/local/share/dsh/cordis.patch.yml "$PROFILE_DIR/cordis.patch.yml"
+    # Seed the language with the shipped default; an existing file keeps
+    # whatever the user or the GUI already chose.
+    if [ -n "$LOCALE_DEFAULT" ]; then
+        cat >> "$PROFILE_DIR/cordis.patch.yml" <<EOF
+
+# Set by dsh-serve when the profile was first created. Changing the language in
+# Settings rewrites this section; delete it to fall back to the browser's.
+- id: locale
+  config:
+    preference: $LOCALE_DEFAULT
+EOF
+    fi
+fi
 
 cd "$DSH_WORKSPACE"
 

@@ -310,7 +310,16 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         fi
     fi
     target="${serve_url:-http://127.0.0.1:$PORT/}"
-    if curl -fs -o "$WORK/index.html" "$target"; then up=1; served_at="$i"; break; fi
+    # `-f` alone is not enough. dsh 0.2.x answers the token URL with 303 +
+    # Set-Cookie and only serves the real page after the redirect. curl does
+    # not follow a redirect without `-L`, and `-f` only fails on >=400, so the
+    # old `curl -fs` treated a 303 as success and saved its empty body as
+    # index.html -- `up` went to 1 while the manifest check below had nothing
+    # to read. `-L` follows the 303 to `./`, `-c` stores the auth cookie and
+    # `-b` replays it, so the final fetch is the real 200 page. Verified
+    # against a local 303 stub: the old form left index.html empty, this form
+    # produced the __DSH_BOOT__ body.
+    if curl -fsSL -c "$WORK/cookies.txt" -b "$WORK/cookies.txt" -o "$WORK/index.html" "$target"; then up=1; served_at="$i"; break; fi
     # Do not stop early while the request is still failing. Announcing the URL
     # and accepting on the port are two different moments: dsh prints its line
     # as the listener is being prepared, and run 38067488275 showed the gap --
@@ -382,12 +391,40 @@ if [ "$up" != 1 ]; then
     # was served. Report the reachability status the request actually got, or
     # the phase split below reads as "the HTTP round trip took 0s" when in fact
     # the request never succeeded.
-    probe_code=$(curl -s -o /dev/null -w '%{http_code}' "$base_url" 2>/dev/null || echo 000)
-    echo "     the authenticated URL answered HTTP ${probe_code:-000} (000 means no connection at all)"
+    #
+    # "HTTP 000" is NOT "connection refused". curl's exit code is the part that
+    # discriminates: 6 = DNS failure, 7 = connection refused, 28 = timeout,
+    # 52 = empty reply. All of them surface as http_code 000, so reporting 000
+    # alone is how a refused port and a DNS hang get conflated, and how a fix
+    # gets aimed at the wrong layer. Print all three -- code, exit code, wall
+    # time -- plus curl's own error string.
+    set +e
+    probe_out=$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' "$base_url" 2>&1)
+    probe_exit=$?
+    set -e
+    probe_code=$(printf '%s' "$probe_out" | awk '{print $1}')
+    probe_time=$(printf '%s' "$probe_out" | awk '{print $2}')
+    case "$probe_exit" in
+        6)  probe_why="DNS failure";;
+        7)  probe_why="connection refused";;
+        28) probe_why="timed out";;
+        52) probe_why="empty reply";;
+        0)  probe_why="connected";;
+        *)  probe_why="exit $probe_exit";;
+    esac
+    echo "     the authenticated URL answered HTTP ${probe_code:-000} in ${probe_time:-?}s (curl exit $probe_exit = ${probe_why})"
     if [ "${probe_code:-000}" = "401" ]; then
         echo "     a 401 here means the token was wrong, not that the server is down;"
         echo "     check that the capture waited for all 43 characters of the token."
     fi
+    # Decisive host-side check: is anything LISTENing on the port at all, and
+    # on which address family? The guest's bind() lands on the host socket
+    # table, so if 3181 never appears here the server never listened -- a
+    # different failure from "it listened on IPv6 and curl tried IPv4".
+    echo "     --- host sockets on :$PORT ---"
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sed 's/^/       /' || echo "       (lsof: nothing LISTENing on :$PORT)"
+    netstat -an 2>/dev/null | grep -E "[.:]$PORT[[:space:]]" | sed 's/^/       /' || echo "       (netstat: no socket on :$PORT)"
+    echo "     --- end host sockets ---"
     echo "     --- dsh-serve.log (last 60 lines) ---"
     # Redaction at the point of display, for the case where the file itself was
     # never rewritten (the token was never captured, so line 306 never ran).
@@ -405,14 +442,15 @@ if [ "$up" != 1 ]; then
 fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"
 plugin_url=$(grep -o '/plugins/[^"]*client.js?rev=[0-9a-f]*' "$WORK/index.html" | head -1)
-# The bundle route is relative to the origin, so re-attach the token.
-token_qs="${base_url#*\?}"
+# The bundle is a separate document. The auth cookie the entry URL minted is
+# the credential now, so replay it rather than re-attaching the token: dsh's
+# authorizeIndex only fires on `GET /?token=`, not on a plugin route, so a
+# token on the bundle URL would be ignored and the request refused 401.
 bundle_url="http://127.0.0.1:$PORT$plugin_url"
-[ "$token_qs" != "$base_url" ] && bundle_url="$bundle_url&$token_qs"
-code=$(curl -s -o /dev/null -w '%{http_code}' "$bundle_url")
+code=$(curl -s -b "$WORK/cookies.txt" -o /dev/null -w '%{http_code}' "$bundle_url")
 check "client plugin bundle served ($plugin_url -> $code)" test "$code" = 200
 sleep 5
-check "server still alive after 5s" curl -fs -o /dev/null "$base_url"
+check "server still alive after 5s" curl -fs -b "$WORK/cookies.txt" -o /dev/null "http://127.0.0.1:$PORT/"
 grep -Eq 'fatal|Error:' "$WORK/dsh-serve.log"; noerr=$?
 check "no fatal error in dsh-serve log" test "$noerr" != 0
 

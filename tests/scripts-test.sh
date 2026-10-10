@@ -133,6 +133,23 @@ grep -q 'component split:' tests/rootfs-test.sh || {
   echo 'not ok: the phased boot no longer reports emulator cost separately from the HTTP response' >&2
   exit 1
 }
+# The entry fetch must follow the 303 and store the auth cookie. dsh 0.2.x
+# answers the token URL with 303 + Set-Cookie; `curl -fs` alone does not follow
+# the redirect (`-f` only fails on >=400) and saved an empty 303 body as
+# index.html, so `up` read 1 while the __DSH_BOOT__ manifest had nothing to
+# read. `-L` follows, `-c`/`-b` carry the cookie.
+grep -q 'curl -fsSL -c "\$WORK/cookies.txt" -b "\$WORK/cookies.txt"' tests/rootfs-test.sh || {
+  echo 'not ok: the entry fetch no longer follows the 303 redirect and stores the auth cookie' >&2
+  exit 1
+}
+# The failure path must report curl's exit code, not just http_code 000. 000
+# means "no response"; the exit code is what distinguishes refused (7) from
+# DNS (6) from timeout (28) from empty reply (52). Reporting 000 alone is how
+# those get conflated and the fix aimed at the wrong layer.
+grep -q 'probe_why="connection refused"' tests/rootfs-test.sh || {
+  echo 'not ok: the failure probe no longer maps curl exit codes to a cause' >&2
+  exit 1
+}
 grep -q 'announced the web URL at' tests/rootfs-test.sh || {
   echo 'not ok: the phased boot no longer reports when dsh announced its URL' >&2
   exit 1

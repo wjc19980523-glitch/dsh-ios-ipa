@@ -37,18 +37,33 @@
 //  for that, and this file keeps it out of the ordinary paths.
 //
 
+/// Marks a plain C symbol as part of the app executable's dynamic symbol table.
+///
+/// On iOS an executable exports *no* C globals unless asked: everything is
+/// hidden by default, and `GCC_SYMBOLS_PRIVATE_EXTERN` only relaxes that for
+/// Objective-C classes. DSHTests is hosted by the app (`TEST_HOST` is
+/// `DSH.app/DSH`) and links against it through `-bundle_loader`, so every
+/// plain-C symbol a test reads -- these two constants, `DSHDisplayValue`,
+/// `DSHHarnessStateName`, an `NSNotificationName` -- is invisible to the test
+/// bundle without this. The symptom is a link failure, "Undefined symbols for
+/// architecture arm64", *after* every source file has compiled cleanly, which
+/// is misleading enough to be worth the two lines.
+///
+/// Guarded so any header can carry it, and so the `-Wl,-exported_symbol` list
+/// in AppDSH.xcconfig has exactly one name for each symbol it must match.
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 /// The query parameter dsh puts its launch token in (`TOKEN_QUERY` upstream).
 ///
-/// `DSH_EXPORTED` keeps these two symbols in the app executable's dynamic
-/// symbol table. DSHTests is hosted by the app and links against it, so an
-/// unexported global is invisible to the test bundle: the build fails at link
-/// with "Undefined symbols for architecture arm64" even though every source
-/// file compiled. GCC_SYMBOLS_PRIVATE_EXTERN only covers Objective-C classes.
-#define DSH_EXPORTED __attribute__((visibility("default")))
+/// Exported because it is a *protocol fact* -- the query key and cookie prefix
+/// that dsh 0.2.x uses -- and the tests are entitled to read it rather than
+/// restate the string and drift.
 extern DSH_EXPORTED NSString *const DSHHarnessTokenQueryKey;
 /// Prefix of the cookie dsh sets (`COOKIE_PREFIX` upstream). The full name is
 /// `dsh-auth-<base64url(sha256(authority))>`, so the prefix is all we can match

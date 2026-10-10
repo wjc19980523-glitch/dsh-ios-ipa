@@ -8,7 +8,7 @@
 #import <UIKit/UIKit.h>
 #import "DSHStartupMetrics.h"
 
-NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHLogBufferDidChangeNotification";
+DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHLogBufferDidChangeNotification";
 
 @interface DSHLogBuffer ()
 @property (nonatomic) NSMutableArray<NSString *> *storage;

@@ -7,9 +7,15 @@
 
 #import <Foundation/Foundation.h>
 
+// Same definition as DSHHarnessAuth.h; see there for why a hosted test bundle
+// cannot see an unexported C symbol.
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 NS_ASSUME_NONNULL_BEGIN
 
-extern NSNotificationName const DSHLogBufferDidChangeNotification;
+extern DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification;
 
 @interface DSHLogBuffer : NSObject
 

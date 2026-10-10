@@ -11,6 +11,12 @@
 #import "DSHLogBuffer.h"
 #import "DSHReadinessProbe.h"
 
+// Same definition as DSHHarnessAuth.h; see there for why a hosted test bundle
+// cannot see an unexported C symbol. Guarded so importing both is harmless.
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, DSHHarnessState) {
@@ -22,9 +28,9 @@ typedef NS_ENUM(NSInteger, DSHHarnessState) {
     DSHHarnessStateStopped,    // stopped on request
 };
 
-NSString *DSHHarnessStateName(DSHHarnessState state);
+DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state);
 
-extern NSNotificationName const DSHHarnessStateDidChangeNotification;
+extern DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotification;
 
 /// Everything DSHHarness needs from the emulator, so tests can fake it.
 @protocol DSHGuestProcessLauncher <NSObject>

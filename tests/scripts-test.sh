@@ -168,3 +168,46 @@ grep -q -- '-Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix' app/AppDSH.xcconfi
 }
 
 printf 'ok  scripts: the handshake constants are exported to the test bundle\n'
+
+# The same trap caught a second symbol on the next run: DSHDisplayValue is a
+# plain C function in DSHCallConfirmation, read by DSHDisplayValueTests. Rather
+# than rediscover this one link error per CI cycle, the whole set the tests
+# read is asserted here. Adding a test that touches a new C symbol without
+# exporting it now fails fast and locally, naming the symbol.
+for sym in \
+  DSHHarnessTokenQueryKey \
+  DSHHarnessAuthCookiePrefix \
+  DSHDisplayValue \
+  DSHHarnessStateName \
+  DSHHarnessStateDidChangeNotification \
+  DSHLogBufferDidChangeNotification \
+  DSHTurnWasInterruptedNotification
+do
+  grep -q -- "-Wl,-exported_symbol,_$sym" app/AppDSH.xcconfig || {
+    echo "not ok: $sym is not exported; DSHTests will fail to link against it" >&2
+    exit 1
+  }
+done
+
+# ...and the other direction: an -exported_symbol with no DSH_EXPORTED on the
+# declaration is a no-op that reads as if it worked. ld warns, but only if you
+# read the log, so check the pairing.
+for sym in \
+  DSHDisplayValue \
+  DSHHarnessStateName \
+  DSHHarnessStateDidChangeNotification \
+  DSHLogBufferDidChangeNotification \
+  DSHTurnWasInterruptedNotification
+do
+  if ! grep -q "DSH_EXPORTED[^;]*$sym" app/*.h; then
+    echo "not ok: $sym is in -exported_symbol but not marked DSH_EXPORTED in any header" >&2
+    exit 1
+  fi
+done
+
+grep -q 'ifndef DSH_EXPORTED' app/DSHHarnessAuth.h || {
+  echo 'not ok: the DSH_EXPORTED macro is no longer guarded; four headers defining it would clash' >&2
+  exit 1
+}
+
+printf 'ok  scripts: every C symbol the tests read is exported and marked\n'

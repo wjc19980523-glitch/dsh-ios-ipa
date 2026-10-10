@@ -43,12 +43,25 @@ HEADER_SEARCH_PATHS = $(ISH_SRC) $(ISH_SRC)/app $(ISH_SRC)/deps/libarchive/libar
 ARCHS[sdk=iphonesimulator*] = arm64
 EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64 i386
 
-// GCC_SYMBOLS_PRIVATE_EXTERN covers Objective-C classes, not plain C globals.
-// An executable exports no C symbols at all unless asked, so DSHTests linking
-// against DSH.app/DSH could not see `DSHHarnessAuthCookiePrefix` and failed
-// with "Undefined symbols for architecture arm64" at the link step -- after
-// every source file had compiled cleanly. Export the handshake constants
-// explicitly; they are protocol facts (the query key and cookie prefix dsh
-// 0.2.x uses), so the tests are entitled to read them rather than restate them.
+// DSHTests links against DSH.app/DSH through -bundle_loader, so it can only
+// reach symbols the executable exports. On iOS an executable exports no plain C
+// globals at all unless asked, and GCC_SYMBOLS_PRIVATE_EXTERN only relaxes that
+// for Objective-C classes. Each entry below was an "Undefined symbols for
+// architecture arm64" link failure, reported *after* every source file had
+// compiled cleanly -- which is what makes this class of mistake expensive.
+//
+// The list is exactly the C symbols the tests read, no more:
+//   DSHHarnessTokenQueryKey / DSHHarnessAuthCookiePrefix  handshake protocol facts
+//   DSHDisplayValue        the text sanitiser DSHDisplayValueTests exercises
+//   DSHHarnessStateName    maps state to a name, asserted verbatim
+//   ...StateDidChangeNotification, ...LogBufferDidChangeNotification,
+//   ...TurnWasInterruptedNotification   the tests observe these by name
+//
+// Every symbol must also be marked DSH_EXPORTED where it is declared, or it
+// stays hidden and this list has nothing to name. Adding a symbol here without
+// that attribute silently does nothing.
+//
+// One OTHER_LDFLAGS line: a second assignment would discard the first, taking
+// the framework list with it.
 GCC_SYMBOLS_PRIVATE_EXTERN = NO
-OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-exported_symbol,_DSHHarnessTokenQueryKey -Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix
+OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-exported_symbol,_DSHHarnessTokenQueryKey -Wl,-exported_symbol,_DSHHarnessAuthCookiePrefix -Wl,-exported_symbol,_DSHDisplayValue -Wl,-exported_symbol,_DSHHarnessStateName -Wl,-exported_symbol,_DSHHarnessStateDidChangeNotification -Wl,-exported_symbol,_DSHLogBufferDidChangeNotification -Wl,-exported_symbol,_DSHTurnWasInterruptedNotification

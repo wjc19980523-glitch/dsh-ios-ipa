@@ -8,7 +8,7 @@
 #import "DSHHarness.h"
 #import <UIKit/UIKit.h>
 
-NSNotificationName const DSHTurnWasInterruptedNotification = @"DSHTurnWasInterrupted";
+DSH_EXPORTED NSNotificationName const DSHTurnWasInterruptedNotification = @"DSHTurnWasInterrupted";
 NSString *const DSHTurnRecoveryStatusKey = @"status";
 static NSString *const kInterruptedAtKey = @"DSHTurnInterruptedAt";
 

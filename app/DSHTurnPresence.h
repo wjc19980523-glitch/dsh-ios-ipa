@@ -21,11 +21,17 @@
 
 #import <Foundation/Foundation.h>
 
+// Same definition as DSHHarnessAuth.h; see there for why a hosted test bundle
+// cannot see an unexported C symbol.
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 NS_ASSUME_NONNULL_BEGIN
 
 /// Posted on the main thread when the app returns to the foreground having left
 /// it mid-turn. The object is the presence instance; there is no user info.
-extern NSNotificationName const DSHTurnWasInterruptedNotification;
+extern DSH_EXPORTED NSNotificationName const DSHTurnWasInterruptedNotification;
 extern NSString *const DSHTurnRecoveryStatusKey;
 
 @interface DSHTurnPresence : NSObject

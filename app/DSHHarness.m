@@ -10,7 +10,9 @@
 #import "DSHGuestLauncher.h"
 #import "DSHStartupMetrics.h"
 
-NSNotificationName const DSHHarnessStateDidChangeNotification = @"DSHHarnessStateDidChangeNotification";
+// Both exported to match DSHHarness.h: DSHTests reads the state name and
+// observes the notification through the app's own symbol, not a copy.
+DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotification = @"DSHHarnessStateDidChangeNotification";
 static NSString *const kExpectedStartupKey = @"DSHExpectedStartupDuration";
 // Only seeds the progress overlay's estimate before the first successful boot
 // has been measured; -expectedStartupDuration replaces it with a smoothed real
@@ -23,7 +25,7 @@ static const NSTimeInterval kPersistentFailureWindow = 10 * 60;
 /// window a fresh check adds nothing but load.
 static const NSTimeInterval kHealthCheckDebounce = 2;
 
-NSString *DSHHarnessStateName(DSHHarnessState state) {
+DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     switch (state) {
         case DSHHarnessStateIdle: return @"idle";
         case DSHHarnessStateStarting: return @"starting";

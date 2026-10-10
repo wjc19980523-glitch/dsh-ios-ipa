@@ -21,6 +21,13 @@
 //      from.
 //
 
+// Same definition as DSHHarnessAuth.h, repeated under a guard rather than
+// pulled in with an #import: this header is about confirmation dialogs and has
+// no business depending on the launch-token handshake just to borrow a macro.
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -90,6 +97,11 @@ typedef NS_ENUM(NSInteger, DSHConfirmationOutcome) {
 /// This does not make attacker-chosen text safe to believe. It makes it
 /// identifiable: what survives is one bounded run, and the sentence around it
 /// belongs to DSH.
-NSString *DSHDisplayValue(NSString *_Nullable value, NSUInteger limit);
+// DSH_EXPORTED: on iOS an executable exports no plain C globals unless asked,
+// and DSHTests links against DSH.app/DSH through -bundle_loader, so
+// DSHDisplayValueTests could not resolve this at link time even though every
+// source file compiled. GCC_SYMBOLS_PRIVATE_EXTERN covers Objective-C classes
+// only, which is why the two cases need the same explicit treatment.
+DSH_EXPORTED NSString *DSHDisplayValue(NSString *_Nullable value, NSUInteger limit);
 
 NS_ASSUME_NONNULL_END

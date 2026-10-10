@@ -20,7 +20,10 @@ static NSUInteger sPresentedCount = 0;
 static BOOL sPromptUp = NO;
 static NSLock *sLock = nil;
 
-NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
+// DSH_EXPORTED here matches the declaration in the header; without it the
+// definition still lands in the executable's private symbol table and
+// DSHDisplayValueTests fails to link.
+DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
     if (![value isKindOfClass:NSString.class] || value.length == 0)
         return @"";
 

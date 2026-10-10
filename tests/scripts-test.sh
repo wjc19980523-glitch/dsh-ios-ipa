@@ -132,6 +132,19 @@ grep -q 'only passed because BOOT_TIMEOUT was raised' tests/rootfs-test.sh || {
   echo 'not ok: a pass that only held because of the raised ceiling would go unreported' >&2
   exit 1
 }
+# The heartbeat must not call a healthy boot "stalled". dsh-serve writes nothing
+# until it is finished, so a flat byte count is the normal state for the first
+# ~160s; the label is what a reader uses to decide whether to investigate.
+grep -q 'still booting: no output yet' tests/rootfs-test.sh || {
+  echo 'not ok: the heartbeat no longer distinguishes a silent boot from a hang' >&2
+  exit 1
+}
+# And the report must state the emulator-vs-Harness split, not just print two
+# numbers and leave the conclusion to the reader.
+grep -q 'is emulator + node + plugins' tests/rootfs-test.sh || {
+  echo 'not ok: the phased boot no longer draws the emulator/Harness split conclusion' >&2
+  exit 1
+}
 
 printf 'ok  scripts: the guest boot reports a phase split instead of only a timeout bound\n'
 

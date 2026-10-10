@@ -315,9 +315,23 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
     # stuck": if the byte count keeps moving, the boot is progressing and the
     # timeout is simply too tight for an emulated CPU; if it stops, the boot
     # deadlocked and the log's last line names where.
+    #
+    # The wording matters here. dsh-serve writes nothing at all until it has
+    # finished booting -- 160s of a healthy boot is a rock-steady 0 bytes -- so
+    # calling a flat line "stalled" reads as a fault when it is the normal
+    # state. Say "quiet", and reserve "stalled" for the case that actually
+    # matters: the log went quiet *after* the server announced, which is the
+    # end of boot rather than a hang.
     if [ $((i % 20)) = 0 ]; then
         now_bytes=$(wc -c < "$WORK/dsh-serve.log" 2>/dev/null || echo 0)
-        echo "     [${i}s] dsh-serve.log ${now_bytes} bytes ($([ "$now_bytes" = "$prev_bytes" ] && echo stalled || echo growing))"
+        if [ "$now_bytes" != "$prev_bytes" ]; then
+            state="writing"
+        elif [ -n "$serve_url" ]; then
+            state="quiet (server is up, waiting on stdin)"
+        else
+            state="quiet (still booting: no output yet)"
+        fi
+        echo "     [${i}s] dsh-serve.log ${now_bytes} bytes -- ${state}"
         prev_bytes=$now_bytes
     fi
     # Once the server has announced its URL and the log has gone quiet, nothing
@@ -397,6 +411,17 @@ if [ -n "$serve_url" ] || grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
     if [ "$up" = 1 ]; then
         echo "       first served byte at:           ${served_at}s (round trip $((${served_at} - ${server_noticed}))s)"
         echo "     total to first served byte:${elapsed}s"
+        # State the conclusion rather than leaving the two numbers to be
+        # eyeballed. This is the question the phased report exists to answer:
+        # is the ~180s cold start the emulator being slow, or dsh 0.2.x having
+        # got slower? Everything before the announcement is iSH emulating an
+        # aarch64 CPU through Node's startup and the plugin graph; everything
+        # after is dsh's own HTTP layer, which on a loopback is milliseconds.
+        if [ "$server_noticed" -gt 0 ]; then
+            pct=$((server_noticed * 100 / elapsed))
+            echo "       -> ${pct}% of the cold start is emulator + node + plugins,"
+            echo "          $((100 - pct))% is the Harness's own late startup."
+        fi
     else
         echo "       first served byte:              never (no successful request)"
         echo "     total spent waiting:       ${elapsed}s"

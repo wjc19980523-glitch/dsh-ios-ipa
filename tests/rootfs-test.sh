@@ -133,7 +133,10 @@ echo "== profile composition"
 guest 'export HOME=/root; node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --dump-config' > "$WORK/config.yml"
 grep -A4 '^- id: sandbox-policy' "$WORK/config.yml" > "$WORK/sandbox-row.yml"
 check "sandbox-policy patched to danger-full-access" grep -q 'danger-full-access' "$WORK/sandbox-row.yml"
-check "hmr row present (needs --expose-internals)"    grep -q 'cordis-plugin-hmr' "$WORK/config.yml"
+# HMR is what needs --expose-internals, so its presence proves the launch flag
+# reaches the profile. dsh 0.2.x renamed the plugin: `cordis-plugin-hmr` is the
+# 0.1.x name and no longer appears in the composed web profile.
+check "hmr row present (needs --expose-internals)"    grep -q 'dsh-client-hmr' "$WORK/config.yml"
 
 # The GUI language is seeded in the image so a fresh install opens in Simplified
 # Chinese rather than following WKWebView's en-US navigator languages. Assert on

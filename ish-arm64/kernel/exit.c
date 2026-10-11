@@ -188,8 +188,15 @@ noreturn void do_exit(int status) {
                 send_signal(parent, leader->exit_signal, info);
         }
 
+        // The last exiting thread may be a worker. The host supervises the
+        // process by its leader PID, and wait reports the leader's exit code
+        // unless exit_group selected a process-wide status.
+        int group_status = leader->group->doing_group_exit
+            ? leader->group->group_exit_code : leader->exit_code;
+        printk("[dsh-ios] guest exit: leader=%d last_tid=%d wait_status=%d\n",
+                leader->pid, current->pid, group_status);
         if (exit_hook != NULL)
-            exit_hook(current, status);
+            exit_hook(leader, group_status);
     skip_zombie_notify: ;
     }
 

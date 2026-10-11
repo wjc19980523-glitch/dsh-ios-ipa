@@ -5,6 +5,18 @@
 
 #import "DSHReadinessProbe.h"
 
+static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code);
+static DSHProbeOutcome DSHProbeOutcomeForError(NSError *error);
+
+@interface DSHHTTPProbeRequest : NSObject <DSHProbeRequest>
+@property (nonatomic) NSURLSession *session;
+@property (nonatomic) NSURLSessionDataTask *task;
+@property (nonatomic, copy, nullable) void (^completion)(DSHProbeResult *result);
+@property (nonatomic) NSTimeInterval startedAt;
+@property (nonatomic) BOOL settled;
+- (void)finishWithResponse:(nullable NSURLResponse *)response error:(nullable NSError *)error;
+@end
+
 #pragma mark - Result
 
 @interface DSHProbeResult ()
@@ -76,6 +88,7 @@
 @property (nonatomic) NSDate *startedAt;
 @property (nonatomic) NSUInteger generation;
 @property (nonatomic, readwrite, getter=isRunning) BOOL running;
+@property (nonatomic, nullable) NSURLSessionDataTask *pendingTask;
 @end
 
 @implementation DSHReadinessProbe
@@ -115,6 +128,8 @@
         return;
     self.running = NO;
     self.generation++;
+    [self.pendingTask cancel];
+    self.pendingTask = nil;
     DSHReadinessHandler handler = self.handler;
     self.handler = nil;
     if (handler)
@@ -126,6 +141,8 @@
         return;
     self.running = NO;
     self.generation++;
+    [self.pendingTask cancel];
+    self.pendingTask = nil;
     DSHReadinessHandler handler = self.handler;
     self.handler = nil;
     if (handler)
@@ -164,6 +181,7 @@
             typeof(self) self = weakSelf;
             if (self == nil || generation != self.generation || !self.running)
                 return;
+            self.pendingTask = nil;
             if (ok) {
                 [self finish:YES];
                 return;
@@ -173,6 +191,7 @@
             });
         });
     }];
+    self.pendingTask = task;
     [task resume];
 }
 
@@ -228,11 +247,12 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
 
 /// One request round with a hard deadline enforced by us rather than trusting
 /// the session, so a stalled socket cannot outlive the budget.
-+ (void)performRequestWithMethod:(NSString *)method
++ (id<DSHProbeRequest>)performRequestWithMethod:(NSString *)method
                              url:(NSURL *)url
                     connectTimeout:(NSTimeInterval)connectTimeout
                      totalTimeout:(NSTimeInterval)totalTimeout
-                      completion:(void (^)(NSURLResponse * _Nullable, NSError * _Nullable, NSTimeInterval))completion {
+                      completion:(void (^)(DSHProbeResult *))completion {
+    NSAssert(NSThread.isMainThread, @"request on main");
     NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     // The per-request interval only bounds idle time between packets; a server
     // that dribbles bytes can keep a request alive far longer than the budget
@@ -246,42 +266,51 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
     // kernel already tore down during suspension, which surfaces as a bogus
     // failure on the first request after foregrounding.
     config.HTTPShouldUsePipelining = NO;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    DSHHTTPProbeRequest *request = [DSHHTTPProbeRequest new];
+    request.session = [NSURLSession sessionWithConfiguration:config];
+    request.completion = completion;
+    request.startedAt = NSProcessInfo.processInfo.systemUptime;
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = method;
     req.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
     req.timeoutInterval = totalTimeout;
 
-    NSDate *t0 = NSDate.date;
-    __block BOOL settled = NO;
-
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
+    request.task = [request.session dataTaskWithRequest:req
                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (settled) return;
-        settled = YES;
+        // URLSession completes on its own queue. Every read/write of settled,
+        // including cancellation and the watchdog, belongs to the main queue.
         dispatch_async(dispatch_get_main_queue(), ^{
-            completion(response, error, -t0.timeIntervalSinceNow);
-            [session finishTasksAndInvalidate];
+            [request finishWithResponse:response error:error];
         });
     }];
-    [task resume];
+    [request.task resume];
 
+    __weak DSHHTTPProbeRequest *weakRequest = request;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (totalTimeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (settled) return;
-        settled = YES;
-        [task cancel];
-        [session invalidateAndCancel];
+        DSHHTTPProbeRequest *request = weakRequest;
+        if (request == nil || request.settled) return;
         NSError *timeout = [NSError errorWithDomain:NSURLErrorDomain
                                               code:NSURLErrorTimedOut
                                           userInfo:@{NSLocalizedDescriptionKey: @"health check exceeded its deadline"}];
-        completion(nil, timeout, -t0.timeIntervalSinceNow);
+        [request finishWithResponse:nil error:timeout];
     });
+    return request;
 }
 
 + (void)checkURL:(NSURL *)url
          timeout:(NSTimeInterval)timeout
       completion:(void (^)(DSHProbeResult *result))completion {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self requestURL:url timeout:timeout completion:completion]; });
+        return;
+    }
+    [self requestURL:url timeout:timeout completion:completion];
+}
+
++ (id<DSHProbeRequest>)requestURL:(NSURL *)url
+                        timeout:(NSTimeInterval)timeout
+                     completion:(void (^)(DSHProbeResult *result))completion {
     NSParameterAssert(completion != nil);
     // Give the connection attempt a slice of the budget and the whole budget
     // for the exchange; a caller passing 0 means "no limit", which we clamp to
@@ -295,30 +324,43 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
     // with a Set-Cookie). HEAD is answered 401, which the resume path would
     // misread as "re-authenticate" even though the guest is healthy. GET drives
     // the real flow and NSURLSession follows the redirect to the final 200.
-    [self performRequestWithMethod:@"GET"
+    return [self performRequestWithMethod:@"GET"
                                url:url
                     connectTimeout:connect
                       totalTimeout:total
-                        completion:^(NSURLResponse *response, NSError *error, NSTimeInterval elapsed) {
-        DSHProbeResult *result = [DSHProbeResult new];
-        result.method = @"GET";
-        result.duration = elapsed;
-        result.error = error;
+                        completion:completion];
+}
 
-        if ([response isKindOfClass:NSHTTPURLResponse.class]) {
-            NSInteger code = ((NSHTTPURLResponse *) response).statusCode;
-            // 2xx/3xx only: the document was actually handed over. A 401 means
-            // dsh answered but is withholding the UI behind its launch token,
-            // which is a "go and authenticate", never a "ready".
-            result.statusCode = code;
-            result.outcome = DSHProbeOutcomeForStatusCode(code);
-        } else if (error.code == NSURLErrorCancelled) {
-            result.outcome = DSHProbeOutcomeCancelled;
-        } else {
-            result.outcome = DSHProbeOutcomeForError(error);
-        }
-        completion(result);
-    }];
+@end
+
+@implementation DSHHTTPProbeRequest
+
+- (void)cancel {
+    NSAssert(NSThread.isMainThread, @"cancel on main");
+    [self finishWithResponse:nil error:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]];
+}
+
+- (void)finishWithResponse:(NSURLResponse *)response error:(NSError *)error {
+    NSAssert(NSThread.isMainThread, @"settle on main");
+    if (self.settled) return;
+    self.settled = YES;
+    DSHProbeResult *result = [DSHProbeResult new];
+    result.method = @"GET";
+    result.duration = MAX(0, NSProcessInfo.processInfo.systemUptime - self.startedAt);
+    result.error = error;
+    if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+        result.statusCode = ((NSHTTPURLResponse *)response).statusCode;
+        result.outcome = DSHProbeOutcomeForStatusCode(result.statusCode);
+    } else {
+        result.outcome = DSHProbeOutcomeForError(error);
+    }
+    void (^completion)(DSHProbeResult *) = self.completion;
+    self.completion = nil;
+    [self.task cancel];
+    self.task = nil;
+    [self.session invalidateAndCancel];
+    self.session = nil;
+    if (completion) completion(result);
 }
 
 @end

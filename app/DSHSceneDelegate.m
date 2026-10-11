@@ -54,6 +54,7 @@ static BOOL DSHSceneIsXCTestHost(void) {
 - (void)sceneDidEnterBackground:(UIScene *)scene {
     if (DSHSceneIsXCTestHost()) return;
     [DSHLifecycleDiagnostics recordEvent:@"sceneDidEnterBackground" harness:DSHHarness.shared];
+    [DSHHarness.shared handleAppBackground];
     // iOS frees the backing socket of every listening fd this process owns
     // while it is suspended. Without this, the guest's dsh-serve keeps a
     // listen() fd that looks valid but can never accept again: the app returns
@@ -67,21 +68,8 @@ static BOOL DSHSceneIsXCTestHost(void) {
 - (void)sceneWillEnterForeground:(UIScene *)scene {
     if (DSHSceneIsXCTestHost()) return;
     [DSHLifecycleDiagnostics recordEvent:@"sceneWillEnterForeground" harness:DSHHarness.shared];
-    // Order matters. Rebuild the guest's listening sockets, then tell the
-    // harness that its last answer describes sockets that no longer exist.
-    if (![ISHShellExecutor handleAppResume]) {
-        // Nothing was suspended, so the guest's sockets were never torn down and
-        // there is no reason to distrust the last health check yet. Let the
-        // debounce and the ordinary ladder handle it, exactly as before.
-        return;
-    }
-    // handleAppResume returns YES only when it actually rebuilt sockets, i.e.
-    // after a real suspension. At that point a cached "unreachable" is an
-    // artefact of the suspension and must not count as a failure — see
-    // -[DSHHarness verifyAliveAfterResumeWithCompletion:]. The probe itself is
-    // trustworthy, so this still costs a restart if the server is genuinely
-    // gone.
-    [DSHHarness.shared verifyAliveAfterResumeWithCompletion:nil];
+    [ISHShellExecutor handleAppResume];
+    [DSHHarness.shared handleAppResume];
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {

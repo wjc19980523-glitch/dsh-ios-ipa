@@ -272,46 +272,10 @@ static int futex_wait(addr_t uaddr, dword_t val, struct timespec *timeout) {
                     unlock(&pids_lock);
                 }
             }
-            // Safety valve: continuous infinite futex stall > 180s.
-            if (timeout == NULL && stall_count >= 1800) { // 1800 * 100ms = 180s
-                bool has_live_children = false;
-                int live = 0;
-                lock(&pids_lock);
-                lock(&current->group->lock);
-                struct task *t;
-                list_for_each_entry(&current->group->threads, t, group_links) {
-                    live++;
-                    struct task *child;
-                    list_for_each_entry(&t->children, child, siblings) {
-                        if (child->group == current->group)
-                            continue;
-                        if (!child->zombie)
-                            has_live_children = true;
-                    }
-                }
-                unlock(&current->group->lock);
-                unlock(&pids_lock);
-                if (live > 1 && !has_live_children) {
-                    if (ish_exec_trace())
-                        printk("SAFETY-VALVE[futex]: pid=%d stalled %ds in futex_wait(uaddr=0x%x val=%d), %d threads, no children → exit_group\n",
-                               current->pid, stall_count / 10, uaddr, val, live);
-                    // Clean up our wait queue entry before exiting — the
-                    // wait struct lives on this thread's stack, so leaving
-                    // it linked into futex->queue after exit_group would
-                    // leave a dangling pointer. Other threads doing
-                    // futex_wake / futex_put_unlocked would then trip the
-                    // assert(list_empty(&futex->queue)) in futex.c:93 when
-                    // refcount hits 0.
-                    lock(&futex_lock);
-                    list_remove_safe(&wait.queue);
-                    futex_put_unlocked(wait.futex);
-                    unlock(&futex_lock);
-                    current->blocking = false;
-                    do_exit_group(0);
-                }
-                if (has_live_children)
-                    stall_count = 0;
-            }
+            // An indefinitely sleeping worker is normal in Node/libuv and
+            // cannot prove the process is exiting, even with no children.
+            // Only a real signal/group-exit request may interrupt this wait;
+            // those paths above still unwind the queue before dispatch cleanup.
         }
         current->blocking = false;
 

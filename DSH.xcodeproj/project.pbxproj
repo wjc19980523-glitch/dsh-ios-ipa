@@ -18,7 +18,7 @@
 		0DE147A664482359928B3351 /* DSHCapabilitiesViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 7B79AAEE9F2D9BDDC3493ABE /* DSHCapabilitiesViewController.m */; };
 		0EE934A51D26CE7A923A39FA /* freeiosterminal.png in Resources */ = {isa = PBXBuildFile; fileRef = B7150F1E8A9CF5D47A1093AF /* freeiosterminal.png */; };
 		0F279D7002C26951F76A44E3 /* CurrentRoot.m in Sources */ = {isa = PBXBuildFile; fileRef = D5E54E7F015AF50F45B4CE82 /* CurrentRoot.m */; };
-		101EDA30C2BBAE07AFDBCC11 /* DSHSceneLifecycleTests.m in Sources */ = {isa = PBXBuildFile; fileRef = E6CFD5D905423E4D62AB6F62 /* DSHSceneLifecycleTests.m */; };
+		101EDA30C2BBAE07AFDBCC11 /* DSHPermissionPromptTests.m in Sources */ = {isa = PBXBuildFile; fileRef = E6CFD5D905423E4D62AB6F62 /* DSHPermissionPromptTests.m */; };
 		101F611FF08589CB919A4A33 /* DSHShareCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = 550DEE84BA77966462240E72 /* DSHShareCapability.m */; };
 		10AD888C5BDBC16E9AA33A1C /* DSHHealthCapabilityTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D9483B2FCEC61A237466FBD1 /* DSHHealthCapabilityTests.m */; };
 		10AFAEF8811D56ED35252301 /* DSHCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = 374CABBC235777F6915F568C /* DSHCapability.m */; };
@@ -29,12 +29,13 @@
 		15DCC0009E9C54DA73FE4ED1 /* colontildehash.png in Resources */ = {isa = PBXBuildFile; fileRef = A16E099E40DCC673BF6BA463 /* colontildehash.png */; };
 		16547D4E3304249EA3229B7F /* hterm_all.js in Resources */ = {isa = PBXBuildFile; fileRef = 8A489F3D1BCC426B120848EB /* hterm_all.js */; };
 		1691C0C92C0E4EC95E8C90F5 /* notsurewhatthisis.png in Resources */ = {isa = PBXBuildFile; fileRef = BE6D2A8D38F5B60E4D64A69C /* notsurewhatthisis.png */; };
-		198E0A5A810EF74D5BDA3250 /* DSHLifecycleDiagnosticsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 630B867021CE5E47BAD51538 /* DSHLifecycleDiagnosticsTests.m */; };
+		16F94355F10B4761E8AE0A84 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7C65BE1EB0D3CEE9C224BB0B /* Foundation.framework */; };
+		198E0A5A810EF74D5BDA3250 /* DSHHostBridgeTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 630B867021CE5E47BAD51538 /* DSHHostBridgeTests.m */; };
 		1BBD649CDC2F0001F8818795 /* NSObject+SaneKVO.m in Sources */ = {isa = PBXBuildFile; fileRef = 1E5868AE3AF0B8CE167D16F9 /* NSObject+SaneKVO.m */; };
 		1EA377FC906BCDBB1FBFC570 /* AltIconViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A4A42C76B3BA6E495FF3843E /* AltIconViewController.m */; };
 		25FF772E43482930E926E2CE /* DSHPortAllocator.m in Sources */ = {isa = PBXBuildFile; fileRef = 6720118872C26F24ED9DFA0C /* DSHPortAllocator.m */; };
 		277963EDAF349EDFAD3069D4 /* DSHActivityLog.m in Sources */ = {isa = PBXBuildFile; fileRef = C1DADF81DC64C6861C2ED592 /* DSHActivityLog.m */; };
-		297268050347822E2CC63B97 /* DSHMockLLMServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E4024C5493D9DD649468587C /* DSHMockLLMServer.m */; };
+		297268050347822E2CC63B97 /* DSHLifecycleDiagnosticsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = E4024C5493D9DD649468587C /* DSHLifecycleDiagnosticsTests.m */; };
 		2B1A168F25E7C657C7198B27 /* iinhash.png in Resources */ = {isa = PBXBuildFile; fileRef = 8187EEB1091440C0000F5094 /* iinhash.png */; };
 		2B77A1CB46901ACA717CE591 /* DSHLogBuffer.m in Sources */ = {isa = PBXBuildFile; fileRef = FB710BE5B55795FBBF48038F /* DSHLogBuffer.m */; };
 		2C179A1609D535CC1C926F4E /* DSHActivityLogTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A18ABFAAA83A3F4BDA0923EE /* DSHActivityLogTests.m */; };
@@ -51,13 +52,14 @@
 		3B7024CE0C72C4A69DD2912B /* DSHAssets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5AE1B8DA3399FA7B3088CB7E /* DSHAssets.xcassets */; };
 		3F1AFCBF20D656D7E3E47243 /* ScrollbarView.m in Sources */ = {isa = PBXBuildFile; fileRef = 7BB6DAB909A6C53A1470D95F /* ScrollbarView.m */; };
 		3F1E6E421934F6306714E711 /* TerminalView.m in Sources */ = {isa = PBXBuildFile; fileRef = A9A9F78FAB05B9F5033F6F2D /* TerminalView.m */; };
-		41B8F408FF3EC728B6173CB3 /* DSHHostBridgeTests.m in Sources */ = {isa = PBXBuildFile; fileRef = EA0CE019FC77910073477015 /* DSHHostBridgeTests.m */; };
+		41B8F408FF3EC728B6173CB3 /* DSHHealthRequestTests.m in Sources */ = {isa = PBXBuildFile; fileRef = EA0CE019FC77910073477015 /* DSHHealthRequestTests.m */; };
 		428DC90E23CCD603FCC43569 /* DSHHealthCheckTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2071B06A2A5FB4A0804C7E41 /* DSHHealthCheckTests.m */; };
 		439A9CFB3E7E086BD3C38509 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C038C657F805F73E321323C5 /* SystemConfiguration.framework */; };
 		44C5B25D87D9384A25F3FD10 /* mach_exc.defs in Sources */ = {isa = PBXBuildFile; fileRef = CF4AEA04A71724CE0997AF05 /* mach_exc.defs */; settings = {ATTRIBUTES = (Server, ); }; };
 		455FC3DD14E9852A9261722E /* Roots.m in Sources */ = {isa = PBXBuildFile; fileRef = CF5E5B588DB5C495E9032284 /* Roots.m */; };
 		45C34DE1071537C992023DF8 /* DSHHarnessAuthenticationTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 8695E26F9B8FD923774E88D6 /* DSHHarnessAuthenticationTests.m */; };
 		4700ABB414A4F39D8732236E /* DSHMain.m in Sources */ = {isa = PBXBuildFile; fileRef = 6A399ED5187E12598E07C7AE /* DSHMain.m */; };
+		4766347C57C2DA76FE570EA3 /* DSHTurnPresenceTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D6BEEB4F84011966C3F8B5C2 /* DSHTurnPresenceTests.m */; };
 		4D96E4F4B9E51E8F6D7482BA /* UpgradeRootViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 9778FFBF0EC3C103B3A7AD7C /* UpgradeRootViewController.m */; };
 		4F11F87369CA370FE84F7AB7 /* PasteboardDevice.m in Sources */ = {isa = PBXBuildFile; fileRef = B9CFF7DBCCE1D6D971538BDF /* PasteboardDevice.m */; };
 		4F288314DCB7D4A1E784E9A9 /* AboutExternalKeyboardViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = C76FBA67D37FE6B1B10221B4 /* AboutExternalKeyboardViewController.m */; };
@@ -72,7 +74,7 @@
 		5A14AF1CA2B972AD6308F744 /* DSHRootViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 7EA92CBFCD354F0A49A81E0B /* DSHRootViewController.m */; };
 		5AB3E8B4723ACA5413D492F4 /* ihash1.png in Resources */ = {isa = PBXBuildFile; fileRef = 541435A8039BB2931F478548 /* ihash1.png */; };
 		5E1D51683B8847D450200B25 /* DSHLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A44D686CCBEE5927B38FAE0D /* DSHLaunchScreen.storyboard */; };
-		5F1AC594A317BA52FB51FCC7 /* DSHTurnPresenceTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F41A151515732C170095AC11 /* DSHTurnPresenceTests.m */; };
+		5F1AC594A317BA52FB51FCC7 /* DSHTestHTTPServer.m in Sources */ = {isa = PBXBuildFile; fileRef = F41A151515732C170095AC11 /* DSHTestHTTPServer.m */; };
 		61C0EDDEE1E584D60BAF22CB /* circular.png in Resources */ = {isa = PBXBuildFile; fileRef = EFFEACDC7241FCB07E4631C5 /* circular.png */; };
 		62DA1FD7124104766BDE30D8 /* reworked.png in Resources */ = {isa = PBXBuildFile; fileRef = F75B3671E2554DB101D259D0 /* reworked.png */; };
 		6752BF4CDB72FFE73D0D4FD0 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 931E5966A2A1B142F24F7D96 /* libresolv.tbd */; };
@@ -83,11 +85,11 @@
 		6C601BE067793AD13A70E478 /* dollarblock2.png in Resources */ = {isa = PBXBuildFile; fileRef = 2DFCB66F9E4A2FACC5E8064B /* dollarblock2.png */; };
 		6CD687CD9B21148BC99E9BCF /* Terminal.m in Sources */ = {isa = PBXBuildFile; fileRef = A049EF8A0010E79E3498FB62 /* Terminal.m */; };
 		6DE304D20603FF18723FE80A /* DSHBootCoordinator.m in Sources */ = {isa = PBXBuildFile; fileRef = A8A8C0389E3A3093B2E423F0 /* DSHBootCoordinator.m */; };
-		6F05D0028C4EF70F409FF672 /* DSHTestHTTPServer.m in Sources */ = {isa = PBXBuildFile; fileRef = 0E13A9CFF8F3513C72584E75 /* DSHTestHTTPServer.m */; };
+		6F05D0028C4EF70F409FF672 /* DSHSceneLifecycleTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 0E13A9CFF8F3513C72584E75 /* DSHSceneLifecycleTests.m */; };
 		6FA14D5EFC0C69B54A492C06 /* DSHCapabilityRoutesTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 05FCEAC90314C3989F4C6C35 /* DSHCapabilityRoutesTests.m */; };
 		70E748A4EDF1712BE62FC7D7 /* DSHHarnessAuth.m in Sources */ = {isa = PBXBuildFile; fileRef = 4801F0C7BC1393464CF66CAA /* DSHHarnessAuth.m */; };
 		744414F9DFE5253E983D475E /* term.js in Resources */ = {isa = PBXBuildFile; fileRef = 7024D1F997BF7715779466F3 /* term.js */; };
-		7AFC39D2A1E2ED0E80DC5152 /* DSHPermissionPromptTests.m in Sources */ = {isa = PBXBuildFile; fileRef = E936D033D687E06DB53814E7 /* DSHPermissionPromptTests.m */; };
+		7AFC39D2A1E2ED0E80DC5152 /* DSHMockLLMServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E936D033D687E06DB53814E7 /* DSHMockLLMServer.m */; };
 		80B8C255FD22BC06AB160F4B /* UserPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = 72A4113F4BE288620EB2FEC6 /* UserPreferences.m */; };
 		88F69954156EBA59901FCB0C /* ishcolontildehash.png in Resources */ = {isa = PBXBuildFile; fileRef = FA804DFBA467D9A4F208564D /* ishcolontildehash.png */; };
 		8B34DC7BACC886A415EEF0DA /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 7060793D8ED44F336BDCBD18 /* Settings.bundle */; };
@@ -108,11 +110,10 @@
 		A2C4E52C5A2B7061DB92FC45 /* DSHFilesCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = AAA06D8C5B925DB9B93E37A4 /* DSHFilesCapability.m */; };
 		A2ECA64CEC72C77F8782569B /* libarchive.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 4204103A7A70DD9F10B9ED3B /* libarchive.a */; };
 		A50FC42D3B0B1D3AB4EAE649 /* DSHGuestIntegrationTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 8BB5F98EA25193DADE0552D7 /* DSHGuestIntegrationTests.m */; };
-		A75E200EE299AC45B82F8973 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7C65BE1EB0D3CEE9C224BB0B /* Foundation.framework */; };
 		AAD29564581DFD40628D2C2A /* dollarblock1.png in Resources */ = {isa = PBXBuildFile; fileRef = CCC6F16653C0A186FDA75A09 /* dollarblock1.png */; };
+		ACD220E5924043FA72BD408F /* DSHLaunchUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = D307E8D0D97B1A9A2ED9794D /* DSHLaunchUITests.m */; };
 		AF4B57EBE0B6F61F6F8066EA /* DSHReadinessProbe.m in Sources */ = {isa = PBXBuildFile; fileRef = F4B9CC7494EF1C602E3A9C86 /* DSHReadinessProbe.m */; };
 		AF827FE4CD5AAF685A28FE3C /* DSHPhotosCapability.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D122EA427606B472B2D803D /* DSHPhotosCapability.m */; };
-		B283F2F4A4D795D27A935ED0 /* DSHLaunchUITests.m in Sources */ = {isa = PBXBuildFile; fileRef = 16F94355F10B4761E8AE0A84 /* DSHLaunchUITests.m */; };
 		B3C1C7DC42CB0770CB2FDCDF /* pydann1.png in Resources */ = {isa = PBXBuildFile; fileRef = 8934324B4591DB74CCE800B3 /* pydann1.png */; };
 		B5618E707A075918BE26D838 /* DSHTurnPresence.m in Sources */ = {isa = PBXBuildFile; fileRef = E6FA07A06B783C39F50A118F /* DSHTurnPresence.m */; };
 		B5BF9B2CC50645F35153FD9B /* DSHCoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 6246278FD4553457FF7C6E84 /* DSHCoreTests.m */; };
@@ -177,14 +178,14 @@
 			remoteGlobalIDString = BB10E0D5248DA67B009C7A74;
 			remoteInfo = libarchive;
 		};
-		ACD220E5924043FA72BD408F /* PBXContainerItemProxy */ = {
+		D41E57273C1378068D4EAAAD /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 884411E105F7FA8992E879B5A003B736 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = AA798F074EAEA9EE38AB5CCD;
 			remoteInfo = DSH;
 		};
-		DA3F4B1BB31E6A45E822C435 /* PBXContainerItemProxy */ = {
+		E1785CED9232155FB0436B33 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 884411E105F7FA8992E879B5A003B736 /* Project object */;
 			proxyType = 1;
@@ -203,22 +204,22 @@
 		0B29C0387E650C7642D5D208 /* DSHShareCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHShareCapability.h; sourceTree = "<group>"; };
 		0D281C2C6D739B5F987612DB /* cordis.patch.yml */ = {isa = PBXFileReference; includeInIndex = 1; path = cordis.patch.yml; sourceTree = "<group>"; };
 		0E06342E0F8B4D4F099A8045 /* Makefile */ = {isa = PBXFileReference; includeInIndex = 1; path = Makefile; sourceTree = "<group>"; };
-		0E13A9CFF8F3513C72584E75 /* DSHTestHTTPServer.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTestHTTPServer.m; sourceTree = "<group>"; };
+		0E13A9CFF8F3513C72584E75 /* DSHSceneLifecycleTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHSceneLifecycleTests.m; sourceTree = "<group>"; };
 		0F8C8E77A4A458943799EC80 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		117A3CB339CD06C1D8A92688 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		13AFA0C3B352FBE83EF63AE9 /* release.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = release.sh; sourceTree = "<group>"; };
 		14CEF3A1C6101C002BB4B962 /* TerminalViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = TerminalViewController.m; sourceTree = "<group>"; };
-		16F94355F10B4761E8AE0A84 /* DSHLaunchUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHLaunchUITests.m; sourceTree = "<group>"; };
 		16FAABB8EF8FB5628559333A /* RootsTableViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = RootsTableViewController.m; sourceTree = "<group>"; };
 		18CB70DF2187EB3E31F5C1B4 /* build-rootfs.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = "build-rootfs.sh"; sourceTree = "<group>"; };
 		1C02E680C9A87266790BABD5 /* report-xctests.py */ = {isa = PBXFileReference; includeInIndex = 1; path = "report-xctests.py"; sourceTree = "<group>"; };
 		1E4C4805F23D82850D299EFC /* DSHEventKitCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHEventKitCapability.h; sourceTree = "<group>"; };
 		1E5868AE3AF0B8CE167D16F9 /* NSObject+SaneKVO.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = "NSObject+SaneKVO.m"; sourceTree = "<group>"; };
 		1FAAFE722FE8434B87285D8C /* iOSFS.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = iOSFS.m; sourceTree = "<group>"; };
+		2058296F8351A998CBA3B9C7 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		2071B06A2A5FB4A0804C7E41 /* DSHHealthCheckTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHealthCheckTests.m; sourceTree = "<group>"; };
 		22014F9F34D2143A3EBF2E72 /* README.md */ = {isa = PBXFileReference; includeInIndex = 1; path = README.md; sourceTree = "<group>"; };
 		229D02714108D4F29AAA79EE /* DSHTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		23D0AFC8F24778A8041D2E1D /* neon_convert_test.c */ = {isa = PBXFileReference; includeInIndex = 1; path = neon_convert_test.c; sourceTree = "<group>"; };
+		23D0AFC8F24778A8041D2E1D /* fetch-polyfill-test.mjs */ = {isa = PBXFileReference; includeInIndex = 1; path = "fetch-polyfill-test.mjs"; sourceTree = "<group>"; };
 		27573D2C4528295828047EB8 /* DSHCapabilitiesViewController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHCapabilitiesViewController.h; sourceTree = "<group>"; };
 		2758FD9C54E70F0816160489 /* AboutNavigationController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = AboutNavigationController.m; sourceTree = "<group>"; };
 		2A95A02BAE61EF533F180638 /* DSHEventKitCapabilityTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHEventKitCapabilityTests.m; sourceTree = "<group>"; };
@@ -234,9 +235,9 @@
 		370B6F4BB633B52C43DF2C12 /* DSHLifecycleDiagnostics.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHLifecycleDiagnostics.h; sourceTree = "<group>"; };
 		374CABBC235777F6915F568C /* DSHCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHCapability.m; sourceTree = "<group>"; };
 		3A0334310D1CF5E150510E82 /* package-lock.json */ = {isa = PBXFileReference; includeInIndex = 1; path = "package-lock.json"; sourceTree = "<group>"; };
+		3AF2295D57EB33A311014C9D /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		431484D653910BD062C91164 /* term.html */ = {isa = PBXFileReference; includeInIndex = 1; path = term.html; sourceTree = "<group>"; };
 		463D83DFC074A3A2E2783832 /* ProjectRelease.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = ProjectRelease.xcconfig; sourceTree = "<group>"; };
-		4766347C57C2DA76FE570EA3 /* DSHTestHTTPServer.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHTestHTTPServer.h; sourceTree = "<group>"; };
 		47CAB2BCAD1BF71ED2D0D354 /* DSHFilesCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHFilesCapability.h; sourceTree = "<group>"; };
 		4801F0C7BC1393464CF66CAA /* DSHHarnessAuth.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHarnessAuth.m; sourceTree = "<group>"; };
 		48B00E3C98B6507A91F7DAAC /* DSHStatusOverlayView.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHStatusOverlayView.h; sourceTree = "<group>"; };
@@ -249,6 +250,7 @@
 		550DEE84BA77966462240E72 /* DSHShareCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHShareCapability.m; sourceTree = "<group>"; };
 		57CE7784D5743825ABCB2C94 /* is.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = is.png; sourceTree = "<group>"; };
 		583960BB0EA5EC7971F02FC9 /* AccessibilityFixes.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = AccessibilityFixes.m; sourceTree = "<group>"; };
+		586E9D737FFCCD7E20BE48DF /* DSHUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		587F369E01D70D173F140C8E /* term.css */ = {isa = PBXFileReference; includeInIndex = 1; path = term.css; sourceTree = "<group>"; };
 		58A6BA0AEA1E362D4C53D8FF /* AppDelegate.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
 		58AA2A500A38497EB024EB76 /* index.js */ = {isa = PBXFileReference; includeInIndex = 1; path = index.js; sourceTree = "<group>"; };
@@ -260,7 +262,7 @@
 		5FD0D5DFABA112DD0BF0F908 /* ArrowBarButton.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = ArrowBarButton.m; sourceTree = "<group>"; };
 		619B1A64E247FF5BEF499A03 /* DSHGuestLauncher.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHGuestLauncher.h; sourceTree = "<group>"; };
 		6246278FD4553457FF7C6E84 /* DSHCoreTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHCoreTests.m; sourceTree = "<group>"; };
-		630B867021CE5E47BAD51538 /* DSHLifecycleDiagnosticsTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHLifecycleDiagnosticsTests.m; sourceTree = "<group>"; };
+		630B867021CE5E47BAD51538 /* DSHHostBridgeTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHostBridgeTests.m; sourceTree = "<group>"; };
 		6626CFAAA92253B09E1050BB /* DSHStartupMetrics.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHStartupMetrics.m; sourceTree = "<group>"; };
 		6720118872C26F24ED9DFA0C /* DSHPortAllocator.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHPortAllocator.m; sourceTree = "<group>"; };
 		6A399ED5187E12598E07C7AE /* DSHMain.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHMain.m; sourceTree = "<group>"; };
@@ -270,7 +272,6 @@
 		7024D1F997BF7715779466F3 /* term.js */ = {isa = PBXFileReference; includeInIndex = 1; path = term.js; sourceTree = "<group>"; };
 		704DB3004D38ED3D6DB670ED /* DSHShortcutsCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHShortcutsCapability.m; sourceTree = "<group>"; };
 		7060793D8ED44F336BDCBD18 /* Settings.bundle */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
-		71460621359097F44B4A78A5 /* DSHUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DSHUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		71EED34785BF668996A911AE /* DSHLogViewController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHLogViewController.h; sourceTree = "<group>"; };
 		72A4113F4BE288620EB2FEC6 /* UserPreferences.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = UserPreferences.m; sourceTree = "<group>"; };
 		745C86A52EBF97591D1A4DF2 /* probe-listen.mjs */ = {isa = PBXFileReference; includeInIndex = 1; path = "probe-listen.mjs"; sourceTree = "<group>"; };
@@ -303,7 +304,6 @@
 		8FE87C67F1631DE28894A046 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		920EDF8D4CE5B5F1F7C4AB7E /* DSH.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DSH.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		931E5966A2A1B142F24F7D96 /* libresolv.tbd */ = {isa = PBXFileReference; includeInIndex = 1; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
-		946E3F07DB6F247EC75876BD /* rootfs-test.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = "rootfs-test.sh"; sourceTree = "<group>"; };
 		9648290178AB9E96B54D82D3 /* DSHPhotosCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHPhotosCapability.h; sourceTree = "<group>"; };
 		9668660F1F1E540AC51FC94C /* DSHHostBridge.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHostBridge.m; sourceTree = "<group>"; };
 		9691DB6B6548557C88DC4EC6 /* DSHLocationCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHLocationCapability.h; sourceTree = "<group>"; };
@@ -321,7 +321,7 @@
 		A6CADBDCDB3E76D8B3C47631 /* DSHNotificationCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHNotificationCapability.m; sourceTree = "<group>"; };
 		A86C746DB78A1EC1EA8D1C4D /* DSHCapabilityReportTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHCapabilityReportTests.m; sourceTree = "<group>"; };
 		A8A8C0389E3A3093B2E423F0 /* DSHBootCoordinator.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHBootCoordinator.m; sourceTree = "<group>"; };
-		A91C903747CA2C9A5E0704F3 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A91C903747CA2C9A5E0704F3 /* DSHMockLLMServer.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHMockLLMServer.h; sourceTree = "<group>"; };
 		A9A9F78FAB05B9F5033F6F2D /* TerminalView.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = TerminalView.m; sourceTree = "<group>"; };
 		AA60EFFFE91A83B81E842F24 /* fakefs.c */ = {isa = PBXFileReference; includeInIndex = 1; path = fakefs.c; sourceTree = "<group>"; };
 		AAA06D8C5B925DB9B93E37A4 /* DSHFilesCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHFilesCapability.m; sourceTree = "<group>"; };
@@ -345,9 +345,10 @@
 		C1DADF81DC64C6861C2ED592 /* DSHActivityLog.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHActivityLog.m; sourceTree = "<group>"; };
 		C42745651935D79E9B8982FA /* DSHRootUpgrader.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHRootUpgrader.m; sourceTree = "<group>"; };
 		C55CBA07D3633F2AD701F9CD /* package.json */ = {isa = PBXFileReference; includeInIndex = 1; path = package.json; sourceTree = "<group>"; };
-		C702F3058E94E2384F130B52 /* fetch-polyfill-test.mjs */ = {isa = PBXFileReference; includeInIndex = 1; path = "fetch-polyfill-test.mjs"; sourceTree = "<group>"; };
+		C702F3058E94E2384F130B52 /* rootfs-test.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = "rootfs-test.sh"; sourceTree = "<group>"; };
 		C764F8C725A6845290C2A6E4 /* Terminal.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; path = Terminal.storyboard; sourceTree = "<group>"; };
 		C76FBA67D37FE6B1B10221B4 /* AboutExternalKeyboardViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = AboutExternalKeyboardViewController.m; sourceTree = "<group>"; };
+		CB1A48F49885ECDAF2440DFF /* neon_convert_test.c */ = {isa = PBXFileReference; includeInIndex = 1; path = neon_convert_test.c; sourceTree = "<group>"; };
 		CBC04514E0AD8DF9AB6F9F55 /* libarchive.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = libarchive.xcodeproj; path = "ish-arm64/deps/libarchive.xcodeproj"; sourceTree = "<group>"; };
 		CCC6F16653C0A186FDA75A09 /* dollarblock1.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = dollarblock1.png; sourceTree = "<group>"; };
 		CF4AEA04A71724CE0997AF05 /* mach_exc.defs */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.mig; name = mach_exc.defs; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/mach/mach_exc.defs; sourceTree = DEVELOPER_DIR; };
@@ -358,40 +359,41 @@
 		D0FCD225308A0E53E409AD9C /* DSHShortcutsCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHShortcutsCapability.h; sourceTree = "<group>"; };
 		D16EB60CCA063FE47A382768 /* DSHLogBuffer.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHLogBuffer.h; sourceTree = "<group>"; };
 		D2708D078035D35F4A9F2A05 /* DSHCallConfirmation.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHCallConfirmation.m; sourceTree = "<group>"; };
-		D307E8D0D97B1A9A2ED9794D /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		D41E57273C1378068D4EAAAD /* emu-test.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = "emu-test.sh"; sourceTree = "<group>"; };
+		D307E8D0D97B1A9A2ED9794D /* DSHLaunchUITests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHLaunchUITests.m; sourceTree = "<group>"; };
 		D5A68EA0FB7D130BE9475592 /* DebugServer.c */ = {isa = PBXFileReference; includeInIndex = 1; path = DebugServer.c; sourceTree = "<group>"; };
 		D5E54E7F015AF50F45B4CE82 /* CurrentRoot.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = CurrentRoot.m; sourceTree = "<group>"; };
-		D6BEEB4F84011966C3F8B5C2 /* DSHMockLLMServer.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHMockLLMServer.h; sourceTree = "<group>"; };
+		D6BEEB4F84011966C3F8B5C2 /* DSHTurnPresenceTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTurnPresenceTests.m; sourceTree = "<group>"; };
 		D7A5ADD7EFC3238B72A31C65 /* DSHLifecycleDiagnostics.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHLifecycleDiagnostics.m; sourceTree = "<group>"; };
 		D7D89C9669961B306C5C10D5 /* DSHEventKitCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHEventKitCapability.m; sourceTree = "<group>"; };
 		D8F691BDFF6F04EBE2A21850 /* DSHRootViewController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHRootViewController.h; sourceTree = "<group>"; };
 		D9483B2FCEC61A237466FBD1 /* DSHHealthCapabilityTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHealthCapabilityTests.m; sourceTree = "<group>"; };
+		DA3F4B1BB31E6A45E822C435 /* DSHTestHTTPServer.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHTestHTTPServer.h; sourceTree = "<group>"; };
 		E0E9610E1C3223CB49D8CBB9 /* Theme.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = Theme.m; sourceTree = "<group>"; };
 		E2619E4CDD66AB8356B46492 /* dsh-serve */ = {isa = PBXFileReference; includeInIndex = 1; path = "dsh-serve"; sourceTree = "<group>"; };
 		E298419A2A3AC9C6708D32C7 /* Roots.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; path = Roots.storyboard; sourceTree = "<group>"; };
-		E4024C5493D9DD649468587C /* DSHMockLLMServer.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHMockLLMServer.m; sourceTree = "<group>"; };
+		E4024C5493D9DD649468587C /* DSHLifecycleDiagnosticsTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHLifecycleDiagnosticsTests.m; sourceTree = "<group>"; };
 		E5462F9E882A7E140CE84040 /* PassthroughView.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = PassthroughView.m; sourceTree = "<group>"; };
 		E5989BE27F9A431AE6DC34F5 /* DelayedUITask.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DelayedUITask.m; sourceTree = "<group>"; };
 		E5AD83FC2646E0BF978B1875 /* AppDSH.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = AppDSH.xcconfig; sourceTree = "<group>"; };
 		E63770B638384E8931244DBB /* DSHHarnessAuth.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHHarnessAuth.h; sourceTree = "<group>"; };
-		E6CFD5D905423E4D62AB6F62 /* DSHSceneLifecycleTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHSceneLifecycleTests.m; sourceTree = "<group>"; };
+		E6CFD5D905423E4D62AB6F62 /* DSHPermissionPromptTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHPermissionPromptTests.m; sourceTree = "<group>"; };
 		E6FA07A06B783C39F50A118F /* DSHTurnPresence.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTurnPresence.m; sourceTree = "<group>"; };
 		E85A2FB4F24F775254CC6C7A /* DSHContactsCapability.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHContactsCapability.m; sourceTree = "<group>"; };
-		E936D033D687E06DB53814E7 /* DSHPermissionPromptTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHPermissionPromptTests.m; sourceTree = "<group>"; };
-		EA0CE019FC77910073477015 /* DSHHostBridgeTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHostBridgeTests.m; sourceTree = "<group>"; };
+		E936D033D687E06DB53814E7 /* DSHMockLLMServer.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHMockLLMServer.m; sourceTree = "<group>"; };
+		EA0CE019FC77910073477015 /* DSHHealthRequestTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHHealthRequestTests.m; sourceTree = "<group>"; };
 		EA2FB8B71156D6F399692692 /* ExceptionExfiltrator.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = ExceptionExfiltrator.m; sourceTree = "<group>"; };
 		EB9A45C7D65DAE01ED336E6F /* rgb.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = rgb.png; sourceTree = "<group>"; };
 		ECF7F04E8A5D9C5B869E1DB4 /* LocationDevice.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = LocationDevice.m; sourceTree = "<group>"; };
+		EDD4F5C74E3841C1B5B3133B /* mock-deepseek.mjs */ = {isa = PBXFileReference; includeInIndex = 1; path = "mock-deepseek.mjs"; sourceTree = "<group>"; };
 		EEC21A95E24CC8163A19B23A /* DSHStatusOverlayView.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHStatusOverlayView.m; sourceTree = "<group>"; };
 		EFFEACDC7241FCB07E4631C5 /* circular.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = circular.png; sourceTree = "<group>"; };
 		F0167ED770FA298E18871577 /* ISHShellExecutor.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = ISHShellExecutor.m; sourceTree = "<group>"; };
 		F07B379D0D4F6D0DA88C80D7 /* __pycache__ */ = {isa = PBXFileReference; includeInIndex = 1; path = __pycache__; sourceTree = "<group>"; };
-		F0902D43B4DF9A0D9A065B2C /* mock-deepseek.mjs */ = {isa = PBXFileReference; includeInIndex = 1; path = "mock-deepseek.mjs"; sourceTree = "<group>"; };
+		F0902D43B4DF9A0D9A065B2C /* emu-test.sh */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.script.sh; path = "emu-test.sh"; sourceTree = "<group>"; };
 		F10B1160AB8B32258C54DE7B /* AboutAppearanceViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = AboutAppearanceViewController.m; sourceTree = "<group>"; };
 		F2B4807933E270360A16E5CC /* DSHAppDelegate.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHAppDelegate.m; sourceTree = "<group>"; };
 		F3B4572FC1538D9A6460E076 /* DSHHealthCapability.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHHealthCapability.h; sourceTree = "<group>"; };
-		F41A151515732C170095AC11 /* DSHTurnPresenceTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTurnPresenceTests.m; sourceTree = "<group>"; };
+		F41A151515732C170095AC11 /* DSHTestHTTPServer.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHTestHTTPServer.m; sourceTree = "<group>"; };
 		F4B9CC7494EF1C602E3A9C86 /* DSHReadinessProbe.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHReadinessProbe.m; sourceTree = "<group>"; };
 		F5AC543A20950B1E7F0B71F2 /* ThemeViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = ThemeViewController.m; sourceTree = "<group>"; };
 		F75B3671E2554DB101D259D0 /* reworked.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = reworked.png; sourceTree = "<group>"; };
@@ -402,14 +404,6 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		586E9D737FFCCD7E20BE48DF /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A75E200EE299AC45B82F8973 /* Foundation.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		5C915BB2B2EE041E8CC169FF /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -429,6 +423,14 @@
 				F187931439F89286B2541017 /* libiconv.tbd in Frameworks */,
 				6752BF4CDB72FFE73D0D4FD0 /* libresolv.tbd in Frameworks */,
 				A2ECA64CEC72C77F8782569B /* libarchive.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A75E200EE299AC45B82F8973 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				16F94355F10B4761E8AE0A84 /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -588,6 +590,15 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		7BA2A3469E9F8F1582B5DDCA /* emu */ = {
+			isa = PBXGroup;
+			children = (
+				CB1A48F49885ECDAF2440DFF /* neon_convert_test.c */,
+			);
+			name = emu;
+			path = emu;
+			sourceTree = "<group>";
+		};
 		7EF2A81793EC08D0761D2810 /* terminal */ = {
 			isa = PBXGroup;
 			children = (
@@ -687,12 +698,12 @@
 			isa = PBXGroup;
 			children = (
 				E336AC4E395EB7F51CDD30FC /* DSHTests */,
-				B599AA19A865FD7E4A0E57E4 /* DSHUITests */,
-				D41E57273C1378068D4EAAAD /* emu-test.sh */,
-				946E3F07DB6F247EC75876BD /* rootfs-test.sh */,
-				F0902D43B4DF9A0D9A065B2C /* mock-deepseek.mjs */,
-				C702F3058E94E2384F130B52 /* fetch-polyfill-test.mjs */,
-				EDD4F5C74E3841C1B5B3133B /* emu */,
+				B283F2F4A4D795D27A935ED0 /* DSHUITests */,
+				F0902D43B4DF9A0D9A065B2C /* emu-test.sh */,
+				C702F3058E94E2384F130B52 /* rootfs-test.sh */,
+				EDD4F5C74E3841C1B5B3133B /* mock-deepseek.mjs */,
+				23D0AFC8F24778A8041D2E1D /* fetch-polyfill-test.mjs */,
+				7BA2A3469E9F8F1582B5DDCA /* emu */,
 			);
 			name = tests;
 			path = tests;
@@ -718,11 +729,11 @@
 			path = libapps;
 			sourceTree = "<group>";
 		};
-		B599AA19A865FD7E4A0E57E4 /* DSHUITests */ = {
+		B283F2F4A4D795D27A935ED0 /* DSHUITests */ = {
 			isa = PBXGroup;
 			children = (
-				16F94355F10B4761E8AE0A84 /* DSHLaunchUITests.m */,
-				D307E8D0D97B1A9A2ED9794D /* Info.plist */,
+				D307E8D0D97B1A9A2ED9794D /* DSHLaunchUITests.m */,
+				2058296F8351A998CBA3B9C7 /* Info.plist */,
 			);
 			name = DSHUITests;
 			path = DSHUITests;
@@ -849,16 +860,17 @@
 				8695E26F9B8FD923774E88D6 /* DSHHarnessAuthenticationTests.m */,
 				D9483B2FCEC61A237466FBD1 /* DSHHealthCapabilityTests.m */,
 				2071B06A2A5FB4A0804C7E41 /* DSHHealthCheckTests.m */,
-				EA0CE019FC77910073477015 /* DSHHostBridgeTests.m */,
-				630B867021CE5E47BAD51538 /* DSHLifecycleDiagnosticsTests.m */,
-				E4024C5493D9DD649468587C /* DSHMockLLMServer.m */,
-				E936D033D687E06DB53814E7 /* DSHPermissionPromptTests.m */,
-				E6CFD5D905423E4D62AB6F62 /* DSHSceneLifecycleTests.m */,
-				0E13A9CFF8F3513C72584E75 /* DSHTestHTTPServer.m */,
-				F41A151515732C170095AC11 /* DSHTurnPresenceTests.m */,
-				D6BEEB4F84011966C3F8B5C2 /* DSHMockLLMServer.h */,
-				4766347C57C2DA76FE570EA3 /* DSHTestHTTPServer.h */,
-				A91C903747CA2C9A5E0704F3 /* Info.plist */,
+				EA0CE019FC77910073477015 /* DSHHealthRequestTests.m */,
+				630B867021CE5E47BAD51538 /* DSHHostBridgeTests.m */,
+				E4024C5493D9DD649468587C /* DSHLifecycleDiagnosticsTests.m */,
+				E936D033D687E06DB53814E7 /* DSHMockLLMServer.m */,
+				E6CFD5D905423E4D62AB6F62 /* DSHPermissionPromptTests.m */,
+				0E13A9CFF8F3513C72584E75 /* DSHSceneLifecycleTests.m */,
+				F41A151515732C170095AC11 /* DSHTestHTTPServer.m */,
+				D6BEEB4F84011966C3F8B5C2 /* DSHTurnPresenceTests.m */,
+				A91C903747CA2C9A5E0704F3 /* DSHMockLLMServer.h */,
+				DA3F4B1BB31E6A45E822C435 /* DSHTestHTTPServer.h */,
+				3AF2295D57EB33A311014C9D /* Info.plist */,
 			);
 			name = DSHTests;
 			path = DSHTests;
@@ -870,7 +882,7 @@
 				4204103A7A70DD9F10B9ED3B /* libarchive.a */,
 				920EDF8D4CE5B5F1F7C4AB7E /* DSH.app */,
 				229D02714108D4F29AAA79EE /* DSHTests.xctest */,
-				71460621359097F44B4A78A5 /* DSHUITests.xctest */,
+				586E9D737FFCCD7E20BE48DF /* DSHUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -893,15 +905,6 @@
 			);
 			name = "dsh-host-bridge";
 			path = "dsh-host-bridge";
-			sourceTree = "<group>";
-		};
-		EDD4F5C74E3841C1B5B3133B /* emu */ = {
-			isa = PBXGroup;
-			children = (
-				23D0AFC8F24778A8041D2E1D /* neon_convert_test.c */,
-			);
-			name = emu;
-			path = emu;
 			sourceTree = "<group>";
 		};
 		F05CE6C641C379C179D74177 /* lib */ = {
@@ -937,12 +940,30 @@
 			buildRules = (
 			);
 			dependencies = (
-				3AF2295D57EB33A311014C9D /* PBXTargetDependency */,
+				693AEA8E825DA97C9F10F060 /* PBXTargetDependency */,
 			);
 			name = DSHTests;
 			productName = DSHTests;
 			productReference = 229D02714108D4F29AAA79EE /* DSHTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7B87528278E29198879A6044 /* DSHUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 33B7D74F7C7F29E6825C2F0E /* Build configuration list for PBXNativeTarget "DSHUITests" */;
+			buildPhases = (
+				95ACDE19393813BAED586108 /* Sources */,
+				A75E200EE299AC45B82F8973 /* Frameworks */,
+				B599AA19A865FD7E4A0E57E4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				946E3F07DB6F247EC75876BD /* PBXTargetDependency */,
+			);
+			name = DSHUITests;
+			productName = DSHUITests;
+			productReference = 586E9D737FFCCD7E20BE48DF /* DSHUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		AA798F074EAEA9EE38AB5CCD /* DSH */ = {
 			isa = PBXNativeTarget;
@@ -967,24 +988,6 @@
 			productReference = 920EDF8D4CE5B5F1F7C4AB7E /* DSH.app */;
 			productType = "com.apple.product-type.application";
 		};
-		E1785CED9232155FB0436B33 /* DSHUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 693AEA8E825DA97C9F10F060 /* Build configuration list for PBXNativeTarget "DSHUITests" */;
-			buildPhases = (
-				110F00B256DB8ECCF3B48759 /* Sources */,
-				586E9D737FFCCD7E20BE48DF /* Frameworks */,
-				95ACDE19393813BAED586108 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				2058296F8351A998CBA3B9C7 /* PBXTargetDependency */,
-			);
-			name = DSHUITests;
-			productName = DSHUITests;
-			productReference = 71460621359097F44B4A78A5 /* DSHUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -997,7 +1000,7 @@
 					637C3120796C35D7DDC61C59 = {
 						TestTargetID = AA798F074EAEA9EE38AB5CCD;
 					};
-					E1785CED9232155FB0436B33 = {
+					7B87528278E29198879A6044 = {
 						TestTargetID = AA798F074EAEA9EE38AB5CCD;
 					};
 				};
@@ -1025,7 +1028,7 @@
 			targets = (
 				AA798F074EAEA9EE38AB5CCD /* DSH */,
 				637C3120796C35D7DDC61C59 /* DSHTests */,
-				E1785CED9232155FB0436B33 /* DSHUITests */,
+				7B87528278E29198879A6044 /* DSHUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -1091,7 +1094,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		95ACDE19393813BAED586108 /* Resources */ = {
+		B599AA19A865FD7E4A0E57E4 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -1267,14 +1270,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		110F00B256DB8ECCF3B48759 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				B283F2F4A4D795D27A935ED0 /* DSHLaunchUITests.m in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		78025EB1D09D18C6E5D4076B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1290,35 +1285,44 @@
 				45C34DE1071537C992023DF8 /* DSHHarnessAuthenticationTests.m in Sources */,
 				10AD888C5BDBC16E9AA33A1C /* DSHHealthCapabilityTests.m in Sources */,
 				428DC90E23CCD603FCC43569 /* DSHHealthCheckTests.m in Sources */,
-				41B8F408FF3EC728B6173CB3 /* DSHHostBridgeTests.m in Sources */,
-				198E0A5A810EF74D5BDA3250 /* DSHLifecycleDiagnosticsTests.m in Sources */,
-				297268050347822E2CC63B97 /* DSHMockLLMServer.m in Sources */,
-				7AFC39D2A1E2ED0E80DC5152 /* DSHPermissionPromptTests.m in Sources */,
-				101EDA30C2BBAE07AFDBCC11 /* DSHSceneLifecycleTests.m in Sources */,
-				6F05D0028C4EF70F409FF672 /* DSHTestHTTPServer.m in Sources */,
-				5F1AC594A317BA52FB51FCC7 /* DSHTurnPresenceTests.m in Sources */,
+				41B8F408FF3EC728B6173CB3 /* DSHHealthRequestTests.m in Sources */,
+				198E0A5A810EF74D5BDA3250 /* DSHHostBridgeTests.m in Sources */,
+				297268050347822E2CC63B97 /* DSHLifecycleDiagnosticsTests.m in Sources */,
+				7AFC39D2A1E2ED0E80DC5152 /* DSHMockLLMServer.m in Sources */,
+				101EDA30C2BBAE07AFDBCC11 /* DSHPermissionPromptTests.m in Sources */,
+				6F05D0028C4EF70F409FF672 /* DSHSceneLifecycleTests.m in Sources */,
+				5F1AC594A317BA52FB51FCC7 /* DSHTestHTTPServer.m in Sources */,
+				4766347C57C2DA76FE570EA3 /* DSHTurnPresenceTests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		95ACDE19393813BAED586108 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ACD220E5924043FA72BD408F /* DSHLaunchUITests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		2058296F8351A998CBA3B9C7 /* PBXTargetDependency */ = {
+		693AEA8E825DA97C9F10F060 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = DSH;
 			target = AA798F074EAEA9EE38AB5CCD /* DSH */;
-			targetProxy = ACD220E5924043FA72BD408F /* PBXContainerItemProxy */;
-		};
-		3AF2295D57EB33A311014C9D /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = DSH;
-			target = AA798F074EAEA9EE38AB5CCD /* DSH */;
-			targetProxy = DA3F4B1BB31E6A45E822C435 /* PBXContainerItemProxy */;
+			targetProxy = E1785CED9232155FB0436B33 /* PBXContainerItemProxy */;
 		};
 		768D73FAEE4EAF42CE27FDB4 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = libarchive;
 			targetProxy = 71A551B2E122AEE27FED4A0B /* PBXContainerItemProxy */;
+		};
+		946E3F07DB6F247EC75876BD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = DSH;
+			target = AA798F074EAEA9EE38AB5CCD /* DSH */;
+			targetProxy = D41E57273C1378068D4EAAAD /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1337,7 +1341,7 @@
 			};
 			name = Release;
 		};
-		33B7D74F7C7F29E6825C2F0E /* Debug */ = {
+		110F00B256DB8ECCF3B48759 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
@@ -1374,7 +1378,7 @@
 			};
 			name = Debug;
 		};
-		7B87528278E29198879A6044 /* Release */ = {
+		71460621359097F44B4A78A5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
@@ -1474,20 +1478,20 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		33B7D74F7C7F29E6825C2F0E /* Build configuration list for PBXNativeTarget "DSHUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				71460621359097F44B4A78A5 /* Release */,
+				110F00B256DB8ECCF3B48759 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		4C06B262993963766A600DF9 /* Build configuration list for PBXNativeTarget "DSHTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				CA5C487F4CEC0BDCC1B766A2 /* Release */,
 				B304D2AE295C75D35DCDEBD8 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		693AEA8E825DA97C9F10F060 /* Build configuration list for PBXNativeTarget "DSHUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				7B87528278E29198879A6044 /* Release */,
-				33B7D74F7C7F29E6825C2F0E /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

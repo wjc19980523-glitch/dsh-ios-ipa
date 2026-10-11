@@ -74,6 +74,12 @@ typedef NS_ENUM(NSInteger, DSHProbeOutcome) {
 
 @end
 
+/// A single network request. Cancellation is main-queue-only and settles the
+/// request once with Cancelled; a later URLSession completion is ignored.
+@protocol DSHProbeRequest <NSObject>
+- (void)cancel;
+@end
+
 @interface DSHReadinessProbe : NSObject
 
 - (instancetype)initWithURL:(NSURL *)url
@@ -105,6 +111,11 @@ typedef NS_ENUM(NSInteger, DSHProbeOutcome) {
 + (void)checkURL:(NSURL *)url
          timeout:(NSTimeInterval)timeout
        completion:(void (^)(DSHProbeResult *result))completion;
+
+/// Cancellable form used by lifecycle-aware supervision. Call on the main queue.
++ (id<DSHProbeRequest>)requestURL:(NSURL *)url
+                        timeout:(NSTimeInterval)timeout
+                     completion:(void (^)(DSHProbeResult *result))completion;
 
 @end
 

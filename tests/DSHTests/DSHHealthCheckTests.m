@@ -453,19 +453,30 @@
     server = nil;
     NSUInteger launchesBefore = launcher.launches.count;
 
+    __block DSHProbeResult *failure = nil;
     XCTestExpectation *restarting = [self expectationForNotification:DSHHarnessStateDidChangeNotification
                                                              object:h
                                                             handler:^BOOL(NSNotification *n) {
-        return h.state == DSHHarnessStateRestarting || h.state == DSHHarnessStateStopped;
+        if (h.state != DSHHarnessStateRestarting && h.state != DSHHarnessStateStopped) return NO;
+        // Restart publishes Stopped before the delayed replacement launch,
+        // which clears lastHealthCheck. Preserve the failure at its boundary.
+        failure = h.lastHealthCheck;
+        return YES;
     }];
     restarting.assertForOverFulfill = NO;
     [h verifyAliveAfterResumeWithCompletion:nil];
     [self waitForExpectations:@[restarting] timeout:20];
 
     XCTAssertGreaterThanOrEqual(h.restartCount, 1u, @"a dead server is still restarted after a resume");
+    XCTAssertNotNil(failure, @"the failed operation is captured before the replacement clears it");
+    XCTAssertTrue(failure.indicatesDeadServer);
+    XCTestExpectation *relaunched = [self expectationForPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            return h.state == DSHHarnessStateReady && launcher.launches.count > launchesBefore;
+        }] evaluatedWithObject:h handler:nil];
+    [self waitForExpectations:@[relaunched] timeout:20];
     XCTAssertGreaterThan(launcher.launches.count, launchesBefore, @"and a new guest process is launched");
-    XCTAssertNotNil(h.lastHealthCheck, @"the result is kept for diagnosis");
-    XCTAssertTrue(h.lastHealthCheck.indicatesDeadServer);
+    if (server) [server stop];
 }
 
 /// A resume with no preceding suspension must be inert: it happens on every

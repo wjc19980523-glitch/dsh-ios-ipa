@@ -42,7 +42,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E1785CED9232155FB0436B33"
+               BlueprintIdentifier = "7B87528278E29198879A6044"
                BuildableName = "DSHUITests.xctest"
                BlueprintName = "DSHUITests"
                ReferencedContainer = "container:DSH.xcodeproj">
@@ -80,7 +80,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E1785CED9232155FB0436B33"
+               BlueprintIdentifier = "7B87528278E29198879A6044"
                BuildableName = "DSHUITests.xctest"
                BlueprintName = "DSHUITests"
                ReferencedContainer = "container:DSH.xcodeproj">

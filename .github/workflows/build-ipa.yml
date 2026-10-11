@@ -52,6 +52,12 @@ on:
       - "scripts/report-xctests.py"
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
+      - "tests/guest-exit-test.c"
+      - "tests/guest-exit-test.sh"
+      - "tests/futex-idle-test.c"
+      - "tests/futex-idle-test.sh"
+      - "tests/sockrestart-test.sh"
+      - "tests/sockrestart-test.c"
       - "tests/xctest-runner-test.py"
       - "DSH.xcodeproj/**"
 
@@ -390,6 +396,15 @@ jobs:
 
       - name: XCTest runner count and exit-code regressions
         run: python3 tests/xctest-runner-test.py
+
+      - name: Socket recovery resource regression (real loopback + failure injection)
+        run: bash tests/sockrestart-test.sh
+
+      - name: Guest process exit identity regression (production exit + pthreads)
+        run: bash tests/guest-exit-test.sh
+
+      - name: Idle workers preserve a healthy guest (production futex + pthreads)
+        run: bash tests/futex-idle-test.sh
 
       - name: Project test suites (script contract + emulator regressions + guest integration)
         run: |

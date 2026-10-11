@@ -10,6 +10,7 @@
 #import <XCTest/XCTest.h>
 #import <UIKit/UIKit.h>
 #import <TargetConditionals.h>
+#include <signal.h>
 #import "DSHHarness.h"
 #import "DSHBootCoordinator.h"
 #import "ISHShellExecutor.h"
@@ -61,6 +62,59 @@
         [fetched fulfill];
     }] resume];
     [self waitForExpectations:@[fetched] timeout:30];
+}
+
+/// Exercise the actual guest exit callback and automatic supervisor relaunch.
+- (void)testRealGuestExitRecoversAutomatically {
+    if (![self waitForReady]) return;
+    DSHHarness *h = DSHHarness.shared;
+    int originalPid = h.guestPid;
+    NSUInteger originalRestarts = h.restartCount;
+    NSUInteger originalAuthentication = h.authenticationGeneration;
+    NSString *hostLaunchID = DSHLogBuffer.hostLaunchID;
+    XCTAssertGreaterThan(originalPid, 0);
+
+    // Create before SIGKILL so even a fast exit/relaunch cannot be missed.
+    // Keep it standalone: a failed injection must not leave a test-case
+    // expectation registered for a recovery that cannot occur.
+    XCTestExpectation *recovered = [[XCTNSPredicateExpectation alloc] initWithPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            (void)object; (void)bindings;
+            return (h.state == DSHHarnessStateReady && h.guestPid > 0 &&
+                    h.guestPid != originalPid && h.authenticationReady) ||
+                   h.state == DSHHarnessStateFailed;
+        }] object:h];
+    BOOL injected = [ISHShellExecutor killProcess:originalPid withSignal:SIGKILL];
+    XCTAssertTrue(injected,
+                  @"the isolated Harness guest must exist before injecting its exit");
+    if (!injected) return;
+    // No start/restart/foreground call: the production exit supervisor owns recovery.
+    [self waitForExpectations:@[recovered] timeout:300];
+    XCTAssertEqual(h.state, DSHHarnessStateReady, @"automatic recovery failed: %@", h.lastError);
+    XCTAssertGreaterThan(h.guestPid, 0);
+    XCTAssertNotEqual(h.guestPid, originalPid);
+    XCTAssertEqual(h.restartCount, originalRestarts + 1);
+    XCTAssertGreaterThan(h.authenticationGeneration, originalAuthentication);
+    XCTAssertEqualObjects(DSHLogBuffer.hostLaunchID, hostLaunchID, @"guest recovery must keep the host app alive");
+    XCTAssertNotNil(h.authenticatedEntryURL);
+    if (h.state != DSHHarnessStateReady || h.authenticatedEntryURL == nil) return;
+
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    configuration.URLCache = nil;
+    configuration.timeoutIntervalForRequest = 20;
+    configuration.timeoutIntervalForResource = 25;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    XCTestExpectation *fetched = [self expectationWithDescription:@"recovered guest serves authenticated index"];
+    [[session dataTaskWithURL:h.authenticatedEntryURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(((NSHTTPURLResponse *)response).statusCode, 200);
+        NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        XCTAssertTrue([html containsString:@"__DSH_BOOT__"], @"the new guest must serve the real boot manifest");
+        [fetched fulfill];
+    }] resume];
+    [self waitForExpectations:@[fetched] timeout:30];
+    [session finishTasksAndInvalidate];
 }
 
 - (void)testGuestSelfTestPasses {

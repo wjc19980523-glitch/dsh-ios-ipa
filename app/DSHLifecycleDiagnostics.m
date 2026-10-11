@@ -29,15 +29,11 @@
             @"thread": @(f.owner.thread_id), @"type": f.mode == DSH_LIFECYCLE_FLOCK_SHARED ? @"LOCK_SH" : @"LOCK_EX",
             @"started_monotonic_ns": @(f.started_monotonic_ns), @"age_ms": @(f.age_ns / 1000000)}];
     }
-    // KVC preserves this diagnostic-only commit's compatibility with the old
-    // supervisor; commit 2 exposes the request identity as a public property.
-    NSString *generationKey = [harness respondsToSelector:NSSelectorFromString(@"healthCheckGeneration")]
-        ? @"healthCheckGeneration" : @"healthCheckRetryGeneration";
     return @{@"event": event, @"host_launch_id": DSHLogBuffer.hostLaunchID,
         @"host_pid": @(getpid()), @"host_started_epoch": @(DSHLogBuffer.hostProcessStartedAt.timeIntervalSince1970),
         @"host_start_source": DSHLogBuffer.hostProcessStartSource,
         @"guest_pid": @(harness.guestPid), @"harness_state": DSHHarnessStateName(harness.state),
-        @"health_generation": [harness valueForKey:generationKey] ?: @0,
+        @"health_generation": @(harness.healthCheckGeneration),
         @"suspend_count": @(ISHShellExecutor.lifecycleSuspendCount), @"resume_count": @(ISHShellExecutor.lifecycleResumeCount),
         @"filesystem_state": @(s.state), @"quiescing": @(s.state == DSH_LIFECYCLE_QUIESCING),
         @"quiesce_generation": @(s.generation), @"sampled_monotonic_ns": @(s.sampled_monotonic_ns),

@@ -46,11 +46,21 @@ extern DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotificatio
 - (BOOL)killProcess:(int)pid signal:(int)signal;
 @end
 
+typedef id<DSHProbeRequest> _Nonnull (^DSHHealthProbeFactory)(NSURL *url, NSTimeInterval timeout,
+                                                            void (^completion)(DSHProbeResult *result));
+typedef void (^DSHHarnessScheduler)(NSTimeInterval delay, dispatch_block_t action);
+typedef NSTimeInterval (^DSHHarnessClock)(void);
+
 @interface DSHHarness : NSObject
 
 + (instancetype)shared;
 
-- (instancetype)initWithLauncher:(id<DSHGuestProcessLauncher>)launcher NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithLauncher:(id<DSHGuestProcessLauncher>)launcher;
+/// Dependency injection keeps lifecycle races testable without network timing.
+- (instancetype)initWithLauncher:(id<DSHGuestProcessLauncher>)launcher
+              healthProbeFactory:(DSHHealthProbeFactory)factory
+                       scheduler:(DSHHarnessScheduler)scheduler
+                           clock:(DSHHarnessClock)clock NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
 @property (nonatomic, readonly) DSHHarnessState state;
@@ -82,7 +92,7 @@ extern DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotificatio
 @property (nonatomic, readonly) int guestPid;
 @property (nonatomic, readonly) NSTimeInterval lastStartupDuration;
 /// Expected time from launch to first HTTP answer, from previous runs on this
-/// device (25 s until measured once). Used for the startup progress estimate.
+/// device (180 s until measured once). Used for the startup progress estimate.
 @property (nonatomic, readonly) NSTimeInterval expectedStartupDuration;
 /// When the current launch started (nil when not starting).
 @property (nonatomic, readonly, nullable) NSDate *launchStartedAt;
@@ -116,10 +126,20 @@ extern DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotificatio
 @property (nonatomic, readonly, nullable) DSHProbeResult *lastHealthCheck;
 /// Consecutive health-check failures observed so far.
 @property (nonatomic, readonly) NSUInteger healthCheckFailures;
+/// Identity of the latest foreground health operation (0 before the first).
+/// Useful in diagnostics alongside the guest PID and authentication generation.
+@property (nonatomic, readonly) NSUInteger healthCheckGeneration;
 
 - (void)start;
 - (void)stop;
 - (void)restart;
+
+/// Enter before the guest's filesystem is quiesced. Stops all supervision work
+/// without stopping the guest. Completions from the old foreground are dropped.
+- (void)handleAppBackground;
+/// Enter after filesystem and socket restoration. Idempotent for duplicate
+/// notifications; resumes startup or starts one bounded recovery health check.
+- (void)handleAppResume;
 
 /// Runs a health check; if the server stopped answering while the process is
 /// still up (should not happen) it is restarted. Safe to call on foreground.
@@ -127,21 +147,16 @@ extern DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotificatio
 /// Tolerates transient failures: a single timeout — routine right after the
 /// app resumes, or while the emulated CPU is loaded — is logged and retried,
 /// and only `healthCheckFailuresBeforeRestart` consecutive failures restart the
-/// server. A failure that proves the listener is gone (connection refused or a
-/// 5xx) restarts immediately, so real crashes still recover on the first try.
+/// server. Outside the resume recovery window, connection refusal or a 5xx
+/// starts recovery immediately. During resume these also receive finite retries.
 - (void)verifyAliveWithCompletion:(nullable void (^)(BOOL alive))completion;
 
-/// Like -verifyAliveWithCompletion:, but for a caller that has just rebuilt the
-/// guest's listening sockets and therefore knows the answer this method is
-/// about to produce is worthless: whatever the guest reported a moment ago was
-/// measured against sockets that iOS had already destroyed.
+/// Compatibility entry point after socket restoration. The first call in a
+/// resume invalidates pre-suspension work and starts a fresh bounded check.
+/// Refusal and 5xx can be temporary while the event loop resumes, so they use
+/// at least two attempts, bounded by healthCheckFailuresBeforeRestart (default 3).
 ///
-/// It drops that cached answer — including "connection refused", which is the
-/// *expected* result while the sockets are being recreated — so the check that
-/// runs is a real one, and it bypasses the foreground debounce that would
-/// otherwise re-assert the same stale answer without probing at all.
-///
-/// Use this exactly once per resume, from the scene lifecycle. A caller that
+/// Duplicate calls coalesce with the same recovery check. A caller that
 /// only wants an advisory check (say, the web view noticing a load error) should
 /// keep using -verifyAliveWithCompletion: so it can still coalesce.
 - (void)verifyAliveAfterResumeWithCompletion:(nullable void (^)(BOOL alive))completion;

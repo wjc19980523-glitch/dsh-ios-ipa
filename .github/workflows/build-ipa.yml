@@ -442,7 +442,6 @@ jobs:
             echo "| tests/emu-test.sh (NEON gadgets, waitpid, fetch polyfill) | ${rc_emu} |"
             echo "| tests/rootfs-test.sh (boots dsh-serve, authenticates, every bridge tool) | ${rc_rootfs} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "rc_scripts=$rc_scripts rc_emu=$rc_emu rc_rootfs=$rc_rootfs"
           test "$rc_scripts" = 0 && test "$rc_emu" = 0 && test "$rc_rootfs" = 0
 
       - name: Verify no launch token leaked into the artefacts

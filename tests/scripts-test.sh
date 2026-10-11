@@ -261,7 +261,11 @@ if grep -rq 'DSHHarnessAuthCookiePrefix' app/DSHHarnessAuth.m app/DSHHarness.m \
      app/DSHRootViewController.m app/DSHReadinessProbe.m 2>/dev/null; then
   # Only the definition line counts; anything else means app code reads it and
   # -u may no longer be needed. Not an error -- just worth knowing.
-  refs=$(grep -rn 'DSHHarnessAuthCookiePrefix' app/*.m | grep -v 'const DSHHarnessAuthCookiePrefix' | wc -l)
+  # `grep -v` returns 1 when the only line is the definition itself, and under
+  # `set -euo pipefail` that nonzero exit would abort the whole script (no
+  # "not ok" line, just a silent exit 1). `|| true` keeps the count while
+  # making the substitution succeed.
+  refs=$(grep -rn 'DSHHarnessAuthCookiePrefix' app/*.m | grep -v 'const DSHHarnessAuthCookiePrefix' | wc -l || true)
   if [ "$refs" -gt 0 ]; then
     printf 'note: DSHHarnessAuthCookiePrefix now has %s in-app reader(s); -u may be redundant\n' "$refs"
   fi

@@ -75,6 +75,18 @@ fi
 
 cleanup() {
     pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
+    sleep 1
+    # Produce the redacted dsh-serve.log from the raw log on ANY exit path,
+    # including an early failure that never reaches the normal tail. The raw
+    # log holds the launch token and lives in /tmp (never uploaded/scanned);
+    # dsh-serve.log is what the workflow uploads and greps for token hygiene.
+    if [ -n "${RAW_LOG:-}" ] && [ -f "$RAW_LOG" ]; then
+        sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
+            -e 's/token=<redacted>\+/token=<redacted>/g' \
+            -e '/expose_wasm/d' \
+            "$RAW_LOG" > "$WORK/dsh-serve.log" 2>/dev/null || true
+        rm -f "$RAW_LOG"
+    fi
     for pid in "${MOCK_PID:-}" "${STUB_PID:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null; done
     true
 }
@@ -315,7 +327,13 @@ start=$(date +%s)
 # DSH_SOCK_DIAG turns on the iSH kernel-side socket lifecycle diagnostic (in
 # sock.c), tracing bind/listen on $PORT. It is a host env var, read by the ish
 # process via getenv, so it is set *before* the ish command, not inside guest.
-( DSH_SOCK_DIAG=$PORT "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
+#
+# The ish process is backgrounded DIRECTLY (no filter pipe), so $ISH_PID is the
+# real host ish process and `wait $ISH_PID` yields its true exit code/signal.
+# Its output goes to a raw log under /tmp, which is never uploaded or scanned;
+# the redacted dsh-serve.log in $WORK is produced later (and in the EXIT trap).
+RAW_LOG="/tmp/dsh-serve-$$.raw"
+DSH_SOCK_DIAG=$PORT "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" > "$RAW_LOG" 2>&1 &
 ISH_PID=$!
 ish_exit=""
 up=0
@@ -354,7 +372,7 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         # that looked exactly like an unreachable server, and the log grew to
         # 49 bytes instead of 82 (run 38061283295). Only accept the token once
         # all 43 characters are present.
-        raw=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$WORK/dsh-serve.log" 2>/dev/null | head -1)
+        raw=$(grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[A-Za-z0-9_-]*' "$RAW_LOG" 2>/dev/null | head -1)
         if [ -n "$raw" ]; then
             raw_token="${raw#*token=}"
             if [ "${#raw_token}" -ge 43 ]; then
@@ -364,10 +382,10 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         if [ -n "$serve_url" ]; then
             token="${serve_url#*token=}"
             # The token is kept only in this shell variable. We deliberately do
-            # NOT sed -i the log here: the filter pipeline is still writing it,
-            # and rewriting a live file corrupts it. Redaction happens at
-            # display/upload time (see the failure-path dump), never by
-            # mutating the in-flight log.
+            # NOT mutate the raw log in place: it is still being written by the
+            # ish process, and rewriting a live file corrupts it. Redaction
+            # happens when the raw log is copied to dsh-serve.log (end of run
+            # and in the EXIT trap), never by editing the in-flight raw file.
             server_noticed=$i
             served_at=$i
             echo "     [${i}s] server announced its web URL on port $PORT (token captured, not printed)"
@@ -414,7 +432,7 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
     # matters: the log went quiet *after* the server announced, which is the
     # end of boot rather than a hang.
     if [ $((i % 20)) = 0 ]; then
-        now_bytes=$(wc -c < "$WORK/dsh-serve.log" 2>/dev/null || echo 0)
+        now_bytes=$(wc -c < "$RAW_LOG" 2>/dev/null || echo 0)
         if [ "$now_bytes" != "$prev_bytes" ]; then
             state="writing"
         elif [ -n "$serve_url" ]; then
@@ -500,14 +518,14 @@ if [ "$up" != 1 ]; then
     # names the caller of close(). Collected whole, not via tail -60, because
     # the LISTEN/LISTENING lines precede the announcement and would be cut.
     echo "     --- probe (net.Server listen/close trace) ---"
-    grep '\[probe\]' "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/       /' || echo "       (no [probe] lines — probe did not load)"
+    grep '\[probe\]' "$RAW_LOG" 2>/dev/null | sed 's/^/       /' || echo "       (no [probe] lines — probe did not load)"
     echo "     --- end probe ---"
     # The kernel-side socket lifecycle trace (sock.c, DSH_SOCK_DIAG): bind/listen
     # return values, real_fd, bound address, and SO_ACCEPTCONN after listen. This
     # is the ground truth for "did the host really listen", kept apart from the
     # Node-level [probe] trace.
     echo "     --- DSH_DIAG (kernel socket lifecycle) ---"
-    grep 'DSH_DIAG' "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/       /' || echo "       (no DSH_DIAG lines — iSH built without the diagnostic, or env var not set)"
+    grep 'DSH_DIAG' "$RAW_LOG" 2>/dev/null | sed 's/^/       /' || echo "       (no DSH_DIAG lines — iSH built without the diagnostic, or env var not set)"
     echo "     --- end DSH_DIAG ---"
     echo "     --- dsh-serve.log (last 60 lines) ---"
     # Redaction at the point of display, for the case where the file itself was
@@ -518,7 +536,7 @@ if [ "$up" != 1 ]; then
     # already reads `token=<redacted>` it inserts a second marker and the dump
     # goes out as `token=<redacted><redacted>`. That is what run 38067488275
     # printed, and it reads as if the token had been captured twice.
-    tail -60 "$WORK/dsh-serve.log" 2>/dev/null \
+    tail -60 "$RAW_LOG" 2>/dev/null \
         | sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
               -e 's/token=<redacted>\+/token=<redacted>/g' \
               -e 's/^/     /'
@@ -535,7 +553,7 @@ code=$(curl -s -b "$WORK/cookies.txt" -o /dev/null -w '%{http_code}' "$bundle_ur
 check "client plugin bundle served ($plugin_url -> $code)" test "$code" = 200
 sleep 5
 check "server still alive after 5s" curl -fs -b "$WORK/cookies.txt" -o /dev/null "http://127.0.0.1:$PORT/"
-grep -Eq 'fatal|Error:' "$WORK/dsh-serve.log"; noerr=$?
+grep -Eq 'fatal|Error:' "$RAW_LOG"; noerr=$?
 check "no fatal error in dsh-serve log" test "$noerr" != 0
 
 # An unauthenticated request must be refused. This is the contract the iOS side
@@ -552,7 +570,7 @@ check "unauthenticated HEAD is refused too (got $unauth_head)" test "$unauth_hea
 # which dsh 0.2.x printed its URL; everything before it is emulator + Node +
 # plugin-graph cost, everything after is the HTTP round trip. The two numbers
 # together are the cold start, and they must be reported, not just bounded.
-if [ -n "$serve_url" ] || grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
+if [ -n "$serve_url" ] || grep -q 'dsh web:' "$RAW_LOG"; then
     echo "     --- phased boot (wall clock from launch) ---"
     echo "     announced the web URL at:  ${server_noticed}s"
     echo "     component split:"
@@ -579,7 +597,7 @@ if [ -n "$serve_url" ] || grep -q 'dsh web:' "$WORK/dsh-serve.log"; then
         echo "       first served byte:              never (no successful request)"
         echo "     total spent waiting:       ${elapsed}s"
     fi
-    grep -E 'dsh web:|listening|plugin|ready' "$WORK/dsh-serve.log" 2>/dev/null | tail -8 | sed 's/^/       /'
+    grep -E 'dsh web:|listening|plugin|ready' "$RAW_LOG" 2>/dev/null | tail -8 | sed 's/^/       /'
     echo "     --- end phased boot ---"
 fi
 # The bound is a guard, so make it loud when it is the only thing that held.
@@ -594,11 +612,12 @@ echo
 # itself so the uploaded artefact and the workflow's token-hygiene grep (which
 # scans build/rootfs-test/) never see it. This is a fresh copy, not sed -i on a
 # live file.
-if [ -f "$WORK/dsh-serve.log" ]; then
+if [ -f "$RAW_LOG" ]; then
     sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
         -e 's/token=<redacted>\+/token=<redacted>/g' \
-        "$WORK/dsh-serve.log" > "$WORK/dsh-serve.log.safe" 2>/dev/null \
-        && mv "$WORK/dsh-serve.log.safe" "$WORK/dsh-serve.log"
+        -e '/expose_wasm/d' \
+        "$RAW_LOG" > "$WORK/dsh-serve.log" 2>/dev/null || true
+    rm -f "$RAW_LOG"
 fi
 echo "passed=$pass failed=$fail"
 [ "$fail" = 0 ]

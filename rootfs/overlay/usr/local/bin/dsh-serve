@@ -65,6 +65,16 @@ cd "$DSH_WORKSPACE"
 # --no-open: dsh would otherwise try to launch a "default browser" inside the
 # guest, which has no desktop session and nothing to launch. The app points its
 # own WKWebView at the URL dsh prints.
-exec node --expose-internals \
-    /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
-    web --host 127.0.0.1 --port "$PORT" --no-open "$@"
+#
+# DSH_PROBE_LISTEN: CI-only diagnostic. When set to a .mjs path, that module is
+# preloaded and can observe net.Server listen/close. Never set in the shipped
+# app, so the probe file in /usr/local/share/dsh stays inert.
+if [ -n "${DSH_PROBE_LISTEN:-}" ]; then
+    exec node --expose-internals --import "$DSH_PROBE_LISTEN" \
+        /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+        web --host 127.0.0.1 --port "$PORT" --no-open "$@"
+else
+    exec node --expose-internals \
+        /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js \
+        web --host 127.0.0.1 --port "$PORT" --no-open "$@"
+fi

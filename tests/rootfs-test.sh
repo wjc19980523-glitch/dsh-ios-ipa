@@ -303,7 +303,10 @@ sleep 2
 
 echo "== boot dsh-serve on 127.0.0.1:$PORT (timeout ${BOOT_TIMEOUT}s)"
 start=$(date +%s)
-( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
+# DSH_PROBE_LISTEN turns on the CI-only listen/close probe. It is never set in
+# the shipped app, so the probe file stays inert there; here it is how we tell
+# "never listened" from "listened and then something closed it" in one run.
+( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
 up=0
 prev_bytes=0
 server_noticed=0
@@ -468,6 +471,12 @@ if [ "$up" != 1 ]; then
     lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sed 's/^/       /' || echo "       (lsof: nothing LISTENing on :$PORT)"
     netstat -an 2>/dev/null | grep -E "[.:]$PORT[[:space:]]" | sed 's/^/       /' || echo "       (netstat: no socket on :$PORT)"
     echo "     --- end host sockets ---"
+    # The probe trace answers "never listened" vs "listened then closed" and
+    # names the caller of close(). Collected whole, not via tail -60, because
+    # the LISTEN/LISTENING lines precede the announcement and would be cut.
+    echo "     --- probe (net.Server listen/close trace) ---"
+    grep '\[probe\]' "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/       /' || echo "       (no [probe] lines — probe did not load)"
+    echo "     --- end probe ---"
     echo "     --- dsh-serve.log (last 60 lines) ---"
     # Redaction at the point of display, for the case where the file itself was
     # never rewritten (the token was never captured, so line 306 never ran).

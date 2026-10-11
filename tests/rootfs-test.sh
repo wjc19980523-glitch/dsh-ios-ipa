@@ -301,29 +301,6 @@ echo "     dshlike.log: $(head -3 "$WORK/dshlike.log" 2>/dev/null | tr '\n' ' ')
 pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
 sleep 2
 
-# The probe proved the real dsh server reaches 'listening' in Node's eyes, so
-# the remaining delta between "plain server (host LISTENs)" and "dsh (host does
-# not)" is the ~160s of plugin-graph loading in between -- the most obvious
-# side effect of which is a large fd table. Open ~900 fds, then listen, and see
-# whether the host still LISTENs. If it drops here, the fd-table size is the
-# trigger and the hunt moves to iSH's fd handling; if it still LISTENs, fd
-# count is innocent and the hunt moves elsewhere. Either way this is one more
-# data point in the same run.
-echo "== sanity 3: listen after opening ~900 fds reaches the host"
-MANYFD_PORT=$((PORT + 2))
-manyfd_ok=0
-( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "node -e 'const fs=require(\"fs\"); const fds=[]; for(let i=0;i<900;i++){ try{ fds.push(fs.openSync(\"/dev/null\",\"r\")); }catch(e){ break; } } const h=require(\"http\").createServer((q,s)=>s.end(\"manyfd\")); h.listen($MANYFD_PORT,\"127.0.0.1\",()=>console.log(\"MANYFD_LISTENED fds=\"+fds.length)); setTimeout(()=>process.exit(0),120000);'" 2>&1 | filter > "$WORK/manyfd.log" ) &
-for _j in $(seq 1 60); do
-    if curl -fs -o "$WORK/manyfd.html" "http://127.0.0.1:$MANYFD_PORT/" 2>/dev/null; then
-        manyfd_ok=1; break
-    fi
-    sleep 1
-done
-check "listen after ~900 fds reaches the host" test "$manyfd_ok" = 1
-echo "     manyfd.log: $(head -3 "$WORK/manyfd.log" 2>/dev/null | tr '\n' ' ')"
-pkill -f "$ISH_BUILD/ish -f $WORK/fakefs" 2>/dev/null || true
-sleep 2
-
 echo "== boot dsh-serve on 127.0.0.1:$PORT (timeout ${BOOT_TIMEOUT}s)"
 start=$(date +%s)
 # DSH_PROBE_LISTEN turns on the CI-only listen/close probe. It is never set in

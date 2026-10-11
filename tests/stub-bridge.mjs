@@ -2,6 +2,7 @@
 // on macOS without a device. Same protocol as docs/host-bridge.md.
 //   node tests/stub-bridge.mjs <port> <token>
 import http from 'node:http';
+import { observe, observeConnections } from './service-events.mjs';
 
 const port = Number(process.argv[2] ?? 3197);
 const token = process.argv[3] ?? 'stub-token';
@@ -14,6 +15,7 @@ const DEVICE = {
 };
 
 const server = http.createServer((req, res) => {
+  observe('bridge', req, res);
   const send = (status, body) => {
     const json = JSON.stringify(body);
     res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(json) });
@@ -118,4 +120,5 @@ const server = http.createServer((req, res) => {
     send(404, { error: { code: 'invalid_request', message: `no route for ${req.method} ${path}`, recoverable: false } });
   }
 });
+observeConnections('bridge', server);
 server.listen(port, '127.0.0.1', () => console.log(`stub-bridge on http://127.0.0.1:${port}`));

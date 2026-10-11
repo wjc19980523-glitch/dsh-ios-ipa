@@ -27,6 +27,11 @@ on:
         description: "Rebuild the guest rootfs even if the cache hits"
         type: boolean
         default: false
+      rootfs_focus:
+        description: "Diagnostic wrong-token only, or the full acceptance workflow"
+        type: choice
+        options: [full, wrong-token]
+        default: full
   push:
     # The v1.1 work lands on feature/plus-v1.1 first and is only merged once the
     # build and the guest verification both pass on the Harness 0.2.0-rc.2 tree.
@@ -40,6 +45,12 @@ on:
       - "scripts/build-rootfs.sh"
       - "rootfs/**"
       - "tests/rootfs-test.sh"
+      - "tests/guest-*"
+      - "tests/guest_snapshot.py"
+      - "tests/check-bridge-refusal.py"
+      - "tests/service-events.mjs"
+      - "tests/stub-bridge.mjs"
+      - "tests/mock-deepseek.mjs"
       - "tests/emu-test.sh"
       - "tests/scripts-test.sh"
       - "tests/DSHTests/**"
@@ -87,7 +98,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dsh-ipa-${{ github.ref }}-${{ github.event.inputs.runner_label || 'xcode-27' }}
+  group: dsh-ipa-${{ github.ref }}-${{ github.event.inputs.runner_label || 'xcode-27' }}-${{ github.event.inputs.rootfs_focus || 'full' }}
   cancel-in-progress: false
 
 env:
@@ -98,6 +109,7 @@ env:
 
 jobs:
   build-and-test:
+    if: github.event.inputs.rootfs_focus != 'wrong-token'
     name: Test DSH (optional IPA) (${{ github.event.inputs.runner_label || 'xcode-27' }})
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 240
@@ -366,6 +378,9 @@ jobs:
     name: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 150
+    env:
+      DSH_ROOTFS_FOCUS: ${{ github.event.inputs.rootfs_focus || 'full' }}
+      DSH_GUEST_INITIAL_SAMPLE_AFTER: ${{ github.event.inputs.rootfs_focus == 'wrong-token' && '10' || '0' }}
 
     steps:
       - name: Checkout
@@ -377,6 +392,7 @@ jobs:
         run: |
           set -euo pipefail
           brew install meson ninja lld libarchive
+          brew install bash
           LLD_BIN="$(brew --prefix lld)/bin"
           echo "$LLD_BIN" >> "$GITHUB_PATH"
           export PATH="$LLD_BIN:$PATH"
@@ -393,6 +409,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cilogs-verify
+          # Keep release optimization. DWARF enables stopped-process, read-only
+          # task/lock snapshots without adding a diagnostic thread to the guest.
+          (cd ish-arm64 && meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release -Ddebug=true)
           make emulator 2>&1 | tee cilogs-verify/01-emulator.log
 
       - name: Build guest rootfs (only if the cache did not restore it)
@@ -410,6 +429,12 @@ jobs:
 
       - name: Native runner execution and failure-propagation regressions
         run: python3 tests/native-runner-test.py
+
+      - name: Guest helper real wait-status regressions (Bash 3.2 and Bash 5)
+        run: |
+          set -euo pipefail
+          python3 tests/guest-helper-test.py --bash /bin/bash 2>&1 | tee cilogs-verify/helper-bash32.log
+          python3 tests/guest-helper-test.py --bash "$(brew --prefix bash)/bin/bash" 2>&1 | tee cilogs-verify/helper-bash5.log
 
       - name: Native lifecycle regression tests
         run: bash tests/lifecycle-test.sh
@@ -500,5 +525,7 @@ jobs:
             build/rootfs-test/*.txt
             build/rootfs-test/*.yml
             build/rootfs-test/*.log
+            build/rootfs-test/*.jsonl
+            build/rootfs-test/guest-diagnostics/
           if-no-files-found: warn
           retention-days: 30

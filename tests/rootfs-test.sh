@@ -33,6 +33,9 @@ SERVE_IDLE_GRACE="${DSH_SERVE_IDLE_GRACE:-10}"
 GUEST_TIMEOUT="${DSH_GUEST_TIMEOUT:-90}"
 
 pass=0; fail=0
+GUEST_SEQUENCE=0; GUEST_FAILURES=0; GUEST_STATUS=0
+export DSH_TEST_EVENT_LOG="$WORK/service-events.jsonl"
+export DSH_TEST_PHASE_FILE="$WORK/current-phase"
 ok()  { pass=$((pass+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 # check <name> <command...>: runs the command (no eval), records the result
@@ -44,28 +47,7 @@ check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else
 # perl with $| = 1 flushes every line, so the log is real-time. (grep's
 # --line-buffered is GNU-only; macOS has perl.)
 filter() { perl -ne 'BEGIN { $| = 1 } print unless /expose_wasm/'; }
-timed() {
-    if command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$@"
-    elif command -v timeout >/dev/null 2>&1; then
-        timeout "$@"
-    else
-        perl -e '$seconds = shift; alarm $seconds; exec @ARGV' "$@"
-    fi
-}
-# A guest process that starts while the previous one is still tearing down can
-# lose the fakefs lock and print nothing; every command here has output, so
-# an empty result means "try again". A broken guest must not hang the release
-# gate forever, so each attempt has a hard deadline.
-guest() {
-    local out
-    for _ in 1 2; do
-        out="$(timed "$GUEST_TIMEOUT" "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "$1" 2>&1 | filter)"
-        [ -n "$out" ] && break
-        sleep 1
-    done
-    printf '%s\n' "$out"
-}
+. "$HERE/guest-helper.sh"
 
 [ -f "$TARBALL" ] || { echo "missing $TARBALL (run scripts/build-rootfs.sh)"; exit 2; }
 [ -x "$ISH_BUILD/ish" ] || { echo "iSH CLI not built"; exit 2; }
@@ -96,6 +78,26 @@ echo "== import $TARBALL"
 rm -rf "$WORK" && mkdir -p "$WORK"
 "$ISH_BUILD/tools/fakefsify" "$TARBALL" "$WORK/fakefs"
 check "root.tar.gz imports via fakefsify" test -f "$WORK/fakefs/meta.db"
+: > "$DSH_TEST_EVENT_LOG"
+
+if [ "${DSH_ROOTFS_FOCUS:-}" = wrong-token ]; then
+    echo "== focused wrong-token (not the full 62-case suite)"
+    BRIDGE_TOKEN="stub-token-$$"
+    node "$HERE/stub-bridge.mjs" "$BRIDGE_PORT" "$BRIDGE_TOKEN" > "$WORK/stub-bridge.log" 2>&1 &
+    STUB_PID=$!
+    node "$HERE/mock-deepseek.mjs" "$MOCK_PORT" --tool shortcut_run --tool-args '{"name":"Log Water"}' > "$WORK/mock-shortcut_run.log" 2>&1 &
+    MOCK_PID=$!
+    sleep 1
+    guest "export HOME=/root DEEPSEEK_API_KEY=test DEEPSEEK_BASE_URL=http://127.0.0.1:$MOCK_PORT \
+        DSH_HOST_BRIDGE_URL=http://127.0.0.1:$BRIDGE_PORT DSH_HOST_BRIDGE_TOKEN=$BRIDGE_TOKEN; \
+        cd /root/workspace; node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile headless 'Please do it.'" \
+        preceding-shortcut > "$WORK/tool-shortcut_run.txt"
+    check "preceding shortcut result" grep -q 'Started the shortcut' "$WORK/tool-shortcut_run.txt"
+    check "wrong bridge token is refused" wrong_token
+    echo "focused passed=$pass failed=$fail guest_failures=$GUEST_FAILURES"
+    [ "$fail" = 0 ] && [ "$GUEST_FAILURES" = 0 ]
+    exit $?
+fi
 
 echo "== guest sanity"
 guest 'node -v; dsh --version; dsh-selftest' > "$WORK/sanity.txt"
@@ -266,10 +268,7 @@ for bridge_case in "${BRIDGE_TOOL_CASES[@]}"; do
 done
 
 # A wrong token must fail loudly instead of silently returning nothing.
-guest "export HOME=/root DEEPSEEK_API_KEY=test DEEPSEEK_BASE_URL=http://127.0.0.1:$MOCK_PORT \
-       DSH_HOST_BRIDGE_URL=http://127.0.0.1:$BRIDGE_PORT DSH_HOST_BRIDGE_TOKEN=wrong-token; \
-       cd /root/workspace; node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile headless 'What device is this?'" > "$WORK/bridge-denied.txt"
-check "wrong bridge token is refused" grep -q 'unauthorized' "$WORK/bridge-denied.txt"
+check "wrong bridge token is refused" wrong_token
 
 # The same image must still work with no bridge at all (CLI, tests, macOS).
 guest "export HOME=/root; node --expose-internals /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --dump-config" > "$WORK/config-nobridge.yml"
@@ -725,4 +724,5 @@ if [ -f "$RAW_LOG" ]; then
     rm -f "$RAW_LOG"
 fi
 echo "passed=$pass failed=$fail"
-[ "$fail" = 0 ]
+echo "guest_failures=$GUEST_FAILURES (real wait status; no retries)"
+[ "$fail" = 0 ] && [ "$GUEST_FAILURES" = 0 ]

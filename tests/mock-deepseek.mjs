@@ -19,6 +19,7 @@
 //
 // Usage: node tests/mock-deepseek.mjs [port]   (default 3199)
 import http from 'node:http';
+import { observe, observeConnections, event } from './service-events.mjs';
 
 const port = Number(process.argv[2] ?? 3199);
 const REPLY = 'MOCK-REPLY-7f3a: hello from the mock DeepSeek server';
@@ -114,7 +115,11 @@ function serveMessages(req, res, payload) {
     console.log('[mock] tools offered:',
       tools.map((t) => t.name ?? t.function?.name).join(', ') || '(none)');
     const result = findMessagesToolResult(payload.messages ?? []);
-    if (result) console.log('[mock] tool_result:', JSON.stringify(result).slice(0, 400));
+    if (result) {
+      console.log('[mock] tool_result:', JSON.stringify(result).slice(0, 400));
+      event('mock', 'tool_result', { unauthorized: result.is_error === true &&
+        /missing or wrong bridge token \[unauthorized\]/.test(toolResultText(result)) });
+    }
     const offers = tools.some((t) => (t.name ?? t.function?.name) === TOOL);
 
     // Ask for the tool on every turn that has not yet seen its result, so one
@@ -226,6 +231,7 @@ function serveChatCompletions(res, payload) {
 // ---------------------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
+  observe('mock', req, res);
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
@@ -258,6 +264,7 @@ const server = http.createServer((req, res) => {
 // Bind all interfaces when asked (--lan), so a device on the same network can
 // reach it for on-device end-to-end tests; loopback only by default.
 const host = process.argv.includes('--lan') ? '0.0.0.0' : '127.0.0.1';
+observeConnections('mock', server);
 server.listen(port, host, () => {
   console.log(`mock-deepseek listening on http://${host}:${port}`);
 });

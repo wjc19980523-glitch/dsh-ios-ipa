@@ -36,6 +36,7 @@
 #import "DSHHealthCapability.h"
 #import "ISHShellExecutor.h"
 #import "DSHHarness.h"
+#import "DSHBootCoordinator.h"
 
 @interface DSHCapabilityReportTests : XCTestCase
 @property (nonatomic) DSHHostBridge *bridge;
@@ -95,15 +96,17 @@
 /// capability really worked without saying what it saw.
 /// Blocks until the guest is up, the way DSHGuestIntegrationTests does.
 - (void)waitForHarnessReady {
+    [DSHBootCoordinator.shared start];
     DSHHarness *harness = DSHHarness.shared;
     if (harness.state == DSHHarnessStateReady)
         return;
     XCTestExpectation *ready = [self expectationForNotification:DSHHarnessStateDidChangeNotification
                                                          object:harness
                                                         handler:^BOOL(NSNotification *note) {
-        return harness.state == DSHHarnessStateReady;
+        return harness.state == DSHHarnessStateReady || harness.state == DSHHarnessStateFailed;
     }];
-    [self waitForExpectations:@[ready] timeout:300];
+    [self waitForExpectations:@[ready] timeout:900];
+    XCTAssertEqual(harness.state, DSHHarnessStateReady, @"guest startup failed: %@", harness.lastError);
 }
 
 - (void)report:(NSString *)path shape:(NSString *(^)(NSDictionary *))shape {
@@ -117,6 +120,8 @@
 }
 
 - (void)testReportEveryReadCapabilityOnThisDevice {
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_GUEST_INTEGRATION"] isEqualToString:@"1"],
+              @"Interactive capability report requests system permissions; run manually on the test device. Automated capability contracts execute in the unit batch.");
     NSLog(@"[dsh-report] ---- capability report ----");
 
     // Permission states first, so a refusal below has an explanation next to it.
@@ -181,6 +186,8 @@
 /// this asks (and sends nothing this run): a report that silently skips is how
 /// the notification path stayed unverified in the first place.
 - (void)testSendOneRealNotificationIfAllowed {
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_GUEST_INTEGRATION"] isEqualToString:@"1"],
+              @"Manual notification delivery requires human permission and observation on a real device; automated route contracts run separately.");
     UNAuthorizationStatus authorization = [DSHNotificationCapability authorizationStatus];
     if (authorization == UNAuthorizationStatusNotDetermined) {
         [DSHNotificationCapability requestAuthorization];

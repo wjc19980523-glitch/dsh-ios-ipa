@@ -175,20 +175,27 @@ grep -q 'is emulator + node + plugins' tests/rootfs-test.sh || {
 
 printf 'ok  scripts: the guest boot reports a phase split instead of only a timeout bound\n'
 
-# The DSHTests target is only compiled by build-for-testing. `archive` builds the
-# DSH target alone, so without this step the unit tests are shipped to CI
-# without ever seeing a compiler -- which is exactly what happened to the
-# authentication tests on their first three runs.
-grep -q 'build-for-testing' .github/workflows/build-ipa.yml || {
-  echo 'not ok: the workflow no longer builds the test bundle; DSHTests would stop being type-checked' >&2
-  exit 1
-}
-grep -q '04b-build-for-testing.log' .github/workflows/build-ipa.yml || {
-  echo 'not ok: the build-for-testing log is not captured' >&2
-  exit 1
-}
+# Compiling the test bundle alone cannot prove it executed. The runner must
+# invoke the test action and verify the xcresult counts, while IPA packaging is
+# an explicitly requested manual operation. The runner's failure propagation
+# is exercised with injected tool results by xctest-runner-test.py.
+grep -q 'run: bash scripts/run-xctests.sh' .github/workflows/build-ipa.yml
+grep -q -- '-project DSH.xcodeproj -scheme DSH' scripts/run-xctests.sh
+grep -q '"\$@" test ' scripts/run-xctests.sh
+grep -q 'scripts/report-xctests.py --xcresult' scripts/run-xctests.sh
+grep -q 'python3 tests/xctest-runner-test.py' .github/workflows/build-ipa.yml
+python3 - <<'PY'
+from pathlib import Path
+workflow = Path('.github/workflows/build-ipa.yml').read_text()
+build_input = workflow.split('      build_ipa:', 1)[1].split('      force_rootfs:', 1)[0]
+assert 'type: boolean' in build_input and 'default: false' in build_input
+gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}"
+for name in ('Archive app (unsigned)', 'Package unsigned IPA', 'Verify IPA contents', 'Upload IPA'):
+    step = workflow.split('      - name: ' + name + '\n', 1)[1].split('      - name:', 1)[0]
+    assert gate in step, name + ' lacks the explicit manual IPA gate'
+PY
 
-printf 'ok  scripts: the workflow type-checks the DSHTests bundle\n'
+printf 'ok  scripts: CI executes and counts XCTest; IPA requires explicit dispatch\n'
 
 # DSHTests is hosted by the app and links against DSH.app/DSH, so it can only
 # reach symbols the executable exports. Two symbol classes need two different

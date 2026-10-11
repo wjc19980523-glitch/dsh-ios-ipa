@@ -21,6 +21,8 @@ extern DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification;
 
 - (instancetype)initWithCapacity:(NSUInteger)capacity NS_DESIGNATED_INITIALIZER;
 - (instancetype)initPersistentWithCapacity:(NSUInteger)capacity;
+/// Injectable report directory, also used by persistence tests in isolation.
+- (instancetype)initPersistentWithCapacity:(NSUInteger)capacity directory:(NSURL *)directory;
 - (instancetype)init NS_UNAVAILABLE;
 
 @property (nonatomic, readonly) NSUInteger capacity;
@@ -41,6 +43,14 @@ extern DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification;
 /// Persistent buffers retain at most the ten most recent launches. Ordinary
 /// in-memory buffers return their current lines only.
 @property (nonatomic, readonly, copy) NSString *diagnosticReport;
+
+/// Process identity is shared by every buffer in this process and never reused
+/// after a system termination. It contains no guest credentials.
+@property (class, nonatomic, readonly, copy) NSString *hostLaunchID;
+@property (class, nonatomic, readonly) NSDate *hostProcessStartedAt;
+@property (class, nonatomic, readonly, copy) NSString *hostProcessStartSource;
+/// Flush a lifecycle boundary before iOS can suspend/terminate the process.
+- (void)synchronizePersistentDiagnostics;
 
 /// Lines that add nothing for the user (e.g. the V8 flag warning).
 + (BOOL)isNoiseLine:(NSString *)line;

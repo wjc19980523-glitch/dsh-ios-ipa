@@ -22,6 +22,7 @@
 @property (atomic, readwrite) NSUInteger unauthorizedCount;
 @property (atomic, copy, readwrite, nullable) NSString *issuedCookieValue;
 @property (nonatomic) NSString *cookieName;
+@property (nonatomic) NSMutableSet<NSString *> *validCookieValues;
 /// Sockets accepted while stalling, kept open so the client waits.
 @property (nonatomic) NSMutableArray<NSNumber *> *stalledClients;
 @end
@@ -32,9 +33,11 @@
     if (self = [super init]) {
         _statusCode = 200;
         _stalledClients = [NSMutableArray array];
-        // The real name is dsh-auth-<base64url(sha256(authority))>; the prefix
-        // is all the client matches on, and all this fake needs to look like.
-        _cookieName = [DSHHarnessAuthCookiePrefix stringByAppendingString:@"test"];
+        // Cookies ignore TCP ports. Give every fixture its own installation
+        // identity so NSURLSession's shared store cannot authenticate another
+        // test's loopback server with a cookie left by a previous fixture.
+        _cookieName = [DSHHarnessAuthCookiePrefix stringByAppendingString:NSUUID.UUID.UUIDString];
+        _validCookieValues = [NSMutableSet set];
         _queue = dispatch_queue_create("dsh.test.http", DISPATCH_QUEUE_CONCURRENT);
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
@@ -116,20 +119,34 @@
     }
 
     NSString *cookie = [self cookieFromRequest:request];
-    if (cookie != nil) {
+    BOOL validCookie;
+    @synchronized (self) {
+        validCookie = cookie != nil && [self.validCookieValues containsObject:cookie];
+    }
+    if (validCookie) {
         // Already authenticated. The cookie survives a restart because dsh
         // signs it with a per-installation secret, so this is the steady state.
         return YES;
     }
 
     // The handshake: an exact token match on a GET mints the cookie.
-    NSString *query = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:target]].query;
-    NSString *offered = [DSHHarnessAuth tokenFromServeLogLine:[@"?token=" stringByAppendingString:query ?: @""]];
+    NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:target]];
+    NSString *offered = nil;
+    NSUInteger tokenParameters = 0;
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:DSHHarnessTokenQueryKey]) {
+            tokenParameters++;
+            offered = item.value;
+        }
+    }
     if ([method isEqualToString:@"GET"] && offered.length > 0 && self.launchToken.length > 0 &&
-        [offered isEqualToString:self.launchToken]) {
+        tokenParameters == 1 && [offered isEqualToString:self.launchToken]) {
         NSString *value = [NSUUID UUID].UUIDString;
-        self.issuedCookieValue = value;
-        self.tokenExchangeCount++;
+        @synchronized (self) {
+            self.issuedCookieValue = value;
+            [self.validCookieValues addObject:value];
+            self.tokenExchangeCount++;
+        }
         // 303 + `location: ./`, exactly as dsh answers the correct token.
         NSString *head = [NSString stringWithFormat:
             @"HTTP/1.1 303 See Other\r\n"
@@ -158,17 +175,15 @@
 - (nullable NSString *)cookieFromRequest:(nullable NSString *)request {
     if (request.length == 0)
         return nil;
-    NSRange hit = [request rangeOfString:[self.cookieName stringByAppendingString:@"="]];
-    if (hit.location == NSNotFound)
-        return nil;
-    NSUInteger start = NSMaxRange(hit);
-    NSRange rest = NSMakeRange(start, request.length - start);
-    NSRange stop = [request rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@";\r\n"]
-                                            options:0 range:rest];
-    NSUInteger end = stop.location == NSNotFound ? request.length : stop.location;
-    if (end <= start)
-        return nil;
-    return [request substringWithRange:NSMakeRange(start, end - start)];
+    for (NSString *line in [request componentsSeparatedByString:@"\r\n"]) {
+        if (![line.lowercaseString hasPrefix:@"cookie:"]) continue;
+        for (NSString *part in [[line substringFromIndex:7] componentsSeparatedByString:@";"]) {
+            NSString *pair = [part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            NSString *prefix = [self.cookieName stringByAppendingString:@"="];
+            if ([pair hasPrefix:prefix]) return [pair substringFromIndex:prefix.length];
+        }
+    }
+    return nil;
 }
 
 - (void)stop {

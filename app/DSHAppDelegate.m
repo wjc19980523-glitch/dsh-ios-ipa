@@ -10,6 +10,13 @@
 
 static NSString *const kCapabilityPreferenceRepair = @"DSHCapabilityPreferenceRepair.2";
 
+// Only the scheme's TestAction supplies this flag. XCTest starts its guest
+// explicitly in the integration batch; unit launch must not import production
+// roots or create a WebView which observes every fake harness notification.
+static BOOL DSHIsXCTestHost(void) {
+    return [NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"];
+}
+
 static void DSHRepairPreferencesPollutedByLegacyTests(void) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if ([defaults boolForKey:kCapabilityPreferenceRepair])
@@ -35,6 +42,7 @@ static void DSHRepairPreferencesPollutedByLegacyTests(void) {
 @implementation DSHAppDelegate
 
 - (BOOL)application:(UIApplication *)application willFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey,id> *)launchOptions {
+    if (DSHIsXCTestHost()) return YES;
     DSHRepairPreferencesPollutedByLegacyTests();
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if ([defaults boolForKey:@"hail mary"]) {
@@ -46,11 +54,21 @@ static void DSHRepairPreferencesPollutedByLegacyTests(void) {
 }
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    if (DSHIsXCTestHost()) return YES;
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"recovery"])
         return YES;
     // Kicks off image import → kernel boot → data migration → harness start.
     [DSHBootCoordinator.shared start];
     return YES;
+}
+
+- (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+    UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:@"Main App" sessionRole:session.role];
+    // UIKit preserves scene-session configuration across process launches.
+    // Keep one delegate class; choose test isolation using this launch's
+    // environment in willConnect, so a UI test cannot restore a blank delegate.
+    configuration.delegateClass = NSClassFromString(@"DSHSceneDelegate");
+    return configuration;
 }
 
 // There is deliberately no -applicationDidEnterBackground: /

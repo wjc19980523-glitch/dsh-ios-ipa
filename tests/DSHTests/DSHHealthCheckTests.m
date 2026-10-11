@@ -63,6 +63,7 @@
     [self.launches addObject:@{@"exe": executable, @"env": environment}];
     self.lastExit = exit;
     if (self.onLaunch) self.onLaunch(environment);
+    line([NSString stringWithFormat:@"dsh web: http://127.0.0.1:%@/?token=health-test-token", environment[@"DSH_PORT"]], NO);
     return self.nextPid++;
 }
 
@@ -95,12 +96,19 @@
                    serverSlot:(DSHTestHTTPServer * __strong *)slot {
     launcher.onLaunch = ^(NSDictionary *env) {
         uint16_t port = (uint16_t) [env[@"DSH_PORT"] intValue];
+        [*slot stop];
         *slot = [[DSHTestHTTPServer alloc] initWithPort:port];
     };
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
     h.preferredPort = preferred;
     h.startupTimeout = 10;
     h.healthCheckTimeout = timeout;
+    [self addTeardownBlock:^{
+        // No retry may dereference the stack-owned serverSlot after the test.
+        launcher.onLaunch = nil;
+        launcher.lastExit = nil;
+        [h stop];
+    }];
     return h;
 }
 
@@ -125,7 +133,7 @@
     DSHTestHTTPServer *__strong server = nil;
     DSHHarness *h = [self harnessOnPort:38500 timeout:1 launcher:launcher serverSlot:&server];
     h.healthCheckFailuresBeforeRestart = 5;   // long ladder: isolate the single-failure case
-    h.healthCheckRetryDelay = 0.2;
+    h.healthCheckRetryDelay = 60;
     [self waitReady:h];
     XCTAssertNotNil(server);
 
@@ -134,11 +142,12 @@
     // Wedge the server: it accepts, then never answers.
     server.stalls = YES;
 
-    XCTestExpectation *checked = [self expectationWithDescription:@"one probe finished"];
-    [h verifyAliveWithCompletion:^(BOOL alive) {
-        XCTAssertFalse(alive, @"a stalled server is not alive");
-        [checked fulfill];
-    }];
+    XCTestExpectation *checked = [self expectationForPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            return h.healthCheckFailures == 1;
+        }] evaluatedWithObject:h handler:nil];
+    // The completion describes the entire retry ladder, not its first probe.
+    [h verifyAliveWithCompletion:nil];
     [self waitForExpectations:@[checked] timeout:10];
 
     XCTAssertEqual(h.state, DSHHarnessStateReady, @"a single late answer must not change state");
@@ -166,7 +175,7 @@
     XCTestExpectation *restarting = [self expectationForNotification:DSHHarnessStateDidChangeNotification
                                                              object:h
                                                             handler:^BOOL(NSNotification *n) {
-        return h.state == DSHHarnessStateRestarting || h.state == DSHHarnessStateStopped;
+        return h.state == DSHHarnessStateReady && launcher.launches.count >= 2;
     }];
     restarting.assertForOverFulfill = NO;
     [h verifyAliveWithCompletion:nil];
@@ -367,33 +376,30 @@
     [self waitReady:h];
     XCTAssertNotNil(server);
 
-    // Simulate the moment iOS has already freed the socket: the probe is
-    // refused, which the harness treats as proof the server is dead.
+    // A timeout records one nonconclusive failure. Connection refusal would
+    // immediately restart and therefore cannot set up this ladder regression.
     server.stalls = YES;
-    [server stop];
-    server = nil;
-
-    XCTestExpectation *failed = [self expectationForNotification:DSHHarnessStateDidChangeNotification
-                                                          object:h
-                                                         handler:^BOOL(NSNotification *n) {
-        return h.healthCheckFailures > 0;
-    }];
-    failed.assertForOverFulfill = NO;
+    XCTestExpectation *failed = [self expectationForPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            return h.healthCheckFailures == 1;
+        }] evaluatedWithObject:h handler:nil];
     [h verifyAliveWithCompletion:nil];
     [self waitForExpectations:@[failed] timeout:15];
-    XCTAssertEqual(h.healthCheckFailures, 1u, @"the unreachable probe was recorded");
+    XCTAssertEqual(h.healthCheckFailures, 1u, @"the timeout probe was recorded");
 
     NSUInteger launchesBefore = launcher.launches.count;
     NSUInteger restartsBefore = h.restartCount;
 
     // The app comes back. The sockets are rebuilt, so the harness must forget
     // that answer -- it measured a guest whose socket no longer exists.
+    server.stalls = NO;
     [h verifyAliveAfterResumeWithCompletion:nil];
 
     XCTAssertEqual(h.restartCount, restartsBefore,
                    @"a resume must not turn a pre-suspension failure into a restart");
     XCTAssertEqual(launcher.launches.count, launchesBefore,
                    @"no new guest process is started just because the app was resumed");
+    [server stop];
 }
 
 /// A resume must produce a *real* check, not a debounced echo of the answer

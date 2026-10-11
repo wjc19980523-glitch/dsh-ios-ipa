@@ -7,6 +7,7 @@
 
 struct fakefs_db {
     sqlite3 *db;
+    uint64_t lifecycle_connection_id;
     struct {
         sqlite3_stmt *begin_deferred;
         sqlite3_stmt *begin_immediate;

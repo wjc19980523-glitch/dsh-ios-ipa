@@ -9,7 +9,9 @@
 
 #import <XCTest/XCTest.h>
 #import <UIKit/UIKit.h>
+#import <TargetConditionals.h>
 #import "DSHHarness.h"
+#import "DSHBootCoordinator.h"
 #import "ISHShellExecutor.h"
 #import "DSHRootUpgrader.h"
 #import "DSHHostBridge.h"
@@ -22,25 +24,36 @@
 
 @implementation DSHGuestIntegrationTests
 
-- (void)waitForReady {
+- (BOOL)waitForReady {
     DSHHarness *h = DSHHarness.shared;
     if (h.state == DSHHarnessStateReady)
-        return;
-    XCTestExpectation *ready = [self expectationForNotification:DSHHarnessStateDidChangeNotification object:h handler:^BOOL(NSNotification *n) {
-        return h.state == DSHHarnessStateReady;
-    }];
-    [self waitForExpectations:@[ready] timeout:300];
+        return YES;
+    // App launch is isolated under XCTest. Only the separately selected guest
+    // batch may import its fresh simulator root and start the real emulator.
+    XCTAssertEqualObjects(NSProcessInfo.processInfo.environment[@"DSH_GUEST_INTEGRATION"], @"1",
+                          @"run scripts/run-xctests.sh; guest tests require the explicit integration batch");
+    if (![NSProcessInfo.processInfo.environment[@"DSH_GUEST_INTEGRATION"] isEqualToString:@"1"])
+        return NO;
+    XCTestExpectation *ready = [self expectationForPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            return h.state == DSHHarnessStateReady || h.state == DSHHarnessStateFailed ||
+                   DSHBootCoordinator.shared.phase == DSHBootPhaseFailed;
+        }] evaluatedWithObject:h handler:nil];
+    [DSHBootCoordinator.shared start];
+    [self waitForExpectations:@[ready] timeout:900];
+    XCTAssertEqual(h.state, DSHHarnessStateReady, @"guest startup failed: %@", h.lastError);
+    return h.state == DSHHarnessStateReady;
 }
 
 - (void)testHarnessServesWebUI {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     DSHHarness *h = DSHHarness.shared;
     XCTAssertEqual(h.state, DSHHarnessStateReady);
     XCTAssertNotNil(h.baseURL);
     XCTAssertGreaterThan(h.guestPid, 0);
 
     XCTestExpectation *fetched = [self expectationWithDescription:@"index"];
-    [[NSURLSession.sharedSession dataTaskWithURL:h.baseURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    [[NSURLSession.sharedSession dataTaskWithURL:h.authenticatedEntryURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         XCTAssertNil(error);
         XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 200);
         NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -51,7 +64,7 @@
 }
 
 - (void)testGuestSelfTestPasses {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     XCTestExpectation *done = [self expectationWithDescription:@"selftest"];
     NSMutableString *out = [NSMutableString string];
     int pid = [ISHShellExecutor executeCommand:@"/usr/local/bin/dsh-selftest 2>&1"
@@ -71,7 +84,7 @@
     // no user-data migration may be left pending.
     // The import runs in the background now, so wait for the guest to be up
     // before asking which image is installed.
-    [self waitForReady];
+    if (![self waitForReady]) return;
     DSHRootUpgrader *u = DSHRootUpgrader.shared;
     XCTAssertNotNil(u.bundledRootHash, @"root.tar.gz.sha256 must be in the bundle");
     XCTAssertEqualObjects(u.installedRootHash, u.bundledRootHash);
@@ -92,7 +105,7 @@
 /// The real end-to-end path: the guest reaches the app's bridge over loopback
 /// and gets this device's facts back.
 - (void)testGuestReachesTheHostBridge {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     DSHHostBridge *bridge = DSHHostBridge.shared;
     XCTAssertTrue(bridge.running, @"the bridge should be listening once the harness started");
     XCTAssertNotNil(bridge.baseURLString);
@@ -120,7 +133,7 @@
 /// A guest process without the token must be refused, so the bridge is not an
 /// open door for anything else running in the Linux image.
 - (void)testGuestWithoutTokenIsRefusedByTheBridge {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     DSHHostBridge *bridge = DSHHostBridge.shared;
     NSString *command = [NSString stringWithFormat:
         @"node -e \"fetch('%@/v1/device').then(r=>console.log('STATUS:'+r.status))"
@@ -139,7 +152,7 @@
 /// dsh must have been handed the bridge coordinates, otherwise the plugin
 /// registers no tools.
 - (void)testHarnessEnvironmentCarriesBridgeCoordinates {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     NSDictionary *env = DSHHarness.shared.extraEnvironment;
     XCTAssertEqualObjects(env[@"DSH_HOST_BRIDGE_URL"], DSHHostBridge.shared.baseURLString);
     XCTAssertEqualObjects(env[@"DSH_HOST_BRIDGE_TOKEN"], DSHHostBridge.shared.token);
@@ -149,7 +162,7 @@
 /// for `device_info`, the guest plugin calls the app's bridge, and this
 /// device's real facts come back to the model.
 - (void)testAgentCallsDeviceInfoThroughTheBridge {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     DSHMockLLMServer *model = [DSHMockLLMServer new];
     XCTAssertNotNil(model, @"mock model server should bind a port");
     model.requestTool = @"device_info";
@@ -190,9 +203,12 @@
 /// what must hold either way: the tool is offered, the call completes, and the
 /// model is told something actionable instead of the turn hanging on a dialog.
 - (void)testAgentCallsHealthThroughTheBridge {
-    [self waitForReady];
-    if (!HKHealthStore.isHealthDataAvailable)
-        return;
+#if TARGET_OS_SIMULATOR
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_GUEST_INTEGRATION"] isEqualToString:@"1"],
+              @"HealthKit system authorization requires a manual device test; Health route/refusal unit tests run separately");
+#endif
+    if (![self waitForReady]) return;
+    XCTSkipIf(!HKHealthStore.isHealthDataAvailable, @"HealthKit is unavailable on this destination");
     DSHMockLLMServer *model = [DSHMockLLMServer new];
     XCTAssertNotNil(model);
     model.requestTool = @"health_query";
@@ -233,7 +249,7 @@
 }
 
 - (void)testGuestNodeAndDshVersions {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     XCTestExpectation *done = [self expectationWithDescription:@"versions"];
     NSMutableString *out = [NSMutableString string];
     [ISHShellExecutor executeCommand:@"node -v; dsh --version" lineCallback:^(NSString *line, BOOL isStdErr) {
@@ -241,7 +257,7 @@
     } completion:^(ISHShellExecutionResult *result) {
         XCTAssertEqual(result.exitCode, 0);
         XCTAssertTrue([out containsString:@"v22."], @"node 22 expected: %@", out);
-        XCTAssertTrue([out containsString:@"0.1."], @"dsh 0.1.x expected: %@", out);
+        XCTAssertTrue([out containsString:@"0.2.0-rc.2"], @"bundled dsh 0.2.0-rc.2 expected: %@", out);
         [done fulfill];
     }];
     [self waitForExpectations:@[done] timeout:120];
@@ -254,7 +270,7 @@
 /// about it or can take it back. DSH does not register the filesystem, so the
 /// mount fails at the type lookup, before any picker is raised.
 - (void)testTheGuestCannotMountTheHostFilesystem {
-    [self waitForReady];
+    if (![self waitForReady]) return;
     XCTestExpectation *done = [self expectationWithDescription:@"mount"];
     NSMutableString *out = [NSMutableString string];
     // An unregistered filesystem type fails in sys_mount's type lookup with

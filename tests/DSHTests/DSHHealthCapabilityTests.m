@@ -13,6 +13,7 @@
 //
 
 #import <XCTest/XCTest.h>
+#import <TargetConditionals.h>
 #import <HealthKit/HealthKit.h>
 #import "DSHHostBridge.h"
 #import "DSHCapability.h"
@@ -153,8 +154,12 @@ static NSString *const kHealthRead = @"health.read";
 /// Enabled, the answer depends on what the user shared. Either shape is fine;
 /// what must not happen is a hang, a crash, or an empty answer with no note.
 - (void)testEnabledRoutesAnswerOrRefuseRecoverably {
+#if TARGET_OS_SIMULATOR
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"],
+              @"HealthKit authorization is a manual device test; simctl cannot set Health read authorization. Disabled routes and pure aggregation run in CI.");
+#endif
     if (!HKHealthStore.isHealthDataAvailable)
-        return;  // simulator without Health, or an unsupported device
+        XCTSkip(@"HealthKit is unavailable on this device.");
     [DSHCapabilityRegistry.shared setEnabled:YES forIdentifier:kHealthRead];
 
     NSDictionary *expectedKey = @{
@@ -182,8 +187,12 @@ static NSString *const kHealthRead = @"health.read";
 }
 
 - (void)testWorkoutLimitIsCappedServerSide {
+#if TARGET_OS_SIMULATOR
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"],
+              @"HealthKit authorization requires manual device testing; simctl cannot set Health read authorization.");
+#endif
     if (!HKHealthStore.isHealthDataAvailable)
-        return;
+        XCTSkip(@"HealthKit is unavailable on this device.");
     [DSHCapabilityRegistry.shared setEnabled:YES forIdentifier:kHealthRead];
     NSInteger status = 0;
     NSDictionary *json = [self get:@"/v1/health/workouts?days=99999&limit=99999" status:&status];

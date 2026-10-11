@@ -117,25 +117,86 @@
     NSString *tool = self.requestTool;
     BOOL offersTool = tool && [names containsObject:tool];
     NSDictionary *toolMessage = nil;
+    NSString *target = [[head componentsSeparatedByString:@" "] objectAtIndex:1];
+    BOOL messagesAPI = [[[target componentsSeparatedByString:@"?"] firstObject] hasSuffix:@"/messages"];
     for (NSDictionary *message in payload[@"messages"]) {
-        if ([message[@"role"] isEqualToString:@"tool"])
+        if (!messagesAPI && [message[@"role"] isEqualToString:@"tool"])
             toolMessage = message;
+        if (messagesAPI && [message[@"content"] isKindOfClass:NSArray.class]) {
+            for (id block in message[@"content"])
+                if ([block isKindOfClass:NSDictionary.class] && [block[@"type"] isEqualToString:@"tool_result"])
+                    toolMessage = block;
+        }
     }
 
     if (offersTool && toolMessage == nil) {
-        [self sendToolCall:tool to:fd];
+        if (messagesAPI) [self sendMessagesToolCall:tool model:payload[@"model"] to:fd];
+        else [self sendToolCall:tool to:fd];
     } else if (tool && toolMessage != nil) {
         id content = toolMessage[@"content"];
         NSString *observed = [content isKindOfClass:NSString.class] ? content
                            : [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:content ?: @{} options:0 error:nil] encoding:NSUTF8StringEncoding];
-        [self sendText:[NSString stringWithFormat:@"TOOL-RESULT-BEGIN %@ TOOL-RESULT-END", observed ?: @""] to:fd];
+        NSString *text = [NSString stringWithFormat:@"TOOL-RESULT-BEGIN %@ TOOL-RESULT-END", observed ?: @""];
+        if (messagesAPI) [self sendMessagesText:text model:payload[@"model"] to:fd];
+        else [self sendText:text to:fd];
     } else {
-        [self sendText:self.reply to:fd];
+        if (messagesAPI) [self sendMessagesText:self.reply model:payload[@"model"] to:fd];
+        else [self sendText:self.reply to:fd];
     }
     close(fd);
 }
 
 #pragma mark Streaming helpers
+
+// The bundled 0.2.x guest speaks DeepSeek Messages. Keep the original chat
+// completion fixture for the earlier guest and emit the same named event/data
+// frames as tests/mock-deepseek.mjs for the current integration batch.
+- (void)writeMessagesEvent:(NSString *)type payload:(NSDictionary *)payload to:(int)fd {
+    NSMutableDictionary *body = [payload mutableCopy];
+    body[@"type"] = type;
+    NSString *json = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]
+                                         encoding:NSUTF8StringEncoding];
+    [self writeString:[NSString stringWithFormat:@"event: %@\ndata: %@\n\n", type, json] to:fd];
+}
+
+- (NSDictionary *)messagesUsage:(NSUInteger)output {
+    return @{ @"input_tokens": @10, @"output_tokens": @(output),
+              @"cache_read_input_tokens": @0, @"cache_creation_input_tokens": @0 };
+}
+
+- (void)startMessages:(NSString *)model to:(int)fd {
+    [self writeSSEHead:fd];
+    [self writeMessagesEvent:@"message_start" payload:@{ @"message": @{
+        @"id": @"msg_mock_1", @"type": @"message", @"role": @"assistant",
+        @"model": model ?: @"deepseek-chat", @"content": @[], @"usage": [self messagesUsage:0] } } to:fd];
+}
+
+- (void)finishMessages:(NSString *)reason output:(NSUInteger)output to:(int)fd {
+    [self writeMessagesEvent:@"content_block_stop" payload:@{ @"index": @0 } to:fd];
+    [self writeMessagesEvent:@"message_delta" payload:@{
+        @"delta": @{ @"stop_reason": reason, @"stop_sequence": NSNull.null },
+        @"usage": [self messagesUsage:output] } to:fd];
+    [self writeMessagesEvent:@"message_stop" payload:@{} to:fd];
+}
+
+- (void)sendMessagesToolCall:(NSString *)tool model:(NSString *)model to:(int)fd {
+    [self startMessages:model to:fd];
+    [self writeMessagesEvent:@"content_block_start" payload:@{ @"index": @0,
+        @"content_block": @{ @"type": @"tool_use", @"id": @"toolu_mock_1", @"name": tool, @"input": @{} } } to:fd];
+    [self writeMessagesEvent:@"content_block_delta" payload:@{ @"index": @0,
+        @"delta": @{ @"type": @"input_json_delta", @"partial_json": self.toolArguments ?: @"{}" } } to:fd];
+    [self finishMessages:@"tool_use" output:5 to:fd];
+}
+
+- (void)sendMessagesText:(NSString *)text model:(NSString *)model to:(int)fd {
+    [self startMessages:model to:fd];
+    [self writeMessagesEvent:@"content_block_start" payload:@{ @"index": @0,
+        @"content_block": @{ @"type": @"text", @"text": @"" } } to:fd];
+    for (NSString *word in [text componentsSeparatedByString:@" "])
+        [self writeMessagesEvent:@"content_block_delta" payload:@{ @"index": @0,
+            @"delta": @{ @"type": @"text_delta", @"text": [word stringByAppendingString:@" "] } } to:fd];
+    [self finishMessages:@"end_turn" output:12 to:fd];
+}
 
 - (NSString *)chunkWithDelta:(NSDictionary *)delta finish:(nullable NSString *)finish {
     NSDictionary *choice = @{ @"index": @0, @"delta": delta, @"finish_reason": finish ?: NSNull.null };

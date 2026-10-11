@@ -1,33 +1,8 @@
-name: Build DSH IOS IPA (unsigned)
+name: DSH CI (tests; optional unsigned IPA)
 
-# Builds DSHIOS (DeepSeek Harness on iPad/iPhone) into an unsigned .ipa on a
-# GitHub-hosted Apple Silicon macOS runner, so it can be re-signed on any
-# machine (including Windows) with Sideloadly / AltStore / lldid / TrollStore.
-#
-# Pipeline (mirrors the project's own Makefile, which is macOS-only):
-#   make emulator  -> iSH-ARM64 CLI + fakefsify (needs meson, ninja, ld.lld)
-#   make rootfs    -> build/root.tar.gz (Alpine 3.21 + Node 22 + dsh)
-#   make project   -> regenerate DSH.xcodeproj (needs the xcodeproj gem)
-#   xcodebuild archive (CODE_SIGNING_ALLOWED=NO) -> Payload/DSH.app -> .ipa
-#
-# No Apple ID, certificate or provisioning profile is used anywhere.
-#
-# Revision 2: rebuild for the foreground restart-loop fix (guest listening
-# sockets are now preserved across suspension; the health check retries instead
-# of restarting on a single timeout).
-#
-# Revision 3: rebuild 1.0.16 (19). The socket preservation added in revision 2
-# was wired into UIApplicationDelegate, but the app declares
-# UIApplicationSceneManifest, so UIKit never calls those methods and the hooks
-# never ran on device. They are now on DSHSceneDelegate's sceneDidEnterBackground:
-# / sceneWillEnterForeground:, and a resume no longer counts the "connection
-# refused" seen while sockets are being rebuilt as a server failure.
-#
-# Revision 4 (Plus v1.1, 1.1.0 build 20): the guest moves from dsh 0.1.0-rc.7 to
-# 0.2.0-rc.2, which is where the shipped zh/en GUI (@deepseek-ai/dsh-client-locale)
-# and the documented `deepseek-flash` model id live; 0.1.x has neither. The
-# profile layer now seeds `locale.preference: zh` and dsh-serve stops rewriting
-# that file on every boot, which would otherwise reset the language each launch.
+# Push and manual dispatch execute XCTest, shell contracts, and real guest
+# suites. Creating an unsigned IPA requires build_ipa=true on manual dispatch.
+# No Apple ID, certificate, provisioning profile, or signing material is used.
 
 on:
   workflow_dispatch:
@@ -44,6 +19,10 @@ on:
         description: "Explicit Xcode path (leave empty to auto-pick: Xcode 27 first, then newest)"
         type: string
         default: ""
+      build_ipa:
+        description: "Explicitly archive/package an unsigned IPA after tests (requires separate authorization)"
+        type: boolean
+        default: false
       force_rootfs:
         description: "Rebuild the guest rootfs even if the cache hits"
         type: boolean
@@ -64,9 +43,16 @@ on:
       - "tests/emu-test.sh"
       - "tests/scripts-test.sh"
       - "tests/DSHTests/**"
+      - "tests/DSHUITests/**"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
+      - "scripts/run-xctests.sh"
+      - "scripts/select-xcode.py"
+      - "scripts/report-xctests.py"
+      - "tests/lifecycle-test.sh"
+      - "tests/native-runner-test.py"
+      - "tests/xctest-runner-test.py"
       - "DSH.xcodeproj/**"
 
 permissions:
@@ -83,10 +69,10 @@ env:
   HOMEBREW_NO_ANALYTICS: "1"
 
 jobs:
-  build-ipa:
-    name: Build unsigned IPA (${{ github.event.inputs.runner_label || 'xcode-27' }})
+  build-and-test:
+    name: Test DSH (optional IPA) (${{ github.event.inputs.runner_label || 'xcode-27' }})
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       INPUT_XCODE_PATH: ${{ github.event.inputs.xcode_path }}
       INPUT_FORCE_ROOTFS: ${{ github.event.inputs.force_rootfs }}
@@ -116,18 +102,7 @@ jobs:
         id: xcode
         run: |
           set -euo pipefail
-          XC=""
-          if [ -n "${INPUT_XCODE_PATH:-}" ] && [ -d "${INPUT_XCODE_PATH}" ]; then
-            XC="${INPUT_XCODE_PATH}"
-          else
-            for cand in /Applications/Xcode_27*.app /Applications/Xcode_26*.app /Applications/Xcode.app; do
-              if [ -d "$cand" ]; then XC="$cand"; break; fi
-            done
-          fi
-          if [ -z "$XC" ]; then
-            echo "error: no Xcode.app found under /Applications" >&2
-            exit 1
-          fi
+          XC="$(python3 scripts/select-xcode.py --requested "${INPUT_XCODE_PATH:-}")"
           sudo xcode-select -s "$XC/Contents/Developer"
           echo "selected: $XC"
           xcode-select -p
@@ -230,7 +205,20 @@ jobs:
           mkdir -p cilogs
           make project 2>&1 | tee cilogs/03-project.log
 
+      - name: Execute simulator XCTest (units + real guest integration + UI)
+        run: bash scripts/run-xctests.sh
+
+      - name: Upload XCTest result bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-xctest-results
+          path: build/TestResults/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Archive app (unsigned)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
         run: |
           set -euo pipefail
           mkdir -p cilogs
@@ -251,33 +239,8 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             archive 2>&1 | tee cilogs/04-archive.log
 
-      # `archive` only builds the DSH target. The DSHTests target is part of the
-      # DSH scheme's TestAction, so it is compiled by `build-for-testing` and
-      # by nothing else in this workflow -- which is how the authentication
-      # tests reached a device-less CI without ever seeing a compiler. Building
-      # for testing here is cheap (the app target is already up to date) and it
-      # is the only thing that type-checks the unit tests.
-      - name: Build unit tests (type-checks DSHTests)
-        run: |
-          set -euo pipefail
-          mkdir -p cilogs
-          set -o pipefail
-          xcodebuild \
-            -project DSH.xcodeproj \
-            -scheme DSH \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$PWD/build/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            build-for-testing 2>&1 | tee cilogs/04b-build-for-testing.log
-
       - name: Package unsigned IPA
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
         id: package
         run: |
           set -euo pipefail
@@ -306,6 +269,7 @@ jobs:
           echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Verify IPA contents
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
         run: |
           set -euo pipefail
           IPA="build/ipa/Payload"
@@ -332,6 +296,7 @@ jobs:
           ls "$IPA/DSH.app" | head -40
 
       - name: Upload IPA
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
         uses: actions/upload-artifact@v4
         with:
           name: DSH-unsigned-ipa
@@ -354,24 +319,25 @@ jobs:
         if: always()
         run: |
           {
-            echo "## DSHIOS unsigned IPA build"
+            echo "## DSHIOS CI"
             echo
             echo "- runner: \`${{ github.event.inputs.runner_label || 'xcode-27' }}\`"
             echo "- Xcode: \`${{ steps.xcode.outputs.xcode_path }}\`"
             echo "- rootfs cache hit: \`${{ steps.rootfs-cache.outputs.cache-hit }}\`"
             echo "- IPA: \`${{ steps.package.outputs.ipa_name }}\`"
             echo
-            echo "Download it from the **Artifacts** section of this run."
+            echo "- IPA requested: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}"
+            echo "Tests run by default. An IPA artifact is created only with explicit build_ipa=true."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The IPA proves the app links and packages. This job proves the *guest image*
-  # inside it actually bootstraps: it imports root.tar.gz the way the app does
+  # This job independently proves the guest image actually bootstraps: it imports root.tar.gz the way the app does
   # (fakefsify), runs the project's own suites, and boots dsh-serve so the web UI
   # can be fetched over host loopback -- the same path the app's WKWebView uses.
   # Runs as its own job so a guest regression cannot invalidate a good IPA.
   verify-guest:
     name: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
-    needs: build-ipa
+    needs: build-and-test
+    if: always()
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 150
 
@@ -415,6 +381,15 @@ jobs:
           set -euo pipefail
           ls -lh build/root.tar.gz
           shasum -a 256 build/root.tar.gz
+
+      - name: Native runner execution and failure-propagation regressions
+        run: python3 tests/native-runner-test.py
+
+      - name: Native lifecycle regression tests
+        run: bash tests/lifecycle-test.sh
+
+      - name: XCTest runner count and exit-code regressions
+        run: python3 tests/xctest-runner-test.py
 
       - name: Project test suites (script contract + emulator regressions + guest integration)
         run: |

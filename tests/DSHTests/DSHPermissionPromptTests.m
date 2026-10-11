@@ -9,6 +9,7 @@
 //
 
 #import <XCTest/XCTest.h>
+#import <TargetConditionals.h>
 #import "DSHCapability.h"
 #import "DSHHostBridge.h"
 #import "DSHLocationCapability.h"
@@ -37,6 +38,10 @@
 /// Every permission block must return promptly when called the way the switch
 /// calls it. The dialog itself is asynchronous; asking for it must not block.
 - (void)testRequestingPermissionFromTheMainThreadDoesNotBlock {
+#if TARGET_OS_SIMULATOR
+    XCTSkipIf([NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"],
+              @"System permission dialogs require manual device testing; CI runs routes with real denied simulator permissions.");
+#endif
     for (DSHCapability *capability in DSHCapabilityRegistry.shared.capabilities) {
         if (!capability.requestSystemPermission || !capability.available) continue;
 

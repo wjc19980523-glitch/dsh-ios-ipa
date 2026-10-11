@@ -9,10 +9,25 @@
 #import "AboutViewController.h"
 #import "DSHHarness.h"
 #import "ISHShellExecutor.h"
+#import "DSHLifecycleDiagnostics.h"
+
+static BOOL DSHSceneIsXCTestHost(void) {
+    return [NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"];
+}
 
 @implementation DSHSceneDelegate
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
+    // Scene-session configuration survives relaunches. Use the current
+    // process environment instead of persisting a different test delegate.
+    // Hosted tests must not boot the guest or observe fake harness instances.
+    if (DSHSceneIsXCTestHost()) {
+        self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+        self.window.rootViewController = [UIViewController new];
+        [self.window makeKeyAndVisible];
+        return;
+    }
+    [DSHLifecycleDiagnostics recordEvent:@"sceneWillConnect" harness:DSHHarness.shared];
     UIWindowScene *windowScene = (UIWindowScene *) scene;
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"recovery"]) {
@@ -37,6 +52,8 @@
 // never recorded or rebuilt and every return from the background cost a full
 // ~40-second harness restart.
 - (void)sceneDidEnterBackground:(UIScene *)scene {
+    if (DSHSceneIsXCTestHost()) return;
+    [DSHLifecycleDiagnostics recordEvent:@"sceneDidEnterBackground" harness:DSHHarness.shared];
     // iOS frees the backing socket of every listening fd this process owns
     // while it is suspended. Without this, the guest's dsh-serve keeps a
     // listen() fd that looks valid but can never accept again: the app returns
@@ -44,9 +61,12 @@
     // the harness reboots a guest that was never broken.
     // Recording the sockets here lets -sceneWillEnterForeground rebuild them.
     [ISHShellExecutor handleAppSuspend];
+    [DSHLifecycleDiagnostics recordEvent:@"socketSuspend" harness:DSHHarness.shared];
 }
 
 - (void)sceneWillEnterForeground:(UIScene *)scene {
+    if (DSHSceneIsXCTestHost()) return;
+    [DSHLifecycleDiagnostics recordEvent:@"sceneWillEnterForeground" harness:DSHHarness.shared];
     // Order matters. Rebuild the guest's listening sockets, then tell the
     // harness that its last answer describes sockets that no longer exist.
     if (![ISHShellExecutor handleAppResume]) {
@@ -65,9 +85,16 @@
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
+    if (DSHSceneIsXCTestHost()) return;
+    [DSHLifecycleDiagnostics recordEvent:@"sceneDidBecomeActive" harness:DSHHarness.shared];
     UIViewController *root = self.window.rootViewController;
     if ([root isKindOfClass:DSHRootViewController.class])
         [(DSHRootViewController *) root sceneDidBecomeActive];
+}
+
+- (void)sceneWillResignActive:(UIScene *)scene {
+    if (DSHSceneIsXCTestHost()) return;
+    [DSHLifecycleDiagnostics recordEvent:@"sceneWillResignActive" harness:DSHHarness.shared];
 }
 
 @end

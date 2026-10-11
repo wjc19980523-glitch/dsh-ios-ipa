@@ -7,6 +7,10 @@
 #import "DSHHarnessAuth.h"
 #import <UIKit/UIKit.h>
 #import "DSHStartupMetrics.h"
+#include <sys/sysctl.h>
+#include <unistd.h>
+
+static BOOL DSHHostStartWasObserved;
 
 DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHLogBufferDidChangeNotification";
 
@@ -22,6 +26,38 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
 
 @implementation DSHLogBuffer
 
++ (NSString *)hostLaunchID {
+    static NSString *identity;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ identity = NSUUID.UUID.UUIDString; });
+    return identity;
+}
+
++ (NSDate *)hostProcessStartedAt {
+    static NSDate *started;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        struct kinfo_proc process = {0};
+        size_t size = sizeof(process);
+        int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+        if (sysctl(mib, 4, &process, &size, NULL, 0) == 0 && size && process.kp_proc.p_starttime.tv_sec) {
+            struct timeval time = process.kp_proc.p_starttime;
+            started = [NSDate dateWithTimeIntervalSince1970:time.tv_sec + time.tv_usec / 1000000.0];
+        } else {
+            // Some sandbox versions disallow KERN_PROC. Preserve an explicitly
+            // labelled observation rather than inventing a kernel timestamp.
+            started = NSDate.date;
+            DSHHostStartWasObserved = YES;
+        }
+    });
+    return started;
+}
+
++ (NSString *)hostProcessStartSource {
+    (void)self.hostProcessStartedAt;
+    return DSHHostStartWasObserved ? @"first_observation_sysctl_unavailable" : @"kernel_process_start";
+}
+
 - (instancetype)initWithCapacity:(NSUInteger)capacity {
     if (self = [super init]) {
         _capacity = MAX(capacity, 1);
@@ -31,11 +67,15 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
 }
 
 - (instancetype)initPersistentWithCapacity:(NSUInteger)capacity {
+    NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    return [self initPersistentWithCapacity:capacity directory:[support URLByAppendingPathComponent:@"Diagnostics" isDirectory:YES]];
+}
+
+- (instancetype)initPersistentWithCapacity:(NSUInteger)capacity directory:(NSURL *)directory {
     if (self = [self initWithCapacity:capacity]) {
         _startedAt = NSDate.date;
         NSFileManager *fm = NSFileManager.defaultManager;
-        NSURL *support = [fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-        _persistentDirectory = [support URLByAppendingPathComponent:@"Diagnostics" isDirectory:YES];
+        _persistentDirectory = directory;
         if (![fm createDirectoryAtURL:_persistentDirectory withIntermediateDirectories:YES attributes:nil error:nil])
             return self;
 
@@ -44,7 +84,7 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
         name.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
         name.dateFormat = @"yyyyMMdd-HHmmss-SSS";
         _persistentFile = [_persistentDirectory URLByAppendingPathComponent:
-                           [NSString stringWithFormat:@"launch-%@.log", [name stringFromDate:_startedAt]]];
+                           [NSString stringWithFormat:@"launch-%@-%@-%@.log", [name stringFromDate:_startedAt], DSHLogBuffer.hostLaunchID, NSUUID.UUID.UUIDString]];
         [fm createFileAtPath:_persistentFile.path contents:nil attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}];
         _persistentHandle = [NSFileHandle fileHandleForWritingAtPath:_persistentFile.path];
 
@@ -53,15 +93,23 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
         NSString *header = [NSString stringWithFormat:
             @"DSH startup diagnostics\n"
              "started: %@\n"
+             "host_launch_id: %@\n"
+             "host_pid: %d\n"
+             "host_process_started_at: %@\n"
+             "host_process_start_source: %@\n"
              "app: %@ (%@)\n"
              "device: %@\n"
              "system: %@ %@\n"
              "locale: %@\n\n",
             [NSISO8601DateFormatter stringFromDate:_startedAt timeZone:NSTimeZone.localTimeZone formatOptions:NSISO8601DateFormatWithInternetDateTime],
+            DSHLogBuffer.hostLaunchID, getpid(),
+            [NSISO8601DateFormatter stringFromDate:DSHLogBuffer.hostProcessStartedAt timeZone:NSTimeZone.localTimeZone formatOptions:NSISO8601DateFormatWithInternetDateTime],
+            DSHLogBuffer.hostProcessStartSource,
             info[@"CFBundleShortVersionString"] ?: @"?", info[(NSString *)kCFBundleVersionKey] ?: @"?",
             device.model ?: @"?", device.systemName ?: @"iOS", device.systemVersion ?: @"?",
             NSLocale.currentLocale.localeIdentifier ?: @"?"];
         [_persistentHandle writeData:[header dataUsingEncoding:NSUTF8StringEncoding]];
+        [self synchronizePersistentDiagnostics];
         [self prunePersistentLogs];
     }
     return self;
@@ -184,7 +232,7 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
 - (NSString *)diagnosticReport {
     if (self.persistentDirectory == nil)
         return [self.lines componentsJoinedByString:@"\n"];
-    [self.persistentHandle synchronizeFile];
+    [self synchronizePersistentDiagnostics];
     NSArray<NSURL *> *files = [NSFileManager.defaultManager contentsOfDirectoryAtURL:self.persistentDirectory
                                                           includingPropertiesForKeys:nil options:0 error:nil];
     files = [[files filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSURL *url, NSDictionary *bindings) {
@@ -201,6 +249,12 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
             [report appendFormat:@"\n===== %@ =====\n%@", url.lastPathComponent, contents];
     }
     return report;
+}
+
+- (void)synchronizePersistentDiagnostics {
+    @synchronized (self) {
+        [self.persistentHandle synchronizeFile];
+    }
 }
 
 @end

@@ -18,6 +18,7 @@
 #endif
 #include "util/signpost.h"
 
+#include "fs/dsh-lifecycle.h"
 #include "debug.h"
 #include "kernel/errno.h"
 #include "kernel/task.h"
@@ -377,6 +378,7 @@ static inode_t bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount
 static struct fd_ops fakefs_fdops;
 
 static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, int mode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
 
     /* Reject any write-intent open under a read-only bind mount.
@@ -468,6 +470,7 @@ static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, 
 
 // WARNING: giant hack, just for file providerws
 struct fd *fakefs_open_inode(struct mount *mount, ino_t inode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     db_begin_read(fs);
     sqlite3_stmt *stmt = fs->stmt.path_from_inode;
@@ -492,6 +495,7 @@ step:
 }
 
 static int fakefs_link(struct mount *mount, const char *src, const char *dst) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(dst))
         return _EROFS;
@@ -524,6 +528,7 @@ static int fakefs_link(struct mount *mount, const char *src, const char *dst) {
 }
 
 static int fakefs_unlink(struct mount *mount, const char *path) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
@@ -564,6 +569,7 @@ static int fakefs_unlink(struct mount *mount, const char *path) {
 }
 
 static int fakefs_rmdir(struct mount *mount, const char *path) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
@@ -602,6 +608,7 @@ static int fakefs_rmdir(struct mount *mount, const char *path) {
 }
 
 static int fakefs_rename(struct mount *mount, const char *src, const char *dst) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(src) || is_under_readonly_bind_mount(dst))
         return _EROFS;
@@ -640,6 +647,7 @@ static int fakefs_rename(struct mount *mount, const char *src, const char *dst) 
 }
 
 static int fakefs_symlink(struct mount *mount, const char *target, const char *link) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(link))
         return _EROFS;
@@ -681,6 +689,7 @@ static int fakefs_symlink(struct mount *mount, const char *target, const char *l
 }
 
 static int fakefs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ dev) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
@@ -708,6 +717,7 @@ static int fakefs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev
 }
 
 static int fakefs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ISH_SIGNPOST_SCOPE_BEGIN(fs, "fakefs_stat", _fs_spid);
     struct fakefs_db *fs = &mount->fakefs;
     /* Hook-routed paths bypass meta.db (see fakefs_open). Stat directly
@@ -796,6 +806,7 @@ static int fakefs_stat(struct mount *mount, const char *path, struct statbuf *fa
 }
 
 static int fakefs_fstat(struct fd *fd, struct statbuf *fake_stat) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &fd->mount->fakefs;
     int err = realfs.fstat(fd, fake_stat);
     if (err < 0)
@@ -850,6 +861,7 @@ static void fake_stat_setattr(struct ish_stat *ishstat, struct attr attr) {
 }
 
 static int fakefs_setattr(struct mount *mount, const char *path, struct attr attr) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
@@ -908,6 +920,7 @@ static int fakefs_setattr(struct mount *mount, const char *path, struct attr att
 }
 
 static int fakefs_fsetattr(struct fd *fd, struct attr attr) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &fd->mount->fakefs;
     if (attr.type == attr_size)
         return realfs.fsetattr(fd, attr);
@@ -939,6 +952,7 @@ static int fakefs_fsetattr(struct fd *fd, struct attr attr) {
 }
 
 static int fakefs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     if (is_under_readonly_bind_mount(path))
         return _EROFS;
@@ -991,6 +1005,7 @@ static ssize_t file_readlink(struct mount *mount, const char *path, char *buf, s
 }
 
 static ssize_t fakefs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     db_begin_read(fs);
     struct ish_stat ishstat;
@@ -1010,6 +1025,7 @@ static ssize_t fakefs_readlink(struct mount *mount, const char *path, char *buf,
 }
 
 static int fakefs_readdir(struct fd *fd, struct dir_entry *entry) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     assert(fd->ops == &fakefs_fdops);
     int res;
 retry:
@@ -1139,6 +1155,7 @@ static void remove_tree_at(int dir_fd, const char *path) {
 }
 
 int fakefs_bind_mount(const char *linux_path, const char *host_path, bool read_only) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     fprintf(stderr, "fakefs_bind_mount: ENTER linux_path=\"%s\" (len=%zu) host_path=\"%s\" (len=%zu) read_only=%d\n",
             linux_path, strlen(linux_path), host_path, strlen(host_path), read_only ? 1 : 0);
 
@@ -1325,6 +1342,7 @@ int fakefs_bind_mount(const char *linux_path, const char *host_path, bool read_o
 }
 
 int fakefs_bind_unmount(const char *linux_path) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     if (g_fakefs_mount == NULL)
         return _ENODEV;
 
@@ -1346,6 +1364,7 @@ int fakefs_bind_unmount(const char *linux_path) {
 }
 
 static int fakefs_mount(struct mount *mount) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     char db_path[PATH_MAX];
     strcpy(db_path, mount->source);
     char *basename = strrchr(db_path, '/') + 1;
@@ -1369,6 +1388,7 @@ static int fakefs_mount(struct mount *mount) {
 }
 
 static int fakefs_umount(struct mount *mount) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = fake_db_deinit(&mount->fakefs);
     if (err != SQLITE_OK) {
         printk("sqlite failed to close: %d\n", err);
@@ -1378,6 +1398,7 @@ static int fakefs_umount(struct mount *mount) {
 }
 
 static void fakefs_inode_orphaned(struct mount *mount, ino_t inode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
     db_begin_write(fs);
     sqlite3_bind_int64(fs->stmt.try_cleanup_inode, 1, inode);

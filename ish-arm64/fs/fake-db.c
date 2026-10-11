@@ -5,7 +5,45 @@
 #include "debug.h"
 #include "misc.h"
 #include "fs/fake-db.h"
+#include "fs/dsh-lifecycle.h"
 #include "util/signpost.h"
+
+/* Called only by the SQLite worker, never by the lifecycle snapshot reader.
+ * Cache both autocommit and txn_state: an implicit SELECT can retain a read
+ * transaction even while autocommit is enabled. No SQL/path/content is logged.
+ */
+static void db_observe(struct fakefs_db *fs, int result, const char *phase) {
+    if (fs->db == NULL) return;
+    int txn_state = -1;
+#if SQLITE_VERSION_NUMBER >= 3034000
+    txn_state = sqlite3_txn_state(fs->db, "main");
+#endif
+    dsh_lifecycle_sqlite_update(fs->lifecycle_connection_id, -1,
+            sqlite3_get_autocommit(fs->db), txn_state, result, phase);
+}
+
+/* The profile hook also observes direct SQL in migration/rebuild, which do
+ * not use db_begin/db_commit. It augments DEBUG_sql instead of replacing it.
+ */
+static int db_lifecycle_trace(unsigned event, void *context, void *statement, void *detail) {
+    struct fakefs_db *fs = context;
+    (void) detail;
+    if (event == SQLITE_TRACE_PROFILE)
+        db_observe(fs, SQLITE_OK, "sql_profile");
+#if DEBUG_sql
+    if (event == SQLITE_TRACE_STMT)
+        printk("sql trace: %s\n", sqlite3_sql(statement));
+#else
+    (void) statement;
+#endif
+    return 0;
+}
+
+static int db_finalize_observed(struct fakefs_db *fs, sqlite3_stmt *statement) {
+    int result = sqlite3_finalize(statement);
+    db_observe(fs, result, "finalize");
+    return result;
+}
 
 static void db_check_error(struct fakefs_db *fs) {
     int errcode = sqlite3_errcode(fs->db);
@@ -27,6 +65,7 @@ static void db_check_error(struct fakefs_db *fs) {
 static bool db_exec_retry(struct fakefs_db *fs, sqlite3_stmt *stmt) {
     for (int attempt = 0; attempt < DB_RETRY_MAX; attempt++) {
         int err = sqlite3_step(stmt);
+        db_observe(fs, err, "step");
         if (err == SQLITE_ROW || err == SQLITE_DONE || err == SQLITE_OK)
             return err == SQLITE_ROW;
         int errcode = sqlite3_errcode(fs->db);
@@ -44,7 +83,8 @@ static bool db_exec_retry(struct fakefs_db *fs, sqlite3_stmt *stmt) {
 
 static void db_reset_retry(struct fakefs_db *fs, sqlite3_stmt *stmt) {
     for (int attempt = 0; attempt < DB_RETRY_MAX; attempt++) {
-        sqlite3_reset(stmt);
+        int reset_result = sqlite3_reset(stmt);
+        db_observe(fs, reset_result, "reset");
         int errcode = sqlite3_errcode(fs->db);
         if (errcode == SQLITE_OK || errcode == SQLITE_ROW || errcode == SQLITE_DONE)
             return;
@@ -87,11 +127,11 @@ static int db_prepare_checked(struct fakefs_db *fs, const char *sql, sqlite3_stm
             return SQLITE_OK;
         }
         if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
-            if (stmt) sqlite3_finalize(stmt);
+            if (stmt) db_finalize_observed(fs, stmt);
             usleep(DB_RETRY_DELAY_US);
             continue;
         }
-        if (stmt) sqlite3_finalize(stmt);
+        if (stmt) db_finalize_observed(fs, stmt);
         *out = NULL;
         return db_log_error(fs, "prepare", sql);
     }
@@ -105,6 +145,7 @@ static int db_prepare_checked(struct fakefs_db *fs, const char *sql, sqlite3_stm
 static int db_step_checked(struct fakefs_db *fs, sqlite3_stmt *stmt, const char *sql) {
     for (int attempt = 0; attempt < DB_RETRY_MAX; attempt++) {
         int rc = sqlite3_step(stmt);
+        db_observe(fs, rc, "init_step");
         if (rc == SQLITE_DONE || rc == SQLITE_ROW || rc == SQLITE_OK)
             return rc;
         if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
@@ -126,7 +167,7 @@ static int db_exec_oneshot(struct fakefs_db *fs, const char *sql) {
     if (rc != SQLITE_OK)
         return rc;
     rc = db_step_checked(fs, stmt, sql);
-    sqlite3_finalize(stmt);
+    db_finalize_observed(fs, stmt);
     return (rc == SQLITE_DONE || rc == SQLITE_ROW || rc == SQLITE_OK) ? SQLITE_OK : rc;
 }
 
@@ -147,17 +188,21 @@ void db_exec_reset(struct fakefs_db *fs, sqlite3_stmt *stmt) {
 void db_begin_read(struct fakefs_db *fs) {
     sqlite3_mutex_enter(fs->lock);
     db_exec_reset(fs, fs->stmt.begin_deferred);
+    db_observe(fs, sqlite3_errcode(fs->db), "begin_read");
 }
 void db_begin_write(struct fakefs_db *fs) {
     sqlite3_mutex_enter(fs->lock);
     db_exec_reset(fs, fs->stmt.begin_immediate);
+    db_observe(fs, sqlite3_errcode(fs->db), "begin_write");
 }
 void db_commit(struct fakefs_db *fs) {
     db_exec_reset(fs, fs->stmt.commit);
+    db_observe(fs, sqlite3_errcode(fs->db), "commit");
     sqlite3_mutex_leave(fs->lock);
 }
 void db_rollback(struct fakefs_db *fs) {
     db_exec_reset(fs, fs->stmt.rollback);
+    db_observe(fs, sqlite3_errcode(fs->db), "rollback");
     sqlite3_mutex_leave(fs->lock);
 }
 
@@ -258,13 +303,7 @@ void path_rename(struct fakefs_db *fs, const char *src, const char *dst) {
     db_exec_reset(fs, fs->stmt.path_rename);
 }
 
-#if DEBUG_sql
-static int trace_callback(unsigned UNUSED(why), void *UNUSED(fuck), void *stmt, void *_sql) {
-    char *sql = _sql;
-    printk("%d sql trace: %s %s\n", current ? current->pid : -1, sqlite3_expanded_sql(stmt), sql[0] == '-' ? sql : "");
-    return 0;
-}
-#endif
+
 
 static void sqlite_func_change_prefix(sqlite3_context *context, int argc, sqlite3_value **args) {
     assert(argc == 3);
@@ -284,12 +323,20 @@ extern int fakefs_rebuild(struct fakefs_db *fs, int root_fd);
 extern int fakefs_migrate(struct fakefs_db *fs, int root_fd);
 
 int fake_db_init(struct fakefs_db *fs, const char *db_path, int root_fd) {
+    DSH_LIFECYCLE_SCOPE(-1);
     int err = sqlite3_open_v2(db_path, &fs->db, SQLITE_OPEN_READWRITE, NULL);
+    fs->lifecycle_connection_id = dsh_lifecycle_sqlite_open(-1);
     if (err != SQLITE_OK) {
         printk("error opening database: %s\n", sqlite3_errmsg(fs->db));
-        sqlite3_close(fs->db);
+        int close_result = sqlite3_close(fs->db);
+        dsh_lifecycle_sqlite_close(fs->lifecycle_connection_id, close_result);
         return _EINVAL;
     }
+    unsigned trace_events = SQLITE_TRACE_PROFILE;
+#if DEBUG_sql
+    trace_events |= SQLITE_TRACE_STMT;
+#endif
+    sqlite3_trace_v2(fs->db, trace_events, db_lifecycle_trace, fs);
     sqlite3_busy_timeout(fs->db, 5000);
     sqlite3_create_function(fs->db, "change_prefix", 3, SQLITE_UTF8 | SQLITE_DETERMINISTIC, NULL, sqlite_func_change_prefix, NULL, NULL);
 
@@ -326,10 +373,6 @@ int fake_db_init(struct fakefs_db *fs, const char *db_path, int root_fd) {
             printk("fakefs db init: tuning pragma failed (continuing): %s\n", tuning[ti]);
     }
 
-#if DEBUG_sql
-    sqlite3_trace_v2(mount->db, SQLITE_TRACE_STMT, trace_callback, NULL);
-#endif
-
     err = fakefs_migrate(fs, root_fd);
     if (err < 0)
         return err;
@@ -345,7 +388,7 @@ int fake_db_init(struct fakefs_db *fs, const char *db_path, int root_fd) {
     if (db_prepare_checked(fs, "select db_inode from meta", &statement) != SQLITE_OK) goto init_fail;
     if (db_step_checked(fs, statement, "select db_inode from meta") == SQLITE_ROW) {
         if ((uint64_t) sqlite3_column_int64(statement, 0) != db_inode) {
-            sqlite3_finalize(statement);
+            db_finalize_observed(fs, statement);
             statement = NULL;
             int err = fakefs_rebuild(fs, root_fd);
             if (err < 0) {
@@ -354,17 +397,17 @@ int fake_db_init(struct fakefs_db *fs, const char *db_path, int root_fd) {
         }
     }
     if (statement != NULL)
-        sqlite3_finalize(statement);
+        db_finalize_observed(fs, statement);
 
     // save current inode
     if (db_prepare_checked(fs, "update meta set db_inode = ?", &statement) != SQLITE_OK) goto init_fail;
     sqlite3_bind_int64(statement, 1, (int64_t) db_inode);
     int meta_rc = db_step_checked(fs, statement, "update meta set db_inode = ?");
     if (meta_rc != SQLITE_DONE && meta_rc != SQLITE_ROW && meta_rc != SQLITE_OK) {
-        sqlite3_finalize(statement);
+        db_finalize_observed(fs, statement);
         goto init_fail;
     }
-    sqlite3_finalize(statement);
+    db_finalize_observed(fs, statement);
 
     // delete orphaned stats
     if (db_exec_oneshot(fs, "delete from stats where not exists (select 1 from paths where inode = stats.inode)") != SQLITE_OK)
@@ -400,30 +443,34 @@ init_fail:
     // fails gracefully (the caller handles a negative return).
     printk("fakefs db init: FAILED for %s — mount aborted (app kept alive)\n", db_path);
     if (fs->db) {
-        sqlite3_close(fs->db);
+        int close_result = sqlite3_close(fs->db);
+        dsh_lifecycle_sqlite_close(fs->lifecycle_connection_id, close_result);
         fs->db = NULL;
     }
     return _EIO;
 }
 
 int fake_db_deinit(struct fakefs_db *fs) {
+    DSH_LIFECYCLE_SCOPE(-1);
     if (fs->db) {
-        sqlite3_finalize(fs->stmt.begin_deferred);
-        sqlite3_finalize(fs->stmt.begin_immediate);
-        sqlite3_finalize(fs->stmt.commit);
-        sqlite3_finalize(fs->stmt.rollback);
-        sqlite3_finalize(fs->stmt.path_get_inode);
-        sqlite3_finalize(fs->stmt.path_read_stat);
-        sqlite3_finalize(fs->stmt.path_create_stat);
-        sqlite3_finalize(fs->stmt.path_create_path);
-        sqlite3_finalize(fs->stmt.inode_read_stat);
-        sqlite3_finalize(fs->stmt.inode_write_stat);
-        sqlite3_finalize(fs->stmt.path_link);
-        sqlite3_finalize(fs->stmt.path_unlink);
-        sqlite3_finalize(fs->stmt.path_rename);
-        sqlite3_finalize(fs->stmt.path_from_inode);
-        sqlite3_finalize(fs->stmt.try_cleanup_inode);
-        return sqlite3_close(fs->db);
+        db_finalize_observed(fs, fs->stmt.begin_deferred);
+        db_finalize_observed(fs, fs->stmt.begin_immediate);
+        db_finalize_observed(fs, fs->stmt.commit);
+        db_finalize_observed(fs, fs->stmt.rollback);
+        db_finalize_observed(fs, fs->stmt.path_get_inode);
+        db_finalize_observed(fs, fs->stmt.path_read_stat);
+        db_finalize_observed(fs, fs->stmt.path_create_stat);
+        db_finalize_observed(fs, fs->stmt.path_create_path);
+        db_finalize_observed(fs, fs->stmt.inode_read_stat);
+        db_finalize_observed(fs, fs->stmt.inode_write_stat);
+        db_finalize_observed(fs, fs->stmt.path_link);
+        db_finalize_observed(fs, fs->stmt.path_unlink);
+        db_finalize_observed(fs, fs->stmt.path_rename);
+        db_finalize_observed(fs, fs->stmt.path_from_inode);
+        db_finalize_observed(fs, fs->stmt.try_cleanup_inode);
+        int close_result = sqlite3_close(fs->db);
+        dsh_lifecycle_sqlite_close(fs->lifecycle_connection_id, close_result);
+        return close_result;
     }
     return SQLITE_OK;
 }

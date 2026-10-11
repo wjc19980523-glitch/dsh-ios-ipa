@@ -20,7 +20,22 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
 - (void)setUp {
     self.continueAfterFailure = NO;
     self.app = [[XCUIApplication alloc] init];
+    // Hosted unit tests use a blank scene; UI tests must launch the real app.
+    self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0" };
+    __weak DSHLaunchUITests *weakSelf = self;
+    [self addUIInterruptionMonitorWithDescription:@"Refuse DSH system permission requests"
+                                          handler:^BOOL(XCUIElement *interruption) {
+        (void)interruption;
+        XCUIApplication *springboard = [[XCUIApplication alloc] initWithBundleIdentifier:@"com.apple.springboard"];
+        if (!springboard.alerts.firstMatch.exists)
+            return NO; // App-owned confirmations are exercised explicitly below.
+        // A delayed request must not reach XCTest's default Allow/Continue handler.
+        [weakSelf declinePendingSystemPermissionAlerts];
+        return YES;
+    }];
+    [self declinePendingSystemPermissionAlerts];
     [self.app launch];
+    [self declinePendingSystemPermissionAlerts];
 }
 
 - (void)attachScreenshot:(NSString *)name {
@@ -30,26 +45,122 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     [self addAttachment:att];
 }
 
+/// Hosted capability tests can leave an unanswered system permission request.
+/// Refuse only this app's requests; an unfamiliar system alert is a test failure.
+- (void)declinePendingSystemPermissionAlerts {
+    XCUIApplication *springboard = [[XCUIApplication alloc] initWithBundleIdentifier:@"com.apple.springboard"];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    for (NSUInteger count = 0; count < 6 && deadline.timeIntervalSinceNow > 0; count++) {
+        XCUIElement *alert = springboard.alerts.firstMatch;
+        if (![alert waitForExistenceWithTimeout:MIN(0.5, MAX(0, deadline.timeIntervalSinceNow))])
+            return;
+
+        NSString *title = alert.staticTexts.firstMatch.label ?: @"";
+        NSString *normalizedTitle = [[[title stringByReplacingOccurrencesOfString:@"“" withString:@"\""]
+                                      stringByReplacingOccurrencesOfString:@"”" withString:@"\""] lowercaseString];
+        BOOL belongsToApp = [normalizedTitle containsString:@"\"dshios\""] ||
+                            [normalizedTitle containsString:@"\"dsh\""];
+        NSArray<NSString *> *refusalLabels = @[@"Don't Allow", @"Don’t Allow", @"不允许"];
+        XCUIElement *refuse = [alert.buttons matchingPredicate:
+                              [NSPredicate predicateWithFormat:@"label IN %@", refusalLabels]].firstMatch;
+        if (!belongsToApp || !refuse.exists) {
+            [self attachScreenshot:@"unexpected-system-alert"];
+            XCTFail(@"Refusing to handle an unfamiliar system alert: %@", title);
+            return;
+        }
+
+        [refuse tap];
+        // A different queued permission may appear immediately after this one.
+        XCUIElement *sameAlert = [springboard.alerts containingType:XCUIElementTypeStaticText identifier:title].firstMatch;
+        XCTNSPredicateExpectation *gone = [[XCTNSPredicateExpectation alloc]
+                                          initWithPredicate:[NSPredicate predicateWithFormat:@"exists == NO"]
+                                          object:sameAlert];
+        NSTimeInterval remaining = MAX(0, deadline.timeIntervalSinceNow);
+        if ([XCTWaiter waitForExpectations:@[gone] timeout:MIN(2, remaining)] != XCTWaiterResultCompleted) {
+            [self attachScreenshot:@"permission-alert-did-not-close"];
+            XCTFail(@"System permission alert remained after explicitly denying it: %@", title);
+            return;
+        }
+    }
+    if (springboard.alerts.firstMatch.exists) {
+        [self attachScreenshot:@"permission-alert-limit"];
+        XCTFail(@"System permission alerts exceeded the bounded refusal window");
+    }
+}
+
+/// Complete only the named, optional web step using its explicit safe action.
+- (void)closeKnownGuestDialogInWebView:(XCUIElement *)web
+                              labels:(NSArray<NSString *> *)dialogLabels
+                        actionLabels:(NSArray<NSString *> *)actionLabels
+                      closureTimeout:(NSTimeInterval)closureTimeout {
+    [self declinePendingSystemPermissionAlerts];
+    XCUIElement *dialog = [web.otherElements matchingPredicate:
+                          [NSPredicate predicateWithFormat:@"label IN %@", dialogLabels]].firstMatch;
+    if (![dialog waitForExistenceWithTimeout:10])
+        return;
+    XCUIElement *action = [dialog.buttons matchingPredicate:
+                          [NSPredicate predicateWithFormat:@"label IN %@", actionLabels]].firstMatch;
+    XCTAssertTrue([action waitForExistenceWithTimeout:5], @"the known web dialog needs its own safe action: %@", dialogLabels);
+    [action tap];
+    NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO"];
+    XCTestExpectation *closed = [self expectationForPredicate:gone evaluatedWithObject:dialog handler:nil];
+    [self waitForExpectations:@[closed] timeout:closureTimeout];
+    XCTAssertFalse(dialog.exists, @"the known web dialog must close before opening native controls: %@", dialogLabels);
+}
+
+/// Fresh CI simulators follow the normal guest onboarding without entering keys.
+- (void)completeGuestFirstLaunchOnboardingIfPresent {
+    XCUIElement *web = self.app.webViews[@"dsh.webview"];
+    XCTAssertTrue([web waitForExistenceWithTimeout:10]);
+    // Exact copy/action pairs from the lockfile's ui-settings-models 0.2.0-rc.2
+    // WelcomeNotice and DeepSeekOnboardingDialog. Scope every tap to that named
+    // web dialog; system Continue/Allow and credential Save are never selected.
+    // Real Simulator AX showed Continue disabled in its saving/ACK state beyond
+    // 20 seconds under emulation. Still require the exact welcome dialog to close
+    // within a finite window before exercising any native controls.
+    [self closeKnownGuestDialogInWebView:web
+                                 labels:@[@"预览版说明, web dialog", @"Preview Notice, web dialog"]
+                           actionLabels:@[@"继续", @"Continue"]
+                         closureTimeout:120];
+    [self closeKnownGuestDialogInWebView:web
+                                 labels:@[@"添加一个 API Key 开始使用, web dialog", @"Add an API key to get started, web dialog"]
+                           actionLabels:@[@"稍后配置", @"Configure later"]
+                         closureTimeout:20];
+}
+
 /// Waits until the harness overlay is gone (server answered and page loaded).
 - (void)waitForHarnessReady {
+    // Passive readiness queries do not invoke XCTest interruption monitors.
+    [self declinePendingSystemPermissionAlerts];
     XCUIElement *overlay = self.app.staticTexts[@"dsh.overlay.message"];
     XCUIElement *dot = self.app.otherElements[@"dsh.statusdot"];
+    NSPredicate *ready = [NSPredicate predicateWithFormat:@"exists == YES AND value == 'ready'"];
+    XCTestExpectation *server = [self expectationForPredicate:ready evaluatedWithObject:dot handler:nil];
+    [self waitForExpectations:@[server] timeout:kBootTimeout];
     NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO OR hittable == NO"];
     XCTestExpectation *e = [self expectationForPredicate:gone evaluatedWithObject:overlay handler:nil];
     [self waitForExpectations:@[e] timeout:kBootTimeout];
-    if (dot.exists)
-        XCTAssertEqualObjects(dot.value, @"ready", @"status dot should report ready");
+    XCTAssertTrue(dot.exists, @"the native status indicator must remain present");
+    XCTAssertEqualObjects(dot.value, @"ready", @"status dot should report ready");
+    [self completeGuestFirstLaunchOnboardingIfPresent];
 }
 
 - (void)testHarnessBootsAndShowsWebUI {
-    // While starting, the overlay shows a progress bar and an elapsed/ETA line.
+    // Import, migration and Harness startup have different progress wording.
+    // Every visible phase should expose progress and a nonempty detail line.
     XCUIElement *progress = self.app.progressIndicators[@"dsh.overlay.progress"];
     XCUIElement *elapsed = self.app.staticTexts[@"dsh.overlay.elapsed"];
     if ([progress waitForExistenceWithTimeout:5]) {
         XCTAssertTrue([elapsed waitForExistenceWithTimeout:5]);
-        NSPredicate *hasEta = [NSPredicate predicateWithFormat:@"label CONTAINS 'elapsed'"];
-        XCTestExpectation *e = [self expectationForPredicate:hasEta evaluatedWithObject:elapsed handler:nil];
-        [self waitForExpectations:@[e] timeout:10];
+        NSPredicate *hasDetail = [NSPredicate predicateWithFormat:@"label.length > 0"];
+        NSPredicate *hasProgress = [NSPredicate predicateWithBlock:^BOOL(id evaluatedObject, NSDictionary *bindings) {
+            (void)bindings;
+            XCUIElement *element = evaluatedObject;
+            return element.value != nil && [[element.value description] length] > 0;
+        }];
+        XCTestExpectation *detail = [self expectationForPredicate:hasDetail evaluatedWithObject:elapsed handler:nil];
+        XCTestExpectation *value = [self expectationForPredicate:hasProgress evaluatedWithObject:progress handler:nil];
+        [self waitForExpectations:@[detail, value] timeout:10];
     }
     [self attachScreenshot:@"01-launch"];
     [self waitForHarnessReady];
@@ -58,12 +169,20 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     XCUIElement *web = self.app.webViews.firstMatch;
     XCTAssertTrue([web waitForExistenceWithTimeout:30], @"web view should exist");
 
-    // The DSH web app renders a sidebar with a "New Session" button (or the
-    // first-run notice with a Continue button) once its client bundle ran.
-    NSPredicate *uiUp = [NSPredicate predicateWithFormat:@"exists == YES"];
-    XCUIElementQuery *markers = [[web descendantsMatchingType:XCUIElementTypeAny]
-        matchingPredicate:[NSPredicate predicateWithFormat:@"label CONTAINS[c] 'New Session' OR label CONTAINS[c] 'Continue' OR label CONTAINS[c] 'DeepSeek'"]];
-    XCTestExpectation *e = [self expectationForPredicate:uiUp evaluatedWithObject:markers.firstMatch handler:nil];
+    // The first-run notice and normal client both expose buttons. Verify a
+    // usable client control without assuming the user's saved language or
+    // accepting a brand name in an otherwise noninteractive page.
+    NSPredicate *uiUp = [NSPredicate predicateWithBlock:^BOOL(id evaluatedObject, NSDictionary *bindings) {
+        (void)bindings;
+        XCUIElement *client = evaluatedObject;
+        if (!client.exists || !client.isHittable) return NO;
+        for (XCUIElement *button in client.buttons.allElementsBoundByIndex) {
+            if (button.exists && button.isEnabled && button.isHittable && button.label.length > 0)
+                return YES;
+        }
+        return NO;
+    }];
+    XCTestExpectation *e = [self expectationForPredicate:uiUp evaluatedWithObject:web handler:nil];
     [self waitForExpectations:@[e] timeout:90];
     [self attachScreenshot:@"03-web-ui"];
 
@@ -177,8 +296,25 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     XCTAssertTrue(hasRows, @"the table should show rows or an empty-state row");
 
     // The filters are the point of the screen for anyone looking for trouble.
-    XCTAssertTrue(self.app.buttons[@"Problems"].exists, @"filters should be reachable");
-    [self.app.buttons[@"Problems"] tap];
+    // A queued permission may appear after the Activity tap; existence queries
+    // alone do not invoke the interruption monitor.
+    [self declinePendingSystemPermissionAlerts];
+    // The segment is a button in this table header. Its accessibility ancestor
+    // is not required to expose the SegmentedControl type on every iOS release.
+    XCUIElement *problems = table.buttons[@"Problems"];
+    if (![problems waitForExistenceWithTimeout:5]) {
+        XCTAttachment *hierarchy = [XCTAttachment attachmentWithString:table.debugDescription];
+        hierarchy.name = @"activity-table-accessibility";
+        hierarchy.lifetime = XCTAttachmentLifetimeKeepAlways;
+        [self addAttachment:hierarchy];
+        [self attachScreenshot:@"activity-filter-missing"];
+    }
+    XCTAssertTrue(problems.exists, @"filters should be reachable");
+    XCTAssertTrue(problems.isHittable, @"the Problems filter must be tappable");
+    [problems tap];
+    NSPredicate *selected = [NSPredicate predicateWithFormat:@"selected == YES"];
+    XCTestExpectation *filter = [self expectationForPredicate:selected evaluatedWithObject:problems handler:nil];
+    [self waitForExpectations:@[filter] timeout:5];
     XCTAssertTrue([table waitForExistenceWithTimeout:5]);
     [self attachScreenshot:@"07-activity-problems"];
 
@@ -205,14 +341,25 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     XCUIElement *terminal = self.app.buttons[@"dsh.terminal"];
     XCTAssertTrue([terminal waitForExistenceWithTimeout:10]);
     [terminal tap];
-    // The iSH terminal is an hterm web view inside a sheet.
-    XCUIElement *termWeb = [self.app.webViews elementBoundByIndex:1];
-    XCTAssertTrue([termWeb waitForExistenceWithTimeout:20], @"terminal sheet should present a second web view");
+    // WebKit exposes multiple WebView AX layers for each actual WKWebView.
+    // An application-wide index can select the main page's inner WebView.
+    XCUIElement *sheet = self.app.otherElements[@"dsh.terminal.sheet"];
+    XCTAssertTrue([sheet waitForExistenceWithTimeout:20], @"the native terminal sheet must be presented");
+    XCUIElement *termWeb = sheet.webViews.firstMatch;
+    XCTAssertTrue([termWeb waitForExistenceWithTimeout:20], @"the terminal sheet needs its own hterm web view");
     sleep(3);
     [self attachScreenshot:@"05-terminal"];
-    // Swipe the sheet down to dismiss; the main web view is still there.
-    [termWeb swipeDown];
-    sleep(1);
+    // Dismissal must remove the terminal and make the main controls usable.
+    // Begin at the sheet's top edge. A gesture in hterm's scrollable content
+    // scrolls the terminal and does not exercise UIKit's sheet dismissal.
+    XCUICoordinate *top = [sheet coordinateWithNormalizedOffset:CGVectorMake(0.5, 0.01)];
+    XCUICoordinate *down = [sheet coordinateWithNormalizedOffset:CGVectorMake(0.5, 0.8)];
+    [top pressForDuration:0.1 thenDragToCoordinate:down];
+    NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO"];
+    NSPredicate *usable = [NSPredicate predicateWithFormat:@"hittable == YES AND enabled == YES"];
+    XCTestExpectation *dismissed = [self expectationForPredicate:gone evaluatedWithObject:sheet handler:nil];
+    XCTestExpectation *bar = [self expectationForPredicate:usable evaluatedWithObject:self.app.buttons[@"dsh.menu"] handler:nil];
+    [self waitForExpectations:@[dismissed, bar] timeout:20];
     XCTAssertTrue(self.app.webViews.firstMatch.exists);
 }
 

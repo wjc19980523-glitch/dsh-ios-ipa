@@ -77,4 +77,8 @@ GCC_SYMBOLS_PRIVATE_EXTERN = NO
 // adds one symbol to the keep-list and leaves everything else exported, whereas
 // -exported_symbol *replaces* the export set. The iSH build already uses -u for
 // the same purpose, so the pattern is proven here rather than novel.
-OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-u,_DSHHarnessAuthCookiePrefix
+// Hosted XCTest exercises diagnostic intent states before the admission gate
+// is connected to UIKit. Retain these exported C entry points in the host.
+// Release can also fold uses of the token query constant into literal strings;
+// keep its exported storage for the hosted HTTP authentication fixture.
+OTHER_LDFLAGS = $(inherited) -framework WebKit -framework EventKit -framework HealthKit -framework Contacts -framework UserNotifications -framework UniformTypeIdentifiers -framework PhotosUI -framework Photos -Wl,-u,_DSHHarnessAuthCookiePrefix -Wl,-u,_DSHHarnessTokenQueryKey -Wl,-u,_dsh_lifecycle_request_quiesce -Wl,-u,_dsh_lifecycle_mark_quiescent -Wl,-u,_dsh_lifecycle_resume

@@ -26,6 +26,7 @@
 #import <UIKit/UIKit.h>
 #import "DSHSceneDelegate.h"
 #import "ISHShellExecutor.h"
+#import <objc/runtime.h>
 
 @interface DSHSceneLifecycleTests : XCTestCase
 @end
@@ -50,10 +51,16 @@
 - (void)testApplicationDelegateNoLongerClaimsTheLifecycleHooks {
     Class appDelegate = NSClassFromString(@"DSHAppDelegate");
     XCTAssertNotNil(appDelegate, @"DSHAppDelegate is compiled into the test host");
-    XCTAssertFalse([appDelegate instancesRespondToSelector:@selector(applicationDidEnterBackground:)],
-                   @"with a UIScene manifest UIKit never calls this; it must not look like the live path");
-    XCTAssertFalse([appDelegate instancesRespondToSelector:@selector(applicationWillEnterForeground:)],
-                   @"with a UIScene manifest UIKit never calls this; it must not look like the live path");
+    // instancesRespondToSelector also sees the superclass's legacy iSH hooks.
+    // Assert what DSH itself declares, rather than fail on inherited methods.
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(appDelegate, &count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL selector = method_getName(methods[i]);
+        XCTAssertNotEqual(selector, @selector(applicationDidEnterBackground:));
+        XCTAssertNotEqual(selector, @selector(applicationWillEnterForeground:));
+    }
+    free(methods);
 }
 
 /// Info.plist must still point at this delegate, or none of the above runs.

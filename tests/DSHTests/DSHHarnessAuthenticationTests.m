@@ -40,6 +40,7 @@
 @property (nonatomic, copy, nullable) void (^lineHandler)(NSString *line, BOOL isStdErr);
 @property (nonatomic, copy, nullable) void (^exitHandler)(int);
 @property (nonatomic, copy, nullable) void (^onLaunch)(NSDictionary *environment);
+@property (nonatomic, copy, nullable) void (^onKill)(int pid);
 @end
 
 @implementation DSHScriptedGuestLauncher
@@ -64,6 +65,7 @@
 }
 
 - (BOOL)killProcess:(int)pid signal:(int)signal {
+    if (self.onKill) self.onKill(pid);
     return YES;
 }
 
@@ -439,15 +441,25 @@
         server.launchToken = @"handshake-token-1";
     };
     [h start];
-    [launcher emit:@"dsh web: http://127.0.0.1:39460/?token=handshake-token-1"];
+    XCTestExpectation *ready = [self expectationForNotification:DSHHarnessStateDidChangeNotification
+                                                         object:h handler:^BOOL(NSNotification *n) {
+        return h.state == DSHHarnessStateReady;
+    }];
+    [launcher emit:[NSString stringWithFormat:@"dsh web: %@?token=handshake-token-1", server.baseURL.absoluteString]];
+    [self waitForExpectations:@[ready] timeout:25];
 
     XCTAssertNotNil(server);
     XCTAssertNotNil(h.authenticatedEntryURL, @"the announcement produces an entry URL");
+    XCTAssertEqual(server.tokenExchangeCount, 1u, @"Harness readiness performed one real GET/303/cookie/200 exchange");
+    // A second, isolated browser-like session must perform its own handshake.
+    // The Harness probe has a separate ephemeral cookie store.
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
 
     // 1. The bare origin is refused, exactly as dsh refuses it. This is what
     //    the health check must not call "ready".
     XCTestExpectation *refused = [self expectationWithDescription:@"bare origin refused"];
-    [[NSURLSession.sharedSession dataTaskWithURL:h.baseURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    [[session dataTaskWithURL:h.baseURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
         XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 401);
         XCTAssertGreaterThan(server.unauthorizedCount, 0u);
         [refused fulfill];
@@ -456,7 +468,6 @@
 
     // 2. The entry URL completes the exchange and is served.
     XCTestExpectation *served = [self expectationWithDescription:@"entry URL served"];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration];
     [[session dataTaskWithURL:h.authenticatedEntryURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         XCTAssertNil(error);
         XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 200,
@@ -464,7 +475,7 @@
         [served fulfill];
     }] resume];
     [self waitForExpectations:@[served] timeout:10];
-    XCTAssertEqual(server.tokenExchangeCount, 1u, @"the token URL is what mints the cookie");
+    XCTAssertEqual(server.tokenExchangeCount, 2u, @"each isolated cookie store exchanges the token once");
     XCTAssertNotNil(server.issuedCookieValue, @"and a cookie came back");
 
     // 3. The cookie is reused: a second load of the origin now works, which is
@@ -475,8 +486,9 @@
         [withCookie fulfill];
     }] resume];
     [self waitForExpectations:@[withCookie] timeout:10];
-    XCTAssertEqual(server.tokenExchangeCount, 1u, @"no second exchange was needed");
+    XCTAssertEqual(server.tokenExchangeCount, 2u, @"the browser reused its cookie without another exchange");
     [session invalidateAndCancel];
+    [h stop];
     [server stop];
 }
 
@@ -489,35 +501,67 @@
     h.preferredPort = 39470;
     h.startupTimeout = 60;
 
+    __block NSUInteger launches = 0;
     launcher.onLaunch = ^(NSDictionary *env) {
+        launches++;
         server = [[DSHTestHTTPServer alloc] initWithPort:(uint16_t) [env[@"DSH_PORT"] intValue]];
+        XCTAssertNotNil(server, @"the simulated process must bind the port it was assigned");
         server.requiresLaunchToken = YES;
-        // Each "process" accepts only its own token.
-        server.launchToken = @"token-generation-1";
+        server.launchToken = [NSString stringWithFormat:@"token-generation-%lu", (unsigned long) launches];
+        // Guest output arrives after launch returns and Harness records the pid.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [launcher emit:[NSString stringWithFormat:@"dsh web: %@?token=%@", server.baseURL.absoluteString, server.launchToken]];
+        });
     };
+    launcher.onKill = ^(int pid) {
+        // A real killed guest releases its listener. Keeping the old fixture
+        // alive would correctly make Harness select a different free port.
+        [server stop];
+        server = nil;
+    };
+    XCTestExpectation *firstReady = [self expectationForNotification:DSHHarnessStateDidChangeNotification
+                                                              object:h handler:^BOOL(NSNotification *n) {
+        return h.state == DSHHarnessStateReady;
+    }];
     [h start];
-    [launcher emit:@"dsh web: http://127.0.0.1:39470/?token=token-generation-1"];
+    [self waitForExpectations:@[firstReady] timeout:20];
     NSURL *firstEntry = h.authenticatedEntryURL;
-    XCTAssertEqualObjects(firstEntry.absoluteString, @"http://127.0.0.1:39470/?token=token-generation-1");
+    XCTAssertEqualObjects(firstEntry, [DSHHarnessAuth authenticatedEntryURLWithBaseURL:h.baseURL token:@"token-generation-1"]);
+    XCTAssertEqual(server.tokenExchangeCount, 1u);
+    NSUInteger firstGeneration = h.authenticationGeneration;
 
+    XCTestExpectation *secondReady = [self expectationForNotification:DSHHarnessStateDidChangeNotification
+                                                               object:h handler:^BOOL(NSNotification *n) {
+        return h.state == DSHHarnessStateReady;
+    }];
     [h restart];
-    // The replacement process mints a different token, and the server follows:
-    // the old token is no longer accepted.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        server.launchToken = @"token-generation-2";
-        [launcher emit:@"dsh web: http://127.0.0.1:39470/?token=token-generation-2"];
-    });
+    XCTAssertNil(h.authenticatedEntryURL);
+    [self waitForExpectations:@[secondReady] timeout:20];
+    XCTAssertEqual(launches, 2u);
+    XCTAssertGreaterThan(h.authenticationGeneration, firstGeneration);
+    XCTAssertEqualObjects(h.authenticatedEntryURL,
+                          [DSHHarnessAuth authenticatedEntryURLWithBaseURL:h.baseURL token:@"token-generation-2"],
+                          @"the web view receives the replacement process's actual authority and token");
+    XCTAssertNotEqualObjects(firstEntry, h.authenticatedEntryURL);
+    XCTAssertEqual(server.tokenExchangeCount, 1u, @"the replacement process also completed its real handshake");
 
-    XCTestExpectation *updated = [self expectationWithDescription:@"new entry URL"];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        XCTAssertEqualObjects(h.authenticatedEntryURL.absoluteString,
-                              @"http://127.0.0.1:39470/?token=token-generation-2",
-                              @"the web view must be handed the current token, not the dead one");
-        [updated fulfill];
-    });
-    [self waitForExpectations:@[updated] timeout:10];
+    // An isolated client cannot redeem the previous process's token at the
+    // replacement listener, even when the allocator happened to reuse its port.
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+    NSURL *stale = [DSHHarnessAuth authenticatedEntryURLWithBaseURL:h.baseURL token:@"token-generation-1"];
+    XCTestExpectation *refused = [self expectationWithDescription:@"old token refused after restart"];
+    [[session dataTaskWithURL:stale completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 401);
+        XCTAssertEqual(server.tokenExchangeCount, 1u);
+        [refused fulfill];
+    }] resume];
+    [self waitForExpectations:@[refused] timeout:10];
+    [session invalidateAndCancel];
 
-    if (server) [server stop];
+    [h stop];
+    launcher.onLaunch = nil;
+    launcher.onKill = nil;
 }
 
 /// An exchange with the wrong token must not authenticate anything. Without
@@ -539,6 +583,64 @@
     }] resume];
     [self waitForExpectations:@[done] timeout:10];
     [server stop];
+}
+
+/// The fixture must reject two token parameters instead of accidentally
+/// authenticating whichever one its parser happens to read first.
+- (void)testDuplicateTokenParametersAreRefused {
+    DSHTestHTTPServer *server = [[DSHTestHTTPServer alloc] initWithPort:0];
+    XCTAssertNotNil(server);
+    server.requiresLaunchToken = YES;
+    server.launchToken = @"the-right-one";
+    NSURL *duplicate = [NSURL URLWithString:[server.baseURL.absoluteString stringByAppendingString:
+        @"?token=the-right-one&token=the-wrong-one"]];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+    XCTestExpectation *done = [self expectationWithDescription:@"duplicate credentials refused"];
+    [[session dataTaskWithURL:duplicate completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 401);
+        XCTAssertEqual(server.tokenExchangeCount, 0u);
+        XCTAssertNil(server.issuedCookieValue);
+        [done fulfill];
+    }] resume];
+    [self waitForExpectations:@[done] timeout:10];
+    [session invalidateAndCancel];
+    [server stop];
+}
+
+/// HTTP cookies are host-scoped, so a real client sends the first fixture's
+/// cookie to another loopback port. It must not grant access to that fixture.
+- (void)testAnotherFixtureCookieCannotBypassTheHandshake {
+    DSHTestHTTPServer *first = [[DSHTestHTTPServer alloc] initWithPort:0];
+    DSHTestHTTPServer *second = [[DSHTestHTTPServer alloc] initWithPort:0];
+    XCTAssertNotNil(first);
+    XCTAssertNotNil(second);
+    first.requiresLaunchToken = second.requiresLaunchToken = YES;
+    first.launchToken = @"first-fixture-token";
+    second.launchToken = @"second-fixture-token";
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+    XCTestExpectation *authenticated = [self expectationWithDescription:@"first fixture authenticated"];
+    NSURL *entry = [DSHHarnessAuth authenticatedEntryURLWithBaseURL:first.baseURL token:first.launchToken];
+    [[session dataTaskWithURL:entry completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 200);
+        XCTAssertEqual(first.tokenExchangeCount, 1u);
+        [authenticated fulfill];
+    }] resume];
+    [self waitForExpectations:@[authenticated] timeout:10];
+
+    XCTestExpectation *refused = [self expectationWithDescription:@"second fixture still requires its token"];
+    [[session dataTaskWithURL:second.baseURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        XCTAssertNil(error);
+        XCTAssertEqual(((NSHTTPURLResponse *) response).statusCode, 401);
+        XCTAssertEqual(second.tokenExchangeCount, 0u);
+        XCTAssertNil(second.issuedCookieValue);
+        [refused fulfill];
+    }] resume];
+    [self waitForExpectations:@[refused] timeout:10];
+    [session invalidateAndCancel];
+    [first stop];
+    [second stop];
 }
 
 /// HEAD is refused too. This is why the readiness poll and the health check

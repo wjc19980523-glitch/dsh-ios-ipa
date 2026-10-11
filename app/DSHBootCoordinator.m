@@ -19,6 +19,7 @@
 #import "DSHShortcutsCapability.h"
 #import "DSHActivityCapability.h"
 #import "DSHStartupMetrics.h"
+#import "DSHLifecycleDiagnostics.h"
 #import "AppDelegate.h"
 #import "ISHShellExecutor.h"
 #import <UIKit/UIKit.h>
@@ -74,6 +75,7 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
     if (self.started)
         return;
     self.started = YES;
+    [DSHLifecycleDiagnostics recordEvent:@"hostBootStarted" harness:DSHHarness.shared];
     [DSHStartupMetrics.shared beginLaunch];
     [DSHHarness.shared.log append:@"[perf] app boot coordinator started"];
     [self setPhase:DSHBootPhaseImportingImage message:@"Preparing the Linux environment…" progress:-1];

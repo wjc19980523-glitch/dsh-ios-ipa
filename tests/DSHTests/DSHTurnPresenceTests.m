@@ -36,8 +36,12 @@
                                  result:nil
                                 outcome:DSHActivityOutcomeOK
                                duration:0];
-    // The log posts its change notification on the main queue.
+    // Recording first runs on the log's serial queue; a main-queue fence alone
+    // can overtake it. Reading entries drains that queue before fencing the
+    // notification it enqueues on main, so background is sent after observation.
+    XCTAssertEqualObjects(DSHActivityLog.shared.entries.firstObject.name, @"bash");
     [self waitForMainQueue];
+    XCTAssertTrue(DSHTurnPresence.shared.isWorking);
 }
 
 - (void)waitForMainQueue {

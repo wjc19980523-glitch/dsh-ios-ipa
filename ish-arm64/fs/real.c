@@ -12,10 +12,12 @@
 #include <sys/statvfs.h>
 #include <poll.h>
 
+#include "fs/dsh-lifecycle.h"
 #include "debug.h"
 #include "misc.h"
 #include "kernel/errno.h"
 #include "kernel/calls.h"
+#include "kernel/task.h"
 #include "kernel/fs.h"
 #include "fs/dev.h"
 #include "fs/devices.h"
@@ -89,6 +91,7 @@ static dev_t_ realfs_devnum_for_path(const char *path) {
 }
 
 struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int real_flags = open_flags_real_from_fake(flags);
     int fd_no = openat(mount->root_fd, fix_path(path), real_flags, mode);
     if (fd_no < 0)
@@ -108,9 +111,14 @@ struct fd *realfs_open(struct mount *mount, const char *path, int flags, int mod
 }
 
 int realfs_close(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     if (fd->dir != NULL)
         closedir(fd->dir);
     int err = close(fd->real_fd);
+    if (err == 0 || errno == EBADF)
+        dsh_lifecycle_native_flock_close(fd);
+    else
+        dsh_lifecycle_native_flock_close_failed(fd);
     if (err < 0)
         return errno_map();
     return 0;
@@ -142,6 +150,7 @@ static void copy_stat(struct statbuf *fake_stat, struct stat *real_stat) {
 }
 
 int realfs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct stat real_stat;
     if (fstatat(mount->root_fd, fix_path(path), &real_stat, AT_SYMLINK_NOFOLLOW) < 0)
         return errno_map();
@@ -156,6 +165,7 @@ int realfs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat
 }
 
 int realfs_fstat(struct fd *fd, struct statbuf *fake_stat) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct stat real_stat;
     if (fstat(fd->real_fd, &real_stat) < 0)
         return errno_map();
@@ -164,6 +174,7 @@ int realfs_fstat(struct fd *fd, struct statbuf *fake_stat) {
 }
 
 ssize_t realfs_read(struct fd *fd, void *buf, size_t bufsize) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ssize_t res;
     do {
         res = read(fd->real_fd, buf, bufsize);
@@ -174,6 +185,7 @@ ssize_t realfs_read(struct fd *fd, void *buf, size_t bufsize) {
 }
 
 ssize_t realfs_write(struct fd *fd, const void *buf, size_t bufsize) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ssize_t res;
     do {
         res = write(fd->real_fd, buf, bufsize);
@@ -184,6 +196,7 @@ ssize_t realfs_write(struct fd *fd, const void *buf, size_t bufsize) {
 }
 
 ssize_t realfs_pread(struct fd *fd, void *buf, size_t bufsize, off_t off) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ssize_t res;
     do {
         res = pread(fd->real_fd, buf, bufsize, off);
@@ -194,6 +207,7 @@ ssize_t realfs_pread(struct fd *fd, void *buf, size_t bufsize, off_t off) {
 }
 
 ssize_t realfs_pwrite(struct fd *fd, const void *buf, size_t bufsize, off_t off) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ssize_t res;
     do {
         res = pwrite(fd->real_fd, buf, bufsize, off);
@@ -204,6 +218,7 @@ ssize_t realfs_pwrite(struct fd *fd, const void *buf, size_t bufsize, off_t off)
 }
 
 void realfs_opendir(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     if (fd->dir == NULL) {
         int dirfd = dup(fd->real_fd);
         if (dirfd < 0) return;
@@ -217,6 +232,7 @@ void realfs_opendir(struct fd *fd) {
 }
 
 int realfs_readdir(struct fd *fd, struct dir_entry *entry) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     realfs_opendir(fd);
     if (fd->dir == NULL) return _EIO;
     // Darwin filenames (APFS/HFS+) can be up to 255 UTF-16 units, which in
@@ -244,18 +260,21 @@ int realfs_readdir(struct fd *fd, struct dir_entry *entry) {
 }
 
 unsigned long realfs_telldir(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     realfs_opendir(fd);
     if (fd->dir == NULL) return 0;
     return telldir(fd->dir);
 }
 
 void realfs_seekdir(struct fd *fd, unsigned long ptr) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     realfs_opendir(fd);
     if (fd->dir == NULL) return;
     seekdir(fd->dir, ptr);
 }
 
 off_t realfs_lseek(struct fd *fd, off_t offset, int whence) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     if (fd->dir != NULL && whence == LSEEK_SET) {
         realfs_seekdir(fd, offset);
         return offset;
@@ -276,6 +295,7 @@ off_t realfs_lseek(struct fd *fd, off_t offset, int whence) {
 }
 
 int realfs_poll(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct pollfd p = {.fd = fd->real_fd, .events = POLLPRI};
     // prevent POLLNVAL
     int flags = fcntl(fd->real_fd, F_GETFL, 0);
@@ -320,6 +340,7 @@ int realfs_poll(struct fd *fd) {
 }
 
 int realfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off_t offset, int prot, int flags) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int mmap_flags = 0;
     if (flags & MMAP_PRIVATE) mmap_flags |= MAP_PRIVATE;
     if (flags & MMAP_SHARED) mmap_flags |= MAP_SHARED;
@@ -394,6 +415,7 @@ int realfs_mmap(struct fd *fd, struct mem *mem, page_t start, pages_t pages, off
 }
 
 ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     ssize_t size = readlinkat(mount->root_fd, fix_path(path), buf, bufsize);
     if (size < 0)
         return errno_map();
@@ -401,6 +423,7 @@ ssize_t realfs_readlink(struct mount *mount, const char *path, char *buf, size_t
 }
 
 int realfs_getpath(struct fd *fd, char *buf) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = getpath(fd->real_fd, buf);
     if (err < 0)
         return err;
@@ -443,6 +466,7 @@ int realfs_getpath(struct fd *fd, char *buf) {
 }
 
 int realfs_link(struct mount *mount, const char *src, const char *dst) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int res = linkat(mount->root_fd, fix_path(src), mount->root_fd, fix_path(dst), 0);
     if (res < 0)
         return errno_map();
@@ -450,6 +474,7 @@ int realfs_link(struct mount *mount, const char *src, const char *dst) {
 }
 
 int realfs_unlink(struct mount *mount, const char *path) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int res = unlinkat(mount->root_fd, fix_path(path), 0);
     if (res < 0)
         return errno_map();
@@ -458,6 +483,7 @@ int realfs_unlink(struct mount *mount, const char *path) {
 }
 
 int realfs_rmdir(struct mount *mount, const char *path) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = unlinkat(mount->root_fd, fix_path(path), AT_REMOVEDIR);
     if (err < 0)
         return errno_map();
@@ -466,6 +492,7 @@ int realfs_rmdir(struct mount *mount, const char *path) {
 }
 
 int realfs_rename(struct mount *mount, const char *src, const char *dst) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = renameat(mount->root_fd, fix_path(src), mount->root_fd, fix_path(dst));
     if (err < 0)
         return errno_map();
@@ -477,6 +504,7 @@ int realfs_rename(struct mount *mount, const char *src, const char *dst) {
 }
 
 int realfs_symlink(struct mount *mount, const char *target, const char *link) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = symlinkat(target, mount->root_fd, fix_path(link));
     if (err < 0)
         return errno_map();
@@ -484,6 +512,7 @@ int realfs_symlink(struct mount *mount, const char *target, const char *link) {
 }
 
 int realfs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ UNUSED(dev)) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err;
     if (S_ISFIFO(mode)) {
         lock_fchdir(mount->root_fd);
@@ -502,6 +531,7 @@ int realfs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ UNU
 }
 
 int realfs_truncate(struct mount *mount, const char *path, off_t_ size) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int fd = openat(mount->root_fd, fix_path(path), O_RDWR);
     if (fd < 0)
         return errno_map();
@@ -515,6 +545,7 @@ int realfs_truncate(struct mount *mount, const char *path, off_t_ size) {
 }
 
 int realfs_setattr(struct mount *mount, const char *path, struct attr attr) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     path = fix_path(path);
     int root = mount->root_fd;
     int err;
@@ -543,6 +574,7 @@ int realfs_setattr(struct mount *mount, const char *path, struct attr attr) {
 }
 
 int realfs_fsetattr(struct fd *fd, struct attr attr) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int real_fd = fd->real_fd;
     int err;
     switch (attr.type) {
@@ -570,6 +602,7 @@ int realfs_fsetattr(struct fd *fd, struct attr attr) {
 }
 
 int realfs_utime(struct mount *mount, const char *path, struct timespec atime, struct timespec mtime) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct timespec times[2] = {atime, mtime};
     int err = utimensat(mount->root_fd, fix_path(path), times, 0);
     if (err < 0)
@@ -578,6 +611,7 @@ int realfs_utime(struct mount *mount, const char *path, struct timespec atime, s
 }
 
 int realfs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = mkdirat(mount->root_fd, fix_path(path), mode);
     if (err < 0)
         return errno_map();
@@ -585,15 +619,25 @@ int realfs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
 }
 
 int realfs_flock(struct fd *fd, int operation) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int real_op = 0;
     if (operation & LOCK_SH_) real_op |= LOCK_SH;
     if (operation & LOCK_EX_) real_op |= LOCK_EX;
     if (operation & LOCK_UN_) real_op |= LOCK_UN;
     if (operation & LOCK_NB_) real_op |= LOCK_NB;
-    return flock(fd->real_fd, real_op);
+    int result = flock(fd->real_fd, real_op);
+    if (result == 0) {
+        enum dsh_lifecycle_flock_mode mode = DSH_LIFECYCLE_FLOCK_UNLOCKED;
+        if (real_op & LOCK_EX) mode = DSH_LIFECYCLE_FLOCK_EXCLUSIVE;
+        else if (real_op & LOCK_SH) mode = DSH_LIFECYCLE_FLOCK_SHARED;
+        dsh_lifecycle_native_flock_update(fd, fd->real_fd,
+                current ? current->pid : -1, mode);
+    }
+    return result;
 }
 
 int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct statvfs vfs = {};
     fstatvfs(mount->root_fd, &vfs);
     stat->bsize = vfs.f_bsize;
@@ -608,6 +652,7 @@ int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {
 }
 
 int realfs_mount(struct mount *mount) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     char *source_realpath = realpath(mount->source, NULL);
     if (source_realpath == NULL)
         return errno_map();
@@ -621,6 +666,7 @@ int realfs_mount(struct mount *mount) {
 }
 
 int realfs_fsync(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err = fsync(fd->real_fd);
     if (err < 0)
         return errno_map();
@@ -628,6 +674,7 @@ int realfs_fsync(struct fd *fd) {
 }
 
 int realfs_getflags(struct fd *fd) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int flags = fcntl(fd->real_fd, F_GETFL);
     if (flags < 0)
         return errno_map();
@@ -635,6 +682,7 @@ int realfs_getflags(struct fd *fd) {
 }
 
 int realfs_setflags(struct fd *fd, dword_t flags) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int ret = fcntl(fd->real_fd, F_SETFL, open_flags_real_from_fake(flags));
     if (ret < 0)
         return errno_map();
@@ -654,6 +702,7 @@ ssize_t realfs_ioctl_size(int cmd) {
 }
 
 int realfs_ioctl(struct fd *fd, int cmd, void *arg) {
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int err;
     size_t nread;
     switch (cmd) {

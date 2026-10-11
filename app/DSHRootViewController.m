@@ -418,6 +418,9 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     }
     if (self.terminalVC.presentingViewController != nil)
         return;
+    // A WKWebView exposes nested WebView AX nodes; identify the native sheet
+    // so UI tests can prove they operate on the terminal, not the main page.
+    self.terminalVC.view.accessibilityIdentifier = @"dsh.terminal.sheet";
     [self presentViewController:self.terminalVC animated:YES completion:nil];
 }
 

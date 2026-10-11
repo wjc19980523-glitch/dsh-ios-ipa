@@ -160,7 +160,7 @@
     launcher.onLaunch = ^(NSDictionary *env, void (^line)(NSString *, BOOL), void (^exit)(int)) {
         uint16_t port = (uint16_t) [env[@"DSH_PORT"] intValue];
         server = [[DSHTestHTTPServer alloc] initWithPort:port];
-        line([NSString stringWithFormat:@"dsh web: http://127.0.0.1:%u", port], NO);
+        line([NSString stringWithFormat:@"dsh web: http://127.0.0.1:%u/?token=core-test-token", port], NO);
         line(@"Warning: disabling flag --expose_wasm due to conflicting flags", YES);
     };
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
@@ -221,6 +221,7 @@
     NSMutableArray<DSHTestHTTPServer *> *servers = [NSMutableArray array];
     launcher.onLaunch = ^(NSDictionary *env, void (^line)(NSString *, BOOL), void (^exit)(int)) {
         [servers addObject:[[DSHTestHTTPServer alloc] initWithPort:(uint16_t) [env[@"DSH_PORT"] intValue]]];
+        line([NSString stringWithFormat:@"dsh web: http://127.0.0.1:%@/?token=restart-test-token", env[@"DSH_PORT"]], NO);
     };
     DSHHarness *h = [[DSHHarness alloc] initWithLauncher:launcher];
     h.preferredPort = 38300;

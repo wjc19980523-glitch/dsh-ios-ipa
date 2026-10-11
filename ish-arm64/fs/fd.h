@@ -195,6 +195,9 @@ void fdtable_do_cloexec(struct fdtable *table);
 struct fd *fdtable_get(struct fdtable *table, fd_t f);
 
 struct fd *f_get(fd_t f);
+// Retains the open description under the fdtable lock; caller must fd_close.
+// Use when an operation can yield admission while another thread closes/reuses f.
+struct fd *f_get_retained(fd_t f);
 // steals a reference to the fd, gives it to the table on success and destroys it on error
 // flags is checked for O_CLOEXEC and O_NONBLOCK
 fd_t f_install(struct fd *fd, int flags);

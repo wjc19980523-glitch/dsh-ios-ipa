@@ -679,9 +679,15 @@ error_no_ctrl_tty:
     return err;
 }
 
+// Caller holds the target tty lock. Only a numeric group snapshot escapes.
+static pid_t_ tty_update_winsize_locked(struct tty *tty, struct winsize_ winsize) {
+    tty->winsize = winsize;
+    return tty->fg_group;
+}
+
 // These ioctls are separated out because they have to operate on the slave
-// side of a pseudoterminal pair even if the master is specified
-static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg) {
+// side of a pseudoterminal pair even if the master is specified.
+static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg, pid_t_ *resize_pgid) {
     int err = 0;
     struct tty *tty = in_tty;
     if (in_tty->driver == &pty_master) {
@@ -707,7 +713,9 @@ static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg) {
             *(struct winsize_ *) arg = tty->winsize;
             break;
         case TIOCSWINSZ_:
-            tty_set_winsize(tty, *(struct winsize_ *) arg);
+            // The master ioctl also owns its outer tty lock. Defer the signal
+            // until tty_ioctl has released both locks, not just this slave.
+            *resize_pgid = tty_update_winsize_locked(tty, *(struct winsize_ *) arg);
             break;
 
         default:
@@ -722,6 +730,7 @@ static int tty_mode_ioctl(struct tty *in_tty, int cmd, void *arg) {
 
 static int tty_ioctl(struct fd *fd, int cmd, void *arg) {
     int err = 0;
+    pid_t_ resize_pgid = 0;
     struct tty *tty = fd->tty;
     lock(&tty->lock);
     if (tty->hung_up) {
@@ -777,19 +786,25 @@ static int tty_ioctl(struct fd *fd, int cmd, void *arg) {
             break;
 
         default:
-            err = tty_mode_ioctl(tty, cmd, arg);
+            err = tty_mode_ioctl(tty, cmd, arg, &resize_pgid);
             if (err == _ENOTTY && tty->driver->ops->ioctl)
                 err = tty->driver->ops->ioctl(tty, cmd, arg);
     }
 
     unlock(&tty->lock);
+    if (resize_pgid != 0)
+        send_group_signal(resize_pgid, SIGWINCH_, SIGINFO_NIL);
     return err;
 }
 
 void tty_set_winsize(struct tty *tty, struct winsize_ winsize) {
-    tty->winsize = winsize;
-    if (tty->fg_group != 0)
-        send_group_signal(tty->fg_group, SIGWINCH_, SIGINFO_NIL);
+    lock(&tty->lock);
+    pid_t_ fg_group = tty_update_winsize_locked(tty, winsize);
+    unlock(&tty->lock);
+    // tty_read takes pids_lock before tty->lock. Like tty_input, carry only a
+    // numeric group snapshot beyond this lock; no tty access is needed below.
+    if (fg_group != 0)
+        send_group_signal(fg_group, SIGWINCH_, SIGINFO_NIL);
 }
 
 void tty_hangup(struct tty *tty) {

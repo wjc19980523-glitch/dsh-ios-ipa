@@ -15,6 +15,8 @@
 #include "fs/fd.h"
 #include "fs/dev.h"
 #include "fs/real.h"
+#include "fs/dsh-lifecycle.h"
+#include "kernel/lifecycle-wait.h"
 
 dword_t syscall_stub(void) {
     return _ENOSYS;
@@ -55,8 +57,40 @@ void ish_set_timer_tick_hook(ish_timer_tick_hook_t hook) {
     atomic_store_explicit(&g_timer_tick_hook, hook, memory_order_release);
 }
 
+/* Only waits with no file-system side effects may omit the outer permit.
+ * After they return we reacquire BEFORE exit/signal cleanup can close fds.
+ * Everything else, including fast read/write/fstat, exec, mmap and exit, is
+ * admitted before kernel locks. Unknown syscalls are conservative by default.
+ */
+static bool lifecycle_pure_wait(struct cpu_state *cpu) {
+#ifdef GUEST_ARM64
+    return dsh_lifecycle_arm64_is_pure_wait((unsigned)cpu->regs[8]);
+#else
+    (void)cpu;
+    return false;
+#endif
+}
+
 void handle_interrupt(int interrupt) {
     struct cpu_state *cpu = &current->cpu;
+    struct dsh_lifecycle_scope lifecycle_scope
+        __attribute__((cleanup(dsh_lifecycle_scope_end))) = {0};
+    if (interrupt != INT_SYSCALL || !lifecycle_pure_wait(cpu)) {
+        // Numeric dispatch identity distinguishes a blocking syscall from
+        // interrupt/signal work without logging arguments, paths or data.
+        char entry[48];
+#ifdef GUEST_ARM64
+        unsigned number = (unsigned)cpu->regs[8];
+#else
+        unsigned number = cpu->eax;
+#endif
+        if (interrupt == INT_SYSCALL)
+            snprintf(entry, sizeof(entry), "guest_syscall_%u", number);
+        else
+            snprintf(entry, sizeof(entry), "guest_interrupt_%d", interrupt);
+        lifecycle_scope.token = dsh_lifecycle_operation_begin(entry, current->pid);
+    } else
+        dsh_lifecycle_checkpoint(current->pid);
     if (interrupt == INT_SYSCALL) {
         ISH_SIGNPOST_SCOPE_BEGIN(syscall, "syscall", _sc_spid);
 #if defined(GUEST_X86) || !defined(GUEST_ARM64)
@@ -74,6 +108,8 @@ void handle_interrupt(int interrupt) {
             STRACE(" = 0x%x\n", result);
             cpu->eax = result;
         }
+        if (!lifecycle_scope.token)
+            lifecycle_scope.token = dsh_lifecycle_operation_begin("guest_wait_cleanup", current->pid);
         if (current->group->doing_group_exit)
             do_exit(current->group->group_exit_code);
 #elif defined(GUEST_ARM64)
@@ -234,6 +270,8 @@ void handle_interrupt(int interrupt) {
         if (current->exiting || current->group == NULL) {
             pthread_exit(NULL);
         }
+        if (!lifecycle_scope.token)
+            lifecycle_scope.token = dsh_lifecycle_operation_begin("guest_wait_cleanup", current->pid);
         // Update deadlock detection state.
         atomic_fetch_add(&current->group->syscall_count, 1);
         // Update last_unblocked_ns for non-blocking syscalls only.
@@ -1201,6 +1239,8 @@ void handle_interrupt(int interrupt) {
     }
 
     receive_signals();
+    dsh_lifecycle_scope_end(&lifecycle_scope);
+    lifecycle_scope.token = 0;
     struct tgroup *group = current->group;
     lock(&group->lock);
     while (group->stopped)
@@ -1345,9 +1385,13 @@ static inline int fast_read(struct cpu_state *cpu) {
     if (size > 4096)
         return -1;
 
-    struct fd *fd = f_get(fd_no);
-    if (fd == NULL || fd->ops != &realfs_fdops)
+    struct fd *fd = f_get_retained(fd_no);
+    if (fd == NULL)
         return -1;
+    if (fd->ops != &realfs_fdops) {
+        fd_close(fd);
+        return -1;
+    }
 
     // Direct host read (with EINTR retry)
     char buf[4096];
@@ -1357,12 +1401,11 @@ static inline int fast_read(struct cpu_state *cpu) {
     } while (res < 0 && errno == EINTR);
 
     if (res < 0)
-        return errno_map();
-
-    // Copy to guest memory
-    if (res > 0 && user_write(buf_addr, buf, res))
-        return _EFAULT;
-
+        res = errno_map();
+    // Copy to guest memory while the same open description remains pinned.
+    else if (res > 0 && user_write(buf_addr, buf, res))
+        res = _EFAULT;
+    fd_close(fd);
     return res;
 }
 

@@ -338,157 +338,140 @@ static bool is_under_readonly_bind_mount(const char *path) {
     return false;
 }
 
-/* Auto-create a meta.db entry for a path under a bind mount.
- * Probes the host filesystem to determine if it's a file or directory. */
-static inode_t bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount,
-                                       const char *path) {
-    db_begin_read(fs);
-    inode_t ino = path_get_inode(fs, path);
-    db_commit(fs);
-    if (ino != 0)
-        return ino;
-
-    /* Check if it exists on host — use direct path for bind mounts */
-    struct stat host_stat;
-    char host_abs[PATH_MAX];
-    if (bind_mount_translate_path(path, host_abs, sizeof(host_abs))) {
-        if (stat(host_abs, &host_stat) < 0)
-            return 0;
-    } else if (fstatat(mount->root_fd, fix_path(path), &host_stat, AT_SYMLINK_NOFOLLOW) < 0) {
-        if (fstatat(mount->root_fd, fix_path(path), &host_stat, 0) < 0)
-            return 0;
+/* ROLLBACK only reverts SQLite. Complete metadata before changing host files. */
+static int fakefs_sql_errno(int rc) {
+    switch (rc & 0xff) {
+        case SQLITE_BUSY: case SQLITE_LOCKED: return _EBUSY;
+        case SQLITE_NOMEM: return _ENOMEM;
+        case SQLITE_FULL: return _ENOSPC;
+        case SQLITE_READONLY: return _EROFS;
+        default: return _EIO;
     }
-
-    uint32_t mode;
-    if (S_ISDIR(host_stat.st_mode))
-        mode = S_IFDIR | 0755;
-    else if (S_ISLNK(host_stat.st_mode))
-        mode = S_IFLNK | 0777;
-    else
-        mode = S_IFREG | 0644;
-
-    struct ish_stat ishstat = {.mode = mode, .uid = 0, .gid = 0, .rdev = 0};
-    db_begin_write(fs);
-    ino = path_create(fs, path, &ishstat);
-    db_commit(fs);
-    return ino;
+}
+static int fakefs_abort(struct fakefs_db *fs, int error) {
+    return db_rollback(fs) == SQLITE_OK ? error : _EIO;
+}
+static int fakefs_metadata_ready(struct fakefs_db *fs) {
+    int rc = db_transaction_error(fs);
+    return rc == SQLITE_OK ? 0 : fakefs_abort(fs, fakefs_sql_errno(rc));
+}
+static int fakefs_finish(struct fakefs_db *fs, bool host_changed) {
+    int rc = db_commit(fs);
+    if (rc == SQLITE_OK) return 0;
+    if (!host_changed) return fakefs_abort(fs, fakefs_sql_errno(rc));
+    /* Keep the transaction and evidence; SQL rollback cannot undo APFS effects. */
+    db_require_recovery(fs, rc);
+    return _EIO;
 }
 
-// this exists only to override readdir to fix the returned inode numbers
-static struct fd_ops fakefs_fdops;
+/* The caller owns a write transaction. This probes the host but never mutates it. */
+static inode_t bind_mount_ensure_inode_locked(struct fakefs_db *fs, struct mount *mount,
+                                             const char *path) {
+    inode_t ino = path_get_inode(fs, path);
+    if (ino || db_transaction_error(fs) != SQLITE_OK) return ino;
+    struct stat st;
+    char host[PATH_MAX];
+    if (bind_mount_translate_path(path, host, sizeof(host))) {
+        if (stat(host, &st) < 0) return 0;
+    } else if (fstatat(mount->root_fd, fix_path(path), &st, AT_SYMLINK_NOFOLLOW) < 0) {
+        if (fstatat(mount->root_fd, fix_path(path), &st, 0) < 0) return 0;
+    }
+    struct ish_stat metadata = { .mode = S_ISDIR(st.st_mode) ? S_IFDIR | 0755 :
+        S_ISLNK(st.st_mode) ? S_IFLNK | 0777 : S_IFREG | 0644, .uid = 0, .gid = 0, .rdev = 0 };
+    return path_create(fs, path, &metadata);
+}
+static int bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount,
+                                   const char *path, inode_t *out) {
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    *out = bind_mount_ensure_inode_locked(fs, mount, path);
+    int error = fakefs_metadata_ready(fs);
+    return error < 0 ? error : fakefs_finish(fs, false);
+}
 
+static int fakefs_host_open_flags(int flags) {
+    int out = 0;
+    if (flags & O_WRONLY_) out |= O_WRONLY;
+    if (flags & O_RDWR_) out |= O_RDWR;
+    if (flags & O_CREAT_) out |= O_CREAT;
+    if (flags & O_EXCL_) out |= O_EXCL;
+    if (flags & O_TRUNC_) out |= O_TRUNC;
+    if (flags & O_APPEND_) out |= O_APPEND;
+    if (flags & O_NONBLOCK_) out |= O_NONBLOCK;
+    return out;
+}
+
+static struct fd_ops fakefs_fdops;
 static struct fd *fakefs_open(struct mount *mount, const char *path, int flags, int mode) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-
-    /* Reject any write-intent open under a read-only bind mount.
-     * iSH processes run as root and bypass the meta.db mode DAC check,
-     * so the 0555 bits on the mount dir don't actually block anything. */
+    if (fakefs_db_recovery_required(fs)) return ERR_PTR(_EIO);
     if ((flags & (O_WRONLY_ | O_RDWR_ | O_CREAT_ | O_TRUNC_ | O_APPEND_)) &&
-        is_under_readonly_bind_mount(path)) {
-        return ERR_PTR(_EROFS);
-    }
-
-    /* For bind-mounted paths, open directly via host absolute path
-     * instead of relying on symlink traversal (which iOS sandbox may block). */
-    char host_abs[PATH_MAX];
-    struct fd *fd;
+            is_under_readonly_bind_mount(path)) return ERR_PTR(_EROFS);
+    char host[PATH_MAX];
     bool via_hook = false;
-    bool via_bind = bind_mount_translate_path_ex(path, host_abs, sizeof(host_abs), &via_hook);
-    if (via_bind) {
-        int real_flags = 0;
-        if (flags & O_RDONLY_) real_flags |= O_RDONLY;
-        if (flags & O_WRONLY_) real_flags |= O_WRONLY;
-        if (flags & O_RDWR_) real_flags |= O_RDWR;
-        if (flags & O_CREAT_) real_flags |= O_CREAT;
-        if (flags & O_EXCL_) real_flags |= O_EXCL;
-        if (flags & O_TRUNC_) real_flags |= O_TRUNC;
-        if (flags & O_APPEND_) real_flags |= O_APPEND;
-        if (flags & O_NONBLOCK_) real_flags |= O_NONBLOCK;
-        int fd_no = open(host_abs, real_flags, 0666);
-        if (fd_no < 0) {
-            return ERR_PTR(errno_map());
-        }
-        /* Bind-mount fast path opens the host file directly, bypassing
-         * realfs_open. Emit the change event here so consumers (e.g. the
-         * iCloud SessionFile sync tracker) see writes/creates/truncates
-         * landing in bind-mounted dirs. We pass the *guest* path so the
-         * Swift consumer can resolve the bind mount → session mapping
-         * without needing to know about host APFS layout. */
-        if (flags & (O_CREAT_ | O_TRUNC_ | O_WRONLY_ | O_RDWR_ | O_APPEND_)) {
-            fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
-        }
-        fd = fd_create(&realfs_fdops);
-        fd->real_fd = fd_no;
-        fd->dir = NULL;
-    } else {
-        fd = realfs.open(mount, path, flags, 0666);
-        if (IS_ERR(fd))
-            return fd;
+    bool via_bind = bind_mount_translate_path_ex(path, host, sizeof(host), &via_hook);
+    inode_t inode = 0;
+    if (!via_hook) {
+        int rc = db_begin_write(fs);
+        if (rc != SQLITE_OK) return ERR_PTR(fakefs_sql_errno(rc));
+        inode = path_get_inode(fs, path);
+        if (!inode && (flags & O_CREAT_) && db_transaction_error(fs) == SQLITE_OK) {
+            struct ish_stat metadata = { .mode = mode | S_IFREG, .uid = current ? current->euid : 0,
+                .gid = current ? current->egid : 0, .rdev = 0 };
+            inode = path_create(fs, path, &metadata);
+        } else if (!inode && via_bind && db_transaction_error(fs) == SQLITE_OK)
+            inode = bind_mount_ensure_inode_locked(fs, mount, path);
+        int error = fakefs_metadata_ready(fs);
+        if (error < 0) return ERR_PTR(error);
+        if (!inode) return ERR_PTR(fakefs_abort(fs, _ENOENT));
     }
-    /* Hook-routed paths intentionally bypass meta.db: the `paths` table is
-     * keyed globally by guest path, but the hook can map the same guest
-     * path to different host files per fs_context. Storing them would
-     * collide across contexts (one row, N host files). For these paths we
-     * synthesize the fake inode from the host inode so operations within a
-     * single fd still behave consistently. */
+    /* Allocate before O_CREAT/O_TRUNC; allocation failure must not change data. */
+    struct fd *fd = fd_create(&realfs_fdops);
+    if (!fd) return ERR_PTR(via_hook ? _ENOMEM : fakefs_abort(fs, _ENOMEM));
+    int real_flags = fakefs_host_open_flags(flags);
+    int hostfd = via_bind ? open(host, real_flags, 0666) :
+        openat(mount->root_fd, fix_path(path), real_flags, 0666);
+    if (hostfd < 0) {
+        int error = errno_map();
+        free(fd);
+        return ERR_PTR(via_hook ? error : fakefs_abort(fs, error));
+    }
+    fd->real_fd = hostfd;
+    fd->dir = NULL;
     if (via_hook) {
-        struct stat host_stat;
-        if (fstat(fd->real_fd, &host_stat) == 0)
-            fd->fake_inode = (ino_t)host_stat.st_ino;
-        else
-            fd->fake_inode = 1;  /* non-zero so the ENOENT branch below is skipped */
-        return fd;
+        struct stat st;
+        fd->fake_inode = fstat(hostfd, &st) == 0 ? (ino_t) st.st_ino : 1;
+    } else {
+        int error = fakefs_finish(fs, (flags & (O_CREAT_ | O_TRUNC_)) != 0);
+        if (error < 0) { fd_close(fd); return ERR_PTR(error); }
+        fd->fake_inode = inode;
+        fd->ops = &fakefs_fdops;
     }
-    db_begin_write(fs);
-    fd->fake_inode = path_get_inode(fs, path);
-    if (flags & O_CREAT_) {
-        struct ish_stat ishstat;
-        ishstat.mode = mode | S_IFREG;
-        ishstat.uid = current->euid;
-        ishstat.gid = current->egid;
-        ishstat.rdev = 0;
-        if (fd->fake_inode == 0) {
-            path_create(fs, path, &ishstat);
-            fd->fake_inode = path_get_inode(fs, path);
-        }
-    }
-    db_commit(fs);
-    if (fd->fake_inode == 0) {
-        /* Auto-create for bind-mounted paths */
-        if (is_under_bind_mount(path)) {
-            fd->fake_inode = bind_mount_ensure_inode(fs, mount, path);
-        }
-        if (fd->fake_inode == 0) {
-            fd_close(fd);
-            return ERR_PTR(_ENOENT);
-        }
-    }
-    fd->ops = &fakefs_fdops;
+    if (flags & (O_CREAT_ | O_TRUNC_ | O_WRONLY_ | O_RDWR_ | O_APPEND_))
+        fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
     return fd;
 }
 
-// WARNING: giant hack, just for file providerws
 struct fd *fakefs_open_inode(struct mount *mount, ino_t inode) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    db_begin_read(fs);
+    int rc = db_begin_read(fs);
+    if (rc != SQLITE_OK) return ERR_PTR(fakefs_sql_errno(rc));
     sqlite3_stmt *stmt = fs->stmt.path_from_inode;
-    sqlite3_bind_int64(stmt, 1, inode);
-step:
-    if (!db_exec(fs, stmt)) {
-        db_reset(fs, stmt);
-        db_rollback(fs);
-        return ERR_PTR(_ENOENT);
+    if (sqlite3_bind_int64(stmt, 1, inode) != SQLITE_OK) return ERR_PTR(fakefs_abort(fs, _EIO));
+    struct fd *fd = ERR_PTR(_ENOENT);
+    while ((rc = db_exec(fs, stmt)) == SQLITE_ROW) {
+        const char *path = (const char *) sqlite3_column_text(stmt, 0);
+        fd = realfs.open(mount, path, O_RDWR_, 0);
+        if (PTR_ERR(fd) == _EISDIR) fd = realfs.open(mount, path, O_RDONLY_, 0);
+        if (PTR_ERR(fd) != _ENOENT) break;
     }
-    const char *path = (const char *) sqlite3_column_text(stmt, 0);
-    struct fd *fd = realfs.open(mount, path, O_RDWR_, 0);
-    if (PTR_ERR(fd) == _EISDIR)
-        fd = realfs.open(mount, path, O_RDONLY_, 0);
-    if (PTR_ERR(fd) == _ENOENT)
-        goto step;
     db_reset(fs, stmt);
-    db_commit(fs);
+    int error = fakefs_metadata_ready(fs);
+    if (error == 0) error = fakefs_finish(fs, false);
+    if (error < 0) { if (!IS_ERR(fd)) fd_close(fd); return ERR_PTR(error); }
+    if (IS_ERR(fd)) return fd;
     fd->fake_inode = inode;
     fd->ops = &fakefs_fdops;
     return fd;
@@ -497,350 +480,234 @@ step:
 static int fakefs_link(struct mount *mount, const char *src, const char *dst) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(dst))
-        return _EROFS;
-    /* Hook-routed paths can't share meta.db rows, so hard-linking them is
-     * not supported. Perform a host link() directly between translated host
-     * paths when both endpoints are hook-routed. Mixing hook + non-hook
-     * sides returns EXDEV, matching cross-fs link semantics. */
-    char host_src[PATH_MAX], host_dst[PATH_MAX];
-    bool src_hook = false, dst_hook = false;
-    bool src_bind = bind_mount_translate_path_ex(src, host_src, sizeof(host_src), &src_hook);
-    bool dst_bind = bind_mount_translate_path_ex(dst, host_dst, sizeof(host_dst), &dst_hook);
-    if (src_hook != dst_hook)
-        return _EXDEV;
-    if (src_hook) {
-        if (link(host_src, host_dst) < 0)
-            return errno_map();
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(dst)) return _EROFS;
+    char hs[PATH_MAX], hd[PATH_MAX];
+    bool sh = false, dh = false;
+    bool sb = bind_mount_translate_path_ex(src, hs, sizeof(hs), &sh);
+    bool db = bind_mount_translate_path_ex(dst, hd, sizeof(hd), &dh);
+    if (sh != dh || sb != db) return _EXDEV;
+    if (sh) {
+        if (link(hs, hd) < 0) return errno_map();
         fakefs_record_change(dst, FAKEFS_CHANGE_OP_WRITE);
         return 0;
     }
-    (void)src_bind; (void)dst_bind;
-    db_begin_write(fs);
-    int err = realfs.link(mount, src, dst);
-    if (err < 0) {
-        db_rollback(fs);
-        return err;
-    }
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    if (sb) bind_mount_ensure_inode_locked(fs, mount, src);
     path_link(fs, src, dst);
-    db_commit(fs);
-    return 0;
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    error = sb ? (link(hs, hd) < 0 ? errno_map() : 0) : realfs.link(mount, src, dst);
+    if (error < 0) return fakefs_abort(fs, error);
+    error = fakefs_finish(fs, true);
+    if (error == 0 && sb) fakefs_record_change(dst, FAKEFS_CHANGE_OP_WRITE);
+    return error;
 }
 
+static int fakefs_remove(struct mount *mount, const char *path, bool directory) {
+    struct fakefs_db *fs = &mount->fakefs;
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(path)) return _EROFS;
+    char host[PATH_MAX];
+    bool hook = false;
+    bool bind = bind_mount_translate_path_ex(path, host, sizeof(host), &hook);
+    if (hook) {
+        if ((directory ? rmdir(host) : unlink(host)) < 0) return errno_map();
+        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
+        return 0;
+    }
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    if (bind) bind_mount_ensure_inode_locked(fs, mount, path);
+    inode_t inode = path_unlink(fs, path);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (bind) error = (directory ? rmdir(host) : unlink(host)) < 0 ? errno_map() : 0;
+    else error = directory ? realfs.rmdir(mount, path) : realfs.unlink(mount, path);
+    if (error < 0) return fakefs_abort(fs, error);
+    error = fakefs_finish(fs, true);
+    if (error < 0) return error;
+    if (bind) fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
+    if (inode) inode_check_orphaned(mount, inode);
+    return 0;
+}
 static int fakefs_unlink(struct mount *mount, const char *path) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(path))
-        return _EROFS;
-    char host_abs[PATH_MAX];
-    bool via_hook = false;
-    bool via_bind = bind_mount_translate_path_ex(path, host_abs, sizeof(host_abs), &via_hook);
-    /* Hook-routed paths bypass meta.db entirely (see fakefs_open). */
-    if (via_hook) {
-        if (unlink(host_abs) < 0)
-            return errno_map();
-        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
-        return 0;
-    }
-    /* Auto-create entry if under bind mount so path_unlink won't die */
-    if (is_under_bind_mount(path))
-        bind_mount_ensure_inode(fs, mount, path);
-    db_begin_write(fs);
-    int err;
-    if (via_bind) {
-        if (unlink(host_abs) < 0) {
-            err = errno_map();
-            db_rollback(fs);
-            return err;
-        }
-    } else {
-        err = realfs.unlink(mount, path);
-        if (err < 0) {
-            db_rollback(fs);
-            return err;
-        }
-    }
-    ino_t ino = path_unlink(fs, path);
-    db_commit(fs);
-    if (via_bind)
-        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
-    inode_check_orphaned(mount, ino);
-    return 0;
+    return fakefs_remove(mount, path, false);
 }
-
 static int fakefs_rmdir(struct mount *mount, const char *path) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(path))
-        return _EROFS;
-    char host_abs[PATH_MAX];
-    bool via_hook = false;
-    bool via_bind = bind_mount_translate_path_ex(path, host_abs, sizeof(host_abs), &via_hook);
-    if (via_hook) {
-        if (rmdir(host_abs) < 0)
-            return errno_map();
-        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
-        return 0;
-    }
-    if (is_under_bind_mount(path))
-        bind_mount_ensure_inode(fs, mount, path);
-    db_begin_write(fs);
-    int err;
-    if (via_bind) {
-        if (rmdir(host_abs) < 0) {
-            err = errno_map();
-            db_rollback(fs);
-            return err;
-        }
-    } else {
-        err = realfs.rmdir(mount, path);
-        if (err < 0) {
-            db_rollback(fs);
-            return err;
-        }
-    }
-    ino_t ino = path_unlink(fs, path);
-    db_commit(fs);
-    if (via_bind)
-        fakefs_record_change(path, FAKEFS_CHANGE_OP_UNLINK);
-    inode_check_orphaned(mount, ino);
-    return 0;
+    return fakefs_remove(mount, path, true);
 }
 
 static int fakefs_rename(struct mount *mount, const char *src, const char *dst) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(src) || is_under_readonly_bind_mount(dst))
-        return _EROFS;
-    char host_src[PATH_MAX], host_dst[PATH_MAX];
-    bool src_hook = false, dst_hook = false;
-    bool src_bind = bind_mount_translate_path_ex(src, host_src, sizeof(host_src), &src_hook);
-    bool dst_bind = bind_mount_translate_path_ex(dst, host_dst, sizeof(host_dst), &dst_hook);
-    if (src_bind != dst_bind || src_hook != dst_hook)
-        return _EXDEV;
-    if (src_hook) {
-        if (rename(host_src, host_dst) < 0)
-            return errno_map();
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(src) || is_under_readonly_bind_mount(dst)) return _EROFS;
+    char hs[PATH_MAX], hd[PATH_MAX];
+    bool sh = false, dh = false;
+    bool sb = bind_mount_translate_path_ex(src, hs, sizeof(hs), &sh);
+    bool db = bind_mount_translate_path_ex(dst, hd, sizeof(hd), &dh);
+    if (sb != db || sh != dh) return _EXDEV;
+    if (sh) {
+        if (rename(hs, hd) < 0) return errno_map();
         fakefs_record_change(dst, FAKEFS_CHANGE_OP_RENAME);
         return 0;
     }
-    db_begin_write(fs);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    if (sb) bind_mount_ensure_inode_locked(fs, mount, src);
     path_rename(fs, src, dst);
-    int err;
-    if (src_bind) {
-        if (rename(host_src, host_dst) < 0) {
-            err = errno_map();
-            db_rollback(fs);
-            return err;
-        }
-    } else {
-        err = realfs.rename(mount, src, dst);
-        if (err < 0) {
-            db_rollback(fs);
-            return err;
-        }
-    }
-    db_commit(fs);
-    if (src_bind)
-        fakefs_record_change(dst, FAKEFS_CHANGE_OP_RENAME);
-    return 0;
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    error = sb ? (rename(hs, hd) < 0 ? errno_map() : 0) : realfs.rename(mount, src, dst);
+    if (error < 0) return fakefs_abort(fs, error);
+    error = fakefs_finish(fs, true);
+    if (error == 0 && sb) fakefs_record_change(dst, FAKEFS_CHANGE_OP_RENAME);
+    return error;
 }
 
 static int fakefs_symlink(struct mount *mount, const char *target, const char *link) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(link))
-        return _EROFS;
-    /* fakefs's symlink model stores the target in a regular file plus an
-     * S_IFLNK mode bit in meta.db. Hook-routed paths bypass meta.db, so
-     * that representation can't round-trip. Reject the request rather
-     * than creating a regular file that future stat/readlink can't
-     * recognize as a symlink. */
-    char host_chk[PATH_MAX];
-    bool _vh = false;
-    if (bind_mount_translate_path_ex(link, host_chk, sizeof(host_chk), &_vh) && _vh)
-        return _EPERM;
-    db_begin_write(fs);
-    // create a file containing the target
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(link)) return _EROFS;
+    char host[PATH_MAX]; bool hook = false;
+    if (bind_mount_translate_path_ex(link, host, sizeof(host), &hook) && hook) return _EPERM;
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata = { .mode = S_IFLNK | 0777, .uid = current ? current->euid : 0,
+        .gid = current ? current->egid : 0, .rdev = 0 };
+    path_create(fs, link, &metadata);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
     int fd = openat(mount->root_fd, fix_path(link), O_WRONLY | O_CREAT | O_EXCL, 0666);
-    if (fd < 0) {
-        db_rollback(fs);
-        return errno_map();
+    if (fd < 0) return fakefs_abort(fs, errno_map());
+    size_t length = strlen(target), written = 0;
+    while (written < length) {
+        ssize_t count = write(fd, target + written, length - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { error = count < 0 ? errno_map() : _EIO; break; }
+        written += count;
     }
-    ssize_t res = write(fd, target, strlen(target));
-    close(fd);
-    if (res < 0) {
-        int saved_errno = errno;
-        unlinkat(mount->root_fd, fix_path(link), 0);
-        db_rollback(fs);
-        errno = saved_errno;
-        return errno_map();
+    if (close(fd) < 0 && error == 0) error = errno_map();
+    if (error < 0) {
+        /* Only undo the file this O_EXCL created; failed cleanup remains blocked. */
+        if (unlinkat(mount->root_fd, fix_path(link), 0) == 0) return fakefs_abort(fs, error);
+        db_require_recovery(fs, SQLITE_IOERR);
+        return _EIO;
     }
-
-    // customize the stat info so it looks like a link
-    struct ish_stat ishstat;
-    ishstat.mode = S_IFLNK | 0777; // symlinks always have full permissions
-    ishstat.uid = current->euid;
-    ishstat.gid = current->egid;
-    ishstat.rdev = 0;
-    path_create(fs, link, &ishstat);
-    db_commit(fs);
-    return 0;
+    return fakefs_finish(fs, true);
 }
 
 static int fakefs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ dev) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(path))
-        return _EROFS;
-    mode_t_ real_mode = 0666;
-    if (S_ISBLK(mode) || S_ISCHR(mode) || S_ISSOCK(mode))
-        real_mode |= S_IFREG;
-    else
-        real_mode |= mode & S_IFMT;
-    int err = realfs.mknod(mount, path, real_mode, 0);
-    if (err < 0 && err != _EEXIST) {
-        return err;
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(path)) return _EROFS;
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata = { .mode = mode, .uid = current ? current->euid : 0,
+        .gid = current ? current->egid : 0, .rdev = (S_ISBLK(mode) || S_ISCHR(mode)) ? dev : 0 };
+    if (!path_get_inode(fs, path) && db_transaction_error(fs) == SQLITE_OK) path_create(fs, path, &metadata);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    mode_t_ real_mode = 0666 | ((S_ISBLK(mode) || S_ISCHR(mode) || S_ISSOCK(mode)) ? S_IFREG : mode & S_IFMT);
+    bool host_created = false;
+    error = realfs_mknod_with_effect(mount, path, real_mode, 0, &host_created);
+    if (error < 0 && host_created) {
+        // The O_EXCL file already exists. A failed close cannot justify SQL
+        // rollback or deleting it; preserve the transaction and recovery state.
+        db_require_recovery(fs, SQLITE_IOERR);
+        return _EIO;
     }
-    db_begin_write(fs);
-    struct ish_stat stat;
-    stat.mode = mode;
-    stat.uid = current->euid;
-    stat.gid = current->egid;
-    stat.rdev = 0;
-    if (S_ISBLK(mode) || S_ISCHR(mode))
-        stat.rdev = dev;
-    if (path_get_inode(fs, path) == 0)
-        path_create(fs, path, &stat);
-    db_commit(fs);
-    return 0;
+    if (error < 0 && error != _EEXIST) return fakefs_abort(fs, error);
+    return fakefs_finish(fs, host_created);
 }
 
-static int fakefs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat) {
+static void fakefs_copy_host_stat(struct statbuf *out, const struct stat *in) {
+    memset(out, 0, sizeof(*out));
+    out->inode = in->st_ino; out->mode = in->st_mode; out->nlink = in->st_nlink;
+    out->size = in->st_size; out->blocks = in->st_blocks; out->blksize = in->st_blksize;
+    out->atime = in->st_atime; out->mtime = in->st_mtime; out->ctime = in->st_ctime;
+#if defined(__APPLE__)
+    out->atime_nsec = in->st_atimespec.tv_nsec; out->mtime_nsec = in->st_mtimespec.tv_nsec;
+    out->ctime_nsec = in->st_ctimespec.tv_nsec;
+#elif defined(__linux__)
+    out->atime_nsec = in->st_atim.tv_nsec; out->mtime_nsec = in->st_mtim.tv_nsec;
+    out->ctime_nsec = in->st_ctim.tv_nsec;
+#endif
+}
+static int fakefs_stat(struct mount *mount, const char *path, struct statbuf *out) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    ISH_SIGNPOST_SCOPE_BEGIN(fs, "fakefs_stat", _fs_spid);
     struct fakefs_db *fs = &mount->fakefs;
-    /* Hook-routed paths bypass meta.db (see fakefs_open). Stat directly
-     * against the host file; synthesize mode bits from host's. */
-    char host_abs[PATH_MAX];
-    bool via_hook = false;
-    if (bind_mount_translate_path_ex(path, host_abs, sizeof(host_abs), &via_hook) && via_hook) {
-        struct stat host_stat;
-        if (stat(host_abs, &host_stat) < 0) {
-            ISH_SIGNPOST_SCOPE_END(fs, "fakefs_stat", _fs_spid);
-            return errno_map();
-        }
-        memset(fake_stat, 0, sizeof(*fake_stat));
-        fake_stat->inode = (ino_t)host_stat.st_ino;
-        /* Pick a sensible mode: keep host's S_IFMT, default to 0644/0755. */
-        mode_t_ type = host_stat.st_mode & S_IFMT;
-        fake_stat->mode = type | (S_ISDIR(host_stat.st_mode) ? 0755 : 0644);
-        fake_stat->uid = 0;
-        fake_stat->gid = 0;
-        fake_stat->size = host_stat.st_size;
-        fake_stat->blocks = host_stat.st_blocks;
-        fake_stat->mtime = host_stat.st_mtimespec.tv_sec;
-        fake_stat->mtime_nsec = host_stat.st_mtimespec.tv_nsec;
-        fake_stat->atime = host_stat.st_atimespec.tv_sec;
-        fake_stat->atime_nsec = host_stat.st_atimespec.tv_nsec;
-        fake_stat->ctime = host_stat.st_ctimespec.tv_sec;
-        fake_stat->ctime_nsec = host_stat.st_ctimespec.tv_nsec;
-        ISH_SIGNPOST_SCOPE_END(fs, "fakefs_stat", _fs_spid);
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    char host[PATH_MAX]; bool hook = false;
+    bool bind = bind_mount_translate_path_ex(path, host, sizeof(host), &hook);
+    if (hook) {
+        struct stat st;
+        if (stat(host, &st) < 0) return errno_map();
+        fakefs_copy_host_stat(out, &st);
+        out->mode = (st.st_mode & S_IFMT) | (S_ISDIR(st.st_mode) ? 0755 : 0644);
         return 0;
     }
-    db_begin_read(fs);
-    struct ish_stat ishstat;
-    ino_t inode;
-    if (!path_read_stat(fs, path, &ishstat, &inode)) {
-        db_rollback(fs);
-        /* Auto-create for bind-mounted paths */
-        if (is_under_bind_mount(path)) {
-            inode = bind_mount_ensure_inode(fs, mount, path);
-            if (inode != 0) {
-                db_begin_read(fs);
-                path_read_stat(fs, path, &ishstat, &inode);
-                db_commit(fs);
-                int err = realfs.stat(mount, path, fake_stat);
-                if (err < 0)
-                    return err;
-                fake_stat->inode = inode;
-                fake_stat->mode = ishstat.mode;
-                fake_stat->uid = ishstat.uid;
-                fake_stat->gid = ishstat.gid;
-                fake_stat->rdev = ishstat.rdev;
-                return 0;
-            }
-        }
-        return _ENOENT;
+    bool ensured = false;
+lookup: ;
+    int rc = db_begin_read(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata; inode_t inode;
+    bool exists = path_read_stat(fs, path, &metadata, &inode);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (!exists) {
+        error = fakefs_abort(fs, _ENOENT);
+        if (error != _ENOENT || !bind || ensured) return error;
+        inode_t found;
+        error = bind_mount_ensure_inode(fs, mount, path, &found);
+        if (error < 0) return error;
+        if (!found) return _ENOENT;
+        ensured = true;
+        goto lookup;
     }
-    int err;
-    char host_stat_path[PATH_MAX];
-    if (bind_mount_translate_path(path, host_stat_path, sizeof(host_stat_path))) {
-        /* For bind-mounted paths, stat the host path directly to avoid
-         * AT_SYMLINK_NOFOLLOW returning symlink stats instead of dir stats. */
-        struct stat real_stat;
-        if (stat(host_stat_path, &real_stat) < 0) {
-            db_commit(fs);
-            return errno_map();
-        }
-        /* Copy basic fields from real stat */
-        fake_stat->size = real_stat.st_size;
-        fake_stat->nlink = real_stat.st_nlink;
-        fake_stat->atime = real_stat.st_atimespec.tv_sec;
-        fake_stat->mtime = real_stat.st_mtimespec.tv_sec;
-        fake_stat->ctime = real_stat.st_ctimespec.tv_sec;
-        err = 0;
-    } else {
-        err = realfs.stat(mount, path, fake_stat);
-    }
-    db_commit(fs);
-    if (err < 0)
-        return err;
-    fake_stat->inode = inode;
-    fake_stat->mode = ishstat.mode;
-    fake_stat->uid = ishstat.uid;
-    fake_stat->gid = ishstat.gid;
-    fake_stat->rdev = ishstat.rdev;
-    ISH_SIGNPOST_SCOPE_END(fs, "fakefs_stat", _fs_spid);
+    if (bind) {
+        struct stat st;
+        error = stat(host, &st) < 0 ? errno_map() : 0;
+        if (error == 0) fakefs_copy_host_stat(out, &st);
+    } else error = realfs.stat(mount, path, out);
+    if (error < 0) return fakefs_abort(fs, error);
+    error = fakefs_finish(fs, false);
+    if (error < 0) return error;
+    out->inode = inode; out->mode = metadata.mode;
+    out->uid = metadata.uid; out->gid = metadata.gid; out->rdev = metadata.rdev;
     return 0;
 }
-
-static int fakefs_fstat(struct fd *fd, struct statbuf *fake_stat) {
+static int fakefs_fstat(struct fd *fd, struct statbuf *out) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &fd->mount->fakefs;
-    int err = realfs.fstat(fd, fake_stat);
-    if (err < 0)
-        return err;
-    db_begin_read(fs);
-    struct ish_stat ishstat;
-    if (!inode_read_stat_if_exist(fs, fd->fake_inode, &ishstat)) {
-        db_rollback(fs);
-        /* meta.db row missing. If the fd's path resolves through the
-         * path-translate hook, the missing row is by design (hook-routed
-         * paths bypass meta.db, see fakefs_open). Trust the realfs.fstat
-         * result and synthesize sensible mode bits. Otherwise propagate the
-         * ENOENT so unrelated bugs aren't masked. */
-        char fd_path[MAX_PATH];
-        if (realfs_getpath(fd, fd_path) == 0) {
-            char host_chk[PATH_MAX];
-            bool via_hook = false;
-            if (bind_mount_translate_path_ex(fd_path, host_chk, sizeof(host_chk), &via_hook) && via_hook) {
-                mode_t_ type = fake_stat->mode & S_IFMT;
-                fake_stat->mode = type | (S_ISDIR(fake_stat->mode) ? 0755 : 0644);
-                fake_stat->uid = 0;
-                fake_stat->gid = 0;
-                fake_stat->rdev = 0;
-                return 0;
-            }
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    int error = realfs.fstat(fd, out);
+    if (error < 0) return error;
+    int rc = db_begin_read(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata;
+    bool exists = inode_read_stat_if_exist(fs, fd->fake_inode, &metadata);
+    error = fakefs_metadata_ready(fs);
+    if (error == 0) error = fakefs_finish(fs, false);
+    if (error < 0) return error;
+    if (!exists) {
+        char path[MAX_PATH], host[PATH_MAX]; bool hook = false;
+        if (realfs_getpath(fd, path) == 0 &&
+                bind_mount_translate_path_ex(path, host, sizeof(host), &hook) && hook) {
+            out->mode = (out->mode & S_IFMT) | (S_ISDIR(out->mode) ? 0755 : 0644);
+            out->uid = out->gid = out->rdev = 0;
+            return 0;
         }
         return _ENOENT;
     }
-    db_commit(fs);
-    fake_stat->inode = fd->fake_inode;
-    fake_stat->mode = ishstat.mode;
-    fake_stat->uid = ishstat.uid;
-    fake_stat->gid = ishstat.gid;
-    fake_stat->rdev = ishstat.rdev;
+    out->inode = fd->fake_inode; out->mode = metadata.mode;
+    out->uid = metadata.uid; out->gid = metadata.gid; out->rdev = metadata.rdev;
     return 0;
 }
 
@@ -863,219 +730,137 @@ static void fake_stat_setattr(struct ish_stat *ishstat, struct attr attr) {
 static int fakefs_setattr(struct mount *mount, const char *path, struct attr attr) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(path))
-        return _EROFS;
-    /* Hook-routed paths bypass meta.db (see fakefs_open). Apply size and
-     * mode/owner changes directly on the host abs path; ignore the meta.db
-     * side. For non-size attrs we use host syscalls so callers get a real
-     * effect (or a real EPERM) rather than silent no-op or a meta.db die. */
-    char host_abs_chk[PATH_MAX];
-    bool _via_hook = false;
-    if (bind_mount_translate_path_ex(path, host_abs_chk, sizeof(host_abs_chk), &_via_hook) && _via_hook) {
-        int err = 0;
-        switch (attr.type) {
-            case attr_size:
-                if (truncate(host_abs_chk, attr.size) < 0)
-                    return errno_map();
-                return 0;
-            case attr_mode:
-                if (chmod(host_abs_chk, attr.mode) < 0)
-                    return errno_map();
-                return 0;
-            case attr_uid:
-            case attr_gid:
-                /* iSH runs as a non-root iOS app; host chown will EPERM.
-                 * Match realfs_setattr's silent-on-EPERM behaviour. */
-                return 0;
-            default:
-                return 0;
-        }
-        (void)err;
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(path)) return _EROFS;
+    char host[PATH_MAX]; bool hook = false;
+    bool bind = bind_mount_translate_path_ex(path, host, sizeof(host), &hook);
+    if (hook) {
+        if (attr.type == attr_size) return truncate(host, attr.size) < 0 ? errno_map() : 0;
+        if (attr.type == attr_mode) return chmod(host, attr.mode) < 0 ? errno_map() : 0;
+        return 0;
     }
-    if (attr.type == attr_size)
-        return realfs.setattr(mount, path, attr);
-    db_begin_read(fs);
-    struct ish_stat ishstat;
-    ino_t inode;
-    if (!path_read_stat(fs, path, &ishstat, &inode)) {
-        db_rollback(fs);
-        /* Auto-create for bind-mounted paths */
-        if (is_under_bind_mount(path)) {
-            inode = bind_mount_ensure_inode(fs, mount, path);
-            if (inode != 0) {
-                db_begin_read(fs);
-                path_read_stat(fs, path, &ishstat, &inode);
-                fake_stat_setattr(&ishstat, attr);
-                inode_write_stat(fs, inode, &ishstat);
-                db_commit(fs);
-                return 0;
-            }
-        }
-        return _ENOENT;
-    }
-    fake_stat_setattr(&ishstat, attr);
-    inode_write_stat(fs, inode, &ishstat);
-    db_commit(fs);
-    return 0;
+    if (attr.type == attr_size) return realfs.setattr(mount, path, attr);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    if (bind) bind_mount_ensure_inode_locked(fs, mount, path);
+    struct ish_stat metadata; inode_t inode;
+    bool exists = path_read_stat(fs, path, &metadata, &inode);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (!exists) return fakefs_abort(fs, _ENOENT);
+    fake_stat_setattr(&metadata, attr);
+    inode_write_stat(fs, inode, &metadata);
+    error = fakefs_metadata_ready(fs);
+    return error < 0 ? error : fakefs_finish(fs, false);
 }
-
 static int fakefs_fsetattr(struct fd *fd, struct attr attr) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &fd->mount->fakefs;
-    if (attr.type == attr_size)
-        return realfs.fsetattr(fd, attr);
-    /* If this fd was opened on a hook-routed path, its fake_inode is the
-     * host inode and won't be in meta.db. Detect that by probing meta.db;
-     * if absent, apply attr directly to the host fd. */
-    db_begin_read(fs);
-    struct ish_stat ishstat;
-    bool in_meta = inode_read_stat_if_exist(fs, fd->fake_inode, &ishstat);
-    db_commit(fs);
-    if (!in_meta) {
-        switch (attr.type) {
-            case attr_mode:
-                if (fchmod(fd->real_fd, attr.mode) < 0)
-                    return errno_map();
-                return 0;
-            case attr_uid:
-            case attr_gid:
-                return 0;  /* host EPERM expected; ignore (matches realfs) */
-            default:
-                return 0;
-        }
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (attr.type == attr_size) return realfs.fsetattr(fd, attr);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata;
+    bool exists = inode_read_stat_if_exist(fs, fd->fake_inode, &metadata);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (exists) {
+        fake_stat_setattr(&metadata, attr);
+        inode_write_stat(fs, fd->fake_inode, &metadata);
+        error = fakefs_metadata_ready(fs);
+        return error < 0 ? error : fakefs_finish(fs, false);
     }
-    db_begin_write(fs);
-    fake_stat_setattr(&ishstat, attr);
-    inode_write_stat(fs, fd->fake_inode, &ishstat);
-    db_commit(fs);
-    return 0;
+    error = fakefs_finish(fs, false);
+    if (error < 0) return error;
+    char path[MAX_PATH], host[PATH_MAX]; bool hook = false;
+    if (realfs_getpath(fd, path) != 0 ||
+            !bind_mount_translate_path_ex(path, host, sizeof(host), &hook) || !hook) return _ENOENT;
+    return attr.type == attr_mode && fchmod(fd->real_fd, attr.mode) < 0 ? errno_map() : 0;
 }
-
 static int fakefs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    if (is_under_readonly_bind_mount(path))
-        return _EROFS;
-    char host_abs[PATH_MAX];
-    bool via_hook = false;
-    bool via_bind = bind_mount_translate_path_ex(path, host_abs, sizeof(host_abs), &via_hook);
-    if (via_hook) {
-        if (mkdir(host_abs, 0777) < 0)
-            return errno_map();
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+    if (is_under_readonly_bind_mount(path)) return _EROFS;
+    char host[PATH_MAX]; bool hook = false;
+    bool bind = bind_mount_translate_path_ex(path, host, sizeof(host), &hook);
+    if (hook) {
+        if (mkdir(host, 0777) < 0) return errno_map();
         fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
         return 0;
     }
-    db_begin_write(fs);
-    int err;
-    if (via_bind) {
-        if (mkdir(host_abs, 0777) < 0) {
-            err = errno_map();
-            db_rollback(fs);
-            return err;
-        }
-    } else {
-        err = realfs.mkdir(mount, path, 0777);
-        if (err < 0) {
-            db_rollback(fs);
-            return err;
-        }
-    }
-    struct ish_stat ishstat;
-    ishstat.mode = mode | S_IFDIR;
-    ishstat.uid = current->euid;
-    ishstat.gid = current->egid;
-    ishstat.rdev = 0;
-    path_create(fs, path, &ishstat);
-    db_commit(fs);
-    if (via_bind)
-        fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
-    return 0;
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata = { .mode = mode | S_IFDIR, .uid = current ? current->euid : 0,
+        .gid = current ? current->egid : 0, .rdev = 0 };
+    path_create(fs, path, &metadata);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    error = bind ? (mkdir(host, 0777) < 0 ? errno_map() : 0) : realfs.mkdir(mount, path, 0777);
+    if (error < 0) return fakefs_abort(fs, error);
+    error = fakefs_finish(fs, true);
+    if (error == 0 && bind) fakefs_record_change(path, FAKEFS_CHANGE_OP_WRITE);
+    return error;
 }
-
-static ssize_t file_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {
-    // broken symlinks can't be included in an iOS app or else Xcode craps out
+static ssize_t file_readlink(struct mount *mount, const char *path, char *buf, size_t size) {
     int fd = openat(mount->root_fd, fix_path(path), O_RDONLY);
-    if (fd < 0)
-        return errno_map();
-    int err = read(fd, buf, bufsize);
+    if (fd < 0) return errno_map();
+    ssize_t result = read(fd, buf, size);
+    int error = errno_map();
     close(fd);
-    if (err < 0)
-        return errno_map();
-    return err;
+    return result < 0 ? error : result;
 }
-
-static ssize_t fakefs_readlink(struct mount *mount, const char *path, char *buf, size_t bufsize) {
+static ssize_t fakefs_readlink(struct mount *mount, const char *path, char *buf, size_t size) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    db_begin_read(fs);
-    struct ish_stat ishstat;
-    if (!path_read_stat(fs, path, &ishstat, NULL)) {
-        db_rollback(fs);
-        return _ENOENT;
-    }
-    if (!S_ISLNK(ishstat.mode)) {
-        db_rollback(fs);
-        return _EINVAL;
-    }
-    ssize_t err = realfs.readlink(mount, path, buf, bufsize);
-    if (err == _EINVAL)
-        err = file_readlink(mount, path, buf, bufsize);
-    db_commit(fs);
-    return err;
+    int rc = db_begin_read(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    struct ish_stat metadata;
+    bool exists = path_read_stat(fs, path, &metadata, NULL);
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (!exists) return fakefs_abort(fs, _ENOENT);
+    if (!S_ISLNK(metadata.mode)) return fakefs_abort(fs, _EINVAL);
+    ssize_t count = realfs.readlink(mount, path, buf, size);
+    if (count == _EINVAL) count = file_readlink(mount, path, buf, size);
+    error = fakefs_finish(fs, false);
+    return error < 0 ? error : count;
 }
-
 static int fakefs_readdir(struct fd *fd, struct dir_entry *entry) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     assert(fd->ops == &fakefs_fdops);
-    int res;
-retry:
-    res = realfs_fdops.readdir(fd, entry);
-    if (res <= 0)
-        return res;
-
-    // this is annoying
-    char entry_path[MAX_PATH + 1];
-    realfs_getpath(fd, entry_path);
-
-    /* Debug: log readdir for bind-mounted paths */
-    if (strstr(entry_path, "minis") != NULL || strstr(entry_path, "Library/MinisChat") != NULL)
-        fprintf(stderr, "fakefs_readdir: getpath=\"%s\" entry=\"%s\"\n", entry_path, entry->name);
-
-    if (strcmp(entry->name, "..") == 0) {
-        if (strcmp(entry_path, "") != 0) {
-            *strrchr(entry_path, '/') = '\0';
-        }
-    } else if (strcmp(entry->name, ".") != 0) {
-        // god I don't know what to do if this would overflow
-        strcat(entry_path, "/");
-        strcat(entry_path, entry->name);
-    }
-
-    /* Hook-routed entries are not in meta.db by design (see fakefs_open).
-     * Keep the inode that realfs_readdir gave us (it came straight from the
-     * host directory, so it's stable for the duration of the open fd). */
-    char host_check[PATH_MAX];
-    bool entry_via_hook = false;
-    bind_mount_translate_path_ex(entry_path, host_check, sizeof(host_check), &entry_via_hook);
-    if (entry_via_hook) {
-        return res;
-    }
-
     struct fakefs_db *fs = &fd->mount->fakefs;
-    db_begin_read(fs);
-    entry->inode = path_get_inode(fs, entry_path);
-    db_commit(fs);
-
-    if (entry->inode == 0) {
-        /* Auto-create for bind-mounted paths */
-        if (is_under_bind_mount(entry_path)) {
-            entry->inode = bind_mount_ensure_inode(fs, fd->mount, entry_path);
-        }
-        /* Still no inode? Skip this entry to avoid crashes */
-        if (entry->inode == 0)
-            goto retry;
+    if (fakefs_db_recovery_required(fs)) return _EIO;
+retry: ;
+    int result = realfs_fdops.readdir(fd, entry);
+    if (result <= 0) return result;
+    char path[MAX_PATH + 1];
+    int error = realfs_getpath(fd, path);
+    if (error < 0) return error;
+    if (strcmp(entry->name, "..") == 0) {
+        char *slash = strrchr(path, '/');
+        if (slash) *slash = '\0';
+    } else if (strcmp(entry->name, ".") != 0) {
+        if (strlen(path) + strlen(entry->name) + 2 > sizeof(path)) return _ENAMETOOLONG;
+        strcat(path, "/"); strcat(path, entry->name);
     }
-    return res;
+    char host[PATH_MAX]; bool hook = false;
+    bind_mount_translate_path_ex(path, host, sizeof(host), &hook);
+    if (hook) return result;
+    int rc = db_begin_read(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    entry->inode = path_get_inode(fs, path);
+    error = fakefs_metadata_ready(fs);
+    if (error == 0) error = fakefs_finish(fs, false);
+    if (error < 0) return error;
+    if (!entry->inode && is_under_bind_mount(path)) {
+        inode_t inode;
+        error = bind_mount_ensure_inode(fs, fd->mount, path, &inode);
+        if (error < 0) return error;
+        entry->inode = inode;
+    }
+    if (!entry->inode) goto retry;
+    return result;
 }
 
 static struct fd_ops fakefs_fdops;
@@ -1094,7 +879,16 @@ static int create_relative_symlink(int root_fd, const char *host_link,
     /* Get the absolute path of root_fd (F_GETPATH resolves symlinks,
      * e.g. /var -> /private/var on iOS) */
     char root_abs[PATH_MAX];
-    if (fcntl(root_fd, F_GETPATH, root_abs) != 0) {
+#if defined(__APPLE__)
+    int root_path_result = fcntl(root_fd, F_GETPATH, root_abs);
+#else
+    char proc_path[64];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", root_fd);
+    ssize_t root_length = readlink(proc_path, root_abs, sizeof(root_abs) - 1);
+    int root_path_result = root_length < 0 ? -1 : 0;
+    if (root_length >= 0) root_abs[root_length] = '\0';
+#endif
+    if (root_path_result != 0) {
         fprintf(stderr, "create_relative_symlink: F_GETPATH failed\n");
         /* Fall back to absolute symlink */
         return symlinkat(host_path, root_fd, host_link);
@@ -1110,7 +904,11 @@ static int create_relative_symlink(int root_fd, const char *host_link,
 
     /* Build the absolute path of the symlink's parent directory */
     char link_abs[PATH_MAX];
-    snprintf(link_abs, sizeof(link_abs), "%s/%s", root_abs, host_link);
+    size_t root_length_bytes = strlen(root_abs), link_length_bytes = strlen(host_link);
+    if (root_length_bytes + link_length_bytes + 2 > sizeof(link_abs)) { errno = ENAMETOOLONG; return -1; }
+    memcpy(link_abs, root_abs, root_length_bytes);
+    link_abs[root_length_bytes] = '/';
+    memcpy(link_abs + root_length_bytes + 1, host_link, link_length_bytes + 1);
     /* Strip the last component to get the parent dir */
     char *last_slash = strrchr(link_abs, '/');
     if (last_slash) *last_slash = '\0';
@@ -1156,210 +954,72 @@ static void remove_tree_at(int dir_fd, const char *path) {
 
 int fakefs_bind_mount(const char *linux_path, const char *host_path, bool read_only) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    fprintf(stderr, "fakefs_bind_mount: ENTER linux_path=\"%s\" (len=%zu) host_path=\"%s\" (len=%zu) read_only=%d\n",
-            linux_path, strlen(linux_path), host_path, strlen(host_path), read_only ? 1 : 0);
-
-    if (g_fakefs_mount == NULL) {
-        fprintf(stderr, "fakefs_bind_mount: FAIL g_fakefs_mount is NULL\n");
-        return _ENODEV;
-    }
-
-    const char *fixed = fix_path(linux_path);
-    fprintf(stderr, "fakefs_bind_mount: fix_path(\"%s\") => \"%s\" (len=%zu)\n",
-            linux_path, fixed, strlen(fixed));
-
-    /* Log root_fd info for context */
-    {
-        char fd_path[PATH_MAX];
-        if (fcntl(g_fakefs_mount->root_fd, F_GETPATH, fd_path) == 0) {
-            fprintf(stderr, "fakefs_bind_mount: root_fd=%d path=\"%s\"\n",
-                    g_fakefs_mount->root_fd, fd_path);
-        } else {
-            fprintf(stderr, "fakefs_bind_mount: root_fd=%d (F_GETPATH failed)\n",
-                    g_fakefs_mount->root_fd);
-        }
-    }
-
-    /* Verify host path exists (directory or regular file) */
+    if (!g_fakefs_mount) return _ENODEV;
+    struct fakefs_db *fs = &g_fakefs_mount->fakefs;
+    if (fakefs_db_recovery_required(fs)) return _EIO;
     struct stat st;
-    if (stat(host_path, &st) < 0) {
-        fprintf(stderr, "fakefs_bind_mount: FAIL host_path does not exist\n");
-        return _ENOENT;
-    }
-    bool is_file_mount = S_ISREG(st.st_mode);
-    if (!S_ISDIR(st.st_mode) && !is_file_mount) {
-        fprintf(stderr, "fakefs_bind_mount: FAIL host_path is neither a dir nor a regular file\n");
-        return _ENOENT;
-    }
-
-    /* Resolve symlinks in host_path so it matches what F_GETPATH returns.
-     * e.g. ~/Library/GroupContainersAlias/... -> ~/Library/Group Containers/... */
-    char resolved_host[PATH_MAX];
-    if (realpath(host_path, resolved_host) != NULL)
-        host_path = resolved_host;
-
-    /* Compute the meta.db mode for the top-level mount point based on whether
-     * the mount is read-only and whether it's a file or directory. */
-    uint32_t dir_mode = read_only ? 0555 : 0755;
-    uint32_t file_mode = read_only ? 0444 : 0644;
-    uint32_t top_mode = is_file_mount ? (S_IFREG | file_mode) : (S_IFDIR | dir_mode);
-
-    /* Check if already mounted at this path — update if host_path or mode changed */
+    if (stat(host_path, &st) < 0) return errno_map();
+    bool is_file = S_ISREG(st.st_mode);
+    if (!S_ISDIR(st.st_mode) && !is_file) return _ENOENT;
+    char resolved[PATH_MAX];
+    if (realpath(host_path, resolved)) host_path = resolved;
+    int slot = -1;
+    bool existing = false;
     for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
-        if (g_bind_mounts[i].active &&
-            strcmp(g_bind_mounts[i].path, linux_path) == 0) {
-            bool host_changed = strcmp(g_bind_mounts[i].host_path, host_path) != 0;
-            /* Always refresh the read-only flag — the user may have flipped
-             * writability in Settings without changing anything else. */
-            g_bind_mounts[i].read_only = read_only;
-
-            /* Always refresh the meta.db mode — the read-only flag may have
-             * flipped even if host_path is unchanged (e.g. user toggled
-             * writability in Settings). */
-            {
-                struct fakefs_db *fs = &g_fakefs_mount->fakefs;
-                db_begin_write(fs);
-                inode_t existing = path_get_inode(fs, linux_path);
-                if (existing != 0) {
-                    struct ish_stat prev;
-                    if (inode_read_stat_if_exist(fs, existing, &prev)) {
-                        prev.mode = top_mode;
-                        inode_write_stat(fs, existing, &prev);
-                        fprintf(stderr, "fakefs_bind_mount: slot[%d] updated meta.db mode to 0%o\n",
-                                i, top_mode & 07777);
-                    }
-                } else {
-                    struct ish_stat ishstat = {
-                        .mode = top_mode, .uid = 0, .gid = 0, .rdev = 0
-                    };
-                    path_create(fs, linux_path, &ishstat);
-                    fprintf(stderr, "fakefs_bind_mount: slot[%d] created meta.db entry with mode 0%o\n",
-                            i, top_mode & 07777);
-                }
-                db_commit(fs);
-            }
-
-            if (!host_changed) {
-                fprintf(stderr, "fakefs_bind_mount: slot[%d] already mounted with same host_path, mode refreshed\n", i);
-                return 0;
-            }
-            /* host_path changed (e.g. session switch) — update slot and symlink */
-            fprintf(stderr, "fakefs_bind_mount: slot[%d] host_path changed from \"%s\" to \"%s\"\n",
-                    i, g_bind_mounts[i].host_path, host_path);
-            strlcpy(g_bind_mounts[i].host_path, host_path,
-                    sizeof(g_bind_mounts[i].host_path));
-            g_bind_mounts[i].host_path_len = strlen(host_path);
-
-            char host_link[PATH_MAX];
-            snprintf(host_link, sizeof(host_link), "%s", fix_path(linux_path));
-            fprintf(stderr, "fakefs_bind_mount: slot[%d] UPDATE symlink: host_link=\"%s\" -> host_path=\"%s\" (root_fd=%d)\n",
-                    i, host_link, host_path, g_fakefs_mount->root_fd);
-            /* Remove whatever is at the path (file, symlink, or directory tree) */
-            remove_tree_at(g_fakefs_mount->root_fd, host_link);
-            int err = create_relative_symlink(g_fakefs_mount->root_fd, host_link, host_path);
-            fprintf(stderr, "fakefs_bind_mount: slot[%d] symlinkat returned %d (errno=%d)\n", i, err, err < 0 ? errno : 0);
-            if (err < 0) {
-                g_bind_mounts[i].active = false;
-                return _EINVAL;
-            }
-            return 0;
+        if (g_bind_mounts[i].active && strcmp(g_bind_mounts[i].path, linux_path) == 0) {
+            slot = i; existing = true; break;
+        }
+        if (!g_bind_mounts[i].active && slot < 0) slot = i;
+    }
+    if (slot < 0) return _ENOMEM;
+    bool change_host = !existing || strcmp(g_bind_mounts[slot].host_path, host_path) != 0;
+    uint32_t mode = is_file ? S_IFREG | (read_only ? 0444 : 0644) : S_IFDIR | (read_only ? 0555 : 0755);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    inode_t inode = path_get_inode(fs, linux_path);
+    struct ish_stat metadata = { .mode = mode, .uid = 0, .gid = 0, .rdev = 0 };
+    if (!inode && db_transaction_error(fs) == SQLITE_OK) path_create(fs, linux_path, &metadata);
+    else if (inode) {
+        inode_read_stat_or_die(fs, inode, &metadata);
+        if (db_transaction_error(fs) == SQLITE_OK) {
+            metadata.mode = mode;
+            inode_write_stat(fs, inode, &metadata);
         }
     }
-
-    /* Find a free slot */
-    for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
-        if (!g_bind_mounts[i].active) {
-            fprintf(stderr, "fakefs_bind_mount: using free slot[%d]\n", i);
-            strlcpy(g_bind_mounts[i].path, linux_path,
-                    sizeof(g_bind_mounts[i].path));
-            g_bind_mounts[i].path_len = strlen(linux_path);
-            strlcpy(g_bind_mounts[i].host_path, host_path,
-                    sizeof(g_bind_mounts[i].host_path));
-            g_bind_mounts[i].host_path_len = strlen(host_path);
-            g_bind_mounts[i].active = true;
-            g_bind_mounts[i].read_only = read_only;
-
-            /* Create symlink on host: data/<linux_path> -> <host_path>
-             * First remove any existing file/dir at the path (may be non-empty) */
-            char host_link[PATH_MAX];
-            snprintf(host_link, sizeof(host_link), "%s", fix_path(linux_path));
-
-            fprintf(stderr, "fakefs_bind_mount: slot[%d] NEW symlink: host_link=\"%s\" -> host_path=\"%s\" (root_fd=%d)\n",
-                    i, host_link, host_path, g_fakefs_mount->root_fd);
-
-            /* Remove whatever is at the path (file, symlink, or directory tree) */
-            remove_tree_at(g_fakefs_mount->root_fd, host_link);
-
-            /* Create the symlink (relative path to avoid iOS sandbox issues) */
-            int err = create_relative_symlink(g_fakefs_mount->root_fd, host_link, host_path);
-            fprintf(stderr, "fakefs_bind_mount: slot[%d] symlinkat returned %d (errno=%d)\n", i, err, err < 0 ? errno : 0);
-            if (err < 0) {
-                g_bind_mounts[i].active = false;
-                return _EINVAL;
-            }
-
-            /* Verify the symlink was created correctly */
-            char readbuf[PATH_MAX];
-            ssize_t rlen = readlinkat(g_fakefs_mount->root_fd, host_link, readbuf, sizeof(readbuf) - 1);
-            if (rlen > 0) {
-                readbuf[rlen] = '\0';
-                fprintf(stderr, "fakefs_bind_mount: slot[%d] VERIFY readlinkat(\"%s\") => \"%s\"\n", i, host_link, readbuf);
-            } else {
-                fprintf(stderr, "fakefs_bind_mount: slot[%d] VERIFY readlinkat(\"%s\") FAILED (errno=%d)\n", i, host_link, errno);
-            }
-
-            /* Ensure the mount point exists in meta.db (dir or file), with the
-             * correct mode based on the read_only flag. If an entry already
-             * exists from a previous run we rewrite the mode so the read-only
-             * state always matches what Settings says. */
-            struct fakefs_db *fs = &g_fakefs_mount->fakefs;
-            db_begin_write(fs);
-            inode_t ino = path_get_inode(fs, linux_path);
-            if (ino == 0) {
-                struct ish_stat ishstat = {
-                    .mode = top_mode, .uid = 0, .gid = 0, .rdev = 0
-                };
-                path_create(fs, linux_path, &ishstat);
-                fprintf(stderr, "fakefs_bind_mount: slot[%d] created meta.db entry for \"%s\" mode=0%o\n",
-                        i, linux_path, top_mode & 07777);
-            } else {
-                struct ish_stat prev;
-                if (inode_read_stat_if_exist(fs, ino, &prev)) {
-                    prev.mode = top_mode;
-                    inode_write_stat(fs, ino, &prev);
-                }
-                fprintf(stderr, "fakefs_bind_mount: slot[%d] meta.db entry refreshed for \"%s\" (inode=%lld) mode=0%o\n",
-                        i, linux_path, (long long)ino, top_mode & 07777);
-            }
-            db_commit(fs);
-
-            return 0;
+    int error = fakefs_metadata_ready(fs);
+    if (error < 0) return error;
+    if (change_host) {
+        /* Preserve the existing bind API's replacement behavior, but never do
+         * it before BEGIN and all metadata SQL succeeds. Once replacement
+         * starts, a failure cannot be presented as a successful SQL rollback. */
+        const char *host_link = fix_path(linux_path);
+        remove_tree_at(g_fakefs_mount->root_fd, host_link);
+        if (create_relative_symlink(g_fakefs_mount->root_fd, host_link, host_path) < 0) {
+            db_require_recovery(fs, SQLITE_IOERR);
+            return _EIO;
         }
     }
-
-    fprintf(stderr, "fakefs_bind_mount: FAIL no free slots (max=%d)\n", FAKEFS_MAX_BIND_MOUNTS);
-    return _ENOMEM; /* no free slots */
+    error = fakefs_finish(fs, change_host);
+    if (error < 0) return error;
+    struct fakefs_bind_mount *mount = &g_bind_mounts[slot];
+    strlcpy(mount->path, linux_path, sizeof(mount->path));
+    strlcpy(mount->host_path, host_path, sizeof(mount->host_path));
+    mount->path_len = strlen(linux_path); mount->host_path_len = strlen(host_path);
+    mount->read_only = read_only; mount->active = true;
+    return 0;
 }
 
 int fakefs_bind_unmount(const char *linux_path) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    if (g_fakefs_mount == NULL)
-        return _ENODEV;
-
+    if (!g_fakefs_mount) return _ENODEV;
+    if (fakefs_db_recovery_required(&g_fakefs_mount->fakefs)) return _EIO;
     for (int i = 0; i < FAKEFS_MAX_BIND_MOUNTS; i++) {
-        if (g_bind_mounts[i].active &&
-            strcmp(g_bind_mounts[i].path, linux_path) == 0) {
+        if (g_bind_mounts[i].active && strcmp(g_bind_mounts[i].path, linux_path) == 0) {
+            if (unlinkat(g_fakefs_mount->root_fd, fix_path(linux_path), 0) < 0) return errno_map();
             g_bind_mounts[i].active = false;
-
-            /* Remove the symlink */
-            char host_link[PATH_MAX];
-            snprintf(host_link, sizeof(host_link), "%s", fix_path(linux_path));
-            unlinkat(g_fakefs_mount->root_fd, host_link, 0);
-
             return 0;
         }
     }
-
     return _ENOENT;
 }
 
@@ -1377,8 +1037,10 @@ static int fakefs_mount(struct mount *mount) {
         return err;
 
     err = fake_db_init(&mount->fakefs, db_path, mount->root_fd);
-    if (err < 0)
+    if (err < 0) {
+        if (!fakefs_db_recovery_required(&mount->fakefs)) close(mount->root_fd);
         return err;
+    }
 
     /* Store global reference for bind mount API */
     g_fakefs_mount = mount;
@@ -1389,21 +1051,40 @@ static int fakefs_mount(struct mount *mount) {
 
 static int fakefs_umount(struct mount *mount) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
-    int err = fake_db_deinit(&mount->fakefs);
-    if (err != SQLITE_OK) {
-        printk("sqlite failed to close: %d\n", err);
+    int rc = fake_db_deinit(&mount->fakefs);
+    if (rc != SQLITE_OK) return fakefs_sql_errno(rc);
+    // SQLite teardown is irreversible. Retire the descriptor before close:
+    // EINTR/EIO may report failure after the host already reused its number.
+    int root_fd = mount->root_fd;
+    mount->root_fd = -1;
+    if (g_fakefs_mount == mount) g_fakefs_mount = NULL;
+    if (close(root_fd) < 0) {
+        int error = errno_map();
+        dsh_lifecycle_native_close_uncertain();
+        printk("fakefs unmount close uncertain: connection=%llu error=%d; detaching\n",
+                (unsigned long long) mount->fakefs.lifecycle_connection_id, error);
+        // Positive errno tells mount_remove to detach, while reporting failure.
+        return -error;
     }
-    /* return realfs.umount(mount); */
     return 0;
 }
 
 static void fakefs_inode_orphaned(struct mount *mount, ino_t inode) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     struct fakefs_db *fs = &mount->fakefs;
-    db_begin_write(fs);
-    sqlite3_bind_int64(fs->stmt.try_cleanup_inode, 1, inode);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) {
+        printk("fakefs orphan cleanup deferred: connection=%llu rc=%d\n",
+                (unsigned long long) fs->lifecycle_connection_id, rc);
+        return;
+    }
+    rc = sqlite3_bind_int64(fs->stmt.try_cleanup_inode, 1, inode);
+    if (rc != SQLITE_OK) { fakefs_abort(fs, fakefs_sql_errno(rc)); return; }
     db_exec_reset(fs, fs->stmt.try_cleanup_inode);
-    db_commit(fs);
+    int error = fakefs_metadata_ready(fs);
+    if (error == 0) error = fakefs_finish(fs, false);
+    if (error < 0) printk("fakefs orphan cleanup failed: connection=%llu error=%d\n",
+            (unsigned long long) fs->lifecycle_connection_id, error);
 }
 
 const struct fs_ops fakefs = {

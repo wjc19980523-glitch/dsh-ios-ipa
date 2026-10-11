@@ -4,6 +4,7 @@
 #include "fs/fd.h"
 #include "fs/poll.h"
 #include "kernel/calls.h"
+#include "fs/dsh-lifecycle.h"
 
 static int user_read_or_zero(addr_t addr, void *data, size_t size) {
     if (addr == 0)
@@ -197,6 +198,10 @@ dword_t sys_poll(addr_t fds, dword_t nfds, int_t timeout) {
         timeout_ts.tv_nsec = (timeout % 1000) * 1000000;
     }
     int res = poll_wait(poll, poll_event_callback, &context, timeout < 0 ? NULL : &timeout_ts);
+    // poll_wait returns with poll->lock released. Its retained guest fds may
+    // now be the final references, so admit before destroying poll state or
+    // closing those fds; deep close paths must never first wait under fd locks.
+    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     poll_destroy(poll);
     for (unsigned i = 0; i < nfds; i++) {
         if (files[i] != NULL)

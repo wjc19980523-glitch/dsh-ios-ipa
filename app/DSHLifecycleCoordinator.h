@@ -1,0 +1,76 @@
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSUInteger, DSHLifecycleCoordinatorState) {
+    DSHLifecycleCoordinatorStateRunning = 0,
+    DSHLifecycleCoordinatorStateQuiescing,
+    DSHLifecycleCoordinatorStateQuiesced,
+    DSHLifecycleCoordinatorStateResuming,
+};
+
+/// The driver bridges the coordinator to the filesystem gate, socket repair,
+/// Harness, and metadata-only diagnostics. Every method runs on the main queue.
+/// None may wait for a guest thread, transaction, or SQLite mutex.
+@protocol DSHLifecycleDriver <NSObject>
+/// Atomically closes admission and returns the core's quiesce generation.
+- (uint64_t)closeAdmission;
+/// Uses the core's atomic check: no admitted operations, cached transactions,
+/// retained native locks, or uncertain tracking may remain.
+- (BOOL)markQuiescentForGeneration:(uint64_t)generation;
+/// Enters Resuming while admission stays closed throughout socket restoration.
+- (void)beginResume;
+- (void)openAdmission;
+- (void)suspendSockets;
+- (void)resumeSockets;
+- (void)pauseHarnessSupervision;
+- (void)resumeHarnessSupervision;
+/// Cached observations only; never inspect SQLite or acquire a host file lock.
+- (NSDictionary<NSString *, id> *)diagnosticSnapshot;
+/// details includes wait_ms, cycle, core_generation, and the cached snapshot.
+- (void)recordLifecycleEvent:(NSString *)event details:(NSDictionary<NSString *, id> *)details;
+@end
+
+/// UIKit's background task is a finite opportunity to finish already admitted
+/// work. Tests supply this interface without asking UIKit to enter background.
+@protocol DSHLifecycleBackgroundTasks <NSObject>
+/// NSUIntegerMax means that UIKit denied the request.
+- (NSUInteger)beginTaskWithName:(NSString *)name expirationHandler:(dispatch_block_t)expiration;
+- (void)endTask:(NSUInteger)identifier;
+@end
+
+typedef void (^DSHLifecycleScheduler)(NSTimeInterval delay, dispatch_block_t action);
+typedef NSTimeInterval (^DSHLifecycleClock)(void);
+
+@interface DSHLifecycleCoordinator : NSObject
+
+- (instancetype)initWithDriver:(id<DSHLifecycleDriver>)driver;
+- (instancetype)initWithDriver:(id<DSHLifecycleDriver>)driver
+                backgroundTasks:(id<DSHLifecycleBackgroundTasks>)backgroundTasks
+                      scheduler:(DSHLifecycleScheduler)scheduler
+                          clock:(DSHLifecycleClock)clock NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+
+@property (nonatomic, readonly) DSHLifecycleCoordinatorState state;
+/// Local cycle identity; foregrounding invalidates all old polls and expiry callbacks.
+@property (nonatomic, readonly) uint64_t generation;
+@property (nonatomic, readonly) uint64_t coreGeneration;
+@property (nonatomic, readonly) NSTimeInterval lastQuiesceWaitDuration;
+/// Default 0.05 seconds. A poll only reads cached state and attempts the atomic mark.
+@property (nonatomic) NSTimeInterval pollInterval;
+
+/// Duplicate notifications in a background cycle have no effect.
+- (void)handleAppBackground;
+/// Restores sockets under the closed gate, then opens it and resumes supervision.
+- (void)handleAppForeground;
+/// Equivalent spelling for callers that already use handleAppResume.
+- (void)handleAppResume;
+
+/// Native main-thread work must not enter the closed filesystem gate. Runs
+/// immediately while Running; otherwise preserves the action until a resume
+/// has opened admission and resumed Harness supervision. Each action runs once.
+- (void)performWhenRunning:(dispatch_block_t)action;
+
+@end
+
+NS_ASSUME_NONNULL_END

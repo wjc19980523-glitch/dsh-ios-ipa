@@ -19,6 +19,10 @@
 #import "DSHCapability.h"
 #import <HealthKit/HealthKit.h>
 #import "DSHMockLLMServer.h"
+#import "DSHAppLifecycle.h"
+#import "DSHLifecycleCoordinator.h"
+#import "DSHLifecycleDiagnostics.h"
+#include "../../ish-arm64/fs/dsh-lifecycle.h"
 
 @interface DSHGuestIntegrationTests : XCTestCase
 @end
@@ -115,6 +119,54 @@
     }] resume];
     [self waitForExpectations:@[fetched] timeout:30];
     [session finishTasksAndInvalidate];
+}
+
+// Runs the production gate, coordinator, socket snapshot/restore and health
+// probe against the real guest. UIKit itself remains foreground in Simulator;
+// suspension by RunningBoard still requires the Build 25 iPad test matrix.
+- (void)testRealGuestQuiescesAndResumesWithoutRelaunch {
+    if (![self waitForReady]) return;
+    DSHHarness *h = DSHHarness.shared;
+    DSHLifecycleCoordinator *coordinator = DSHAppLifecycle.sharedCoordinator;
+    int pid = h.guestPid;
+    NSUInteger restarts = h.restartCount;
+    NSUInteger authentication = h.authenticationGeneration;
+    @try {
+        for (NSUInteger cycle = 0; cycle < 3; cycle++) {
+            [coordinator handleAppBackground];
+            [coordinator handleAppBackground];
+            XCTestExpectation *drained = [self expectationForPredicate:
+                [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+                    return coordinator.state == DSHLifecycleCoordinatorStateQuiesced;
+                }] evaluatedWithObject:coordinator handler:nil];
+            [self waitForExpectations:@[drained] timeout:20];
+            struct dsh_lifecycle_snapshot snapshot;
+            dsh_lifecycle_get_snapshot(&snapshot);
+            XCTAssertEqual(snapshot.state, DSH_LIFECYCLE_QUIESCENT, @"Drain evidence: %@",
+                           [DSHLifecycleDiagnostics snapshotForHarness:h event:@"integrationDrain"]);
+            XCTAssertEqual(snapshot.active_operations, 0u);
+            XCTAssertEqual(snapshot.active_read_transactions + snapshot.active_write_transactions +
+                           snapshot.active_deferred_transactions, 0u);
+            XCTAssertEqual(snapshot.active_native_flocks, 0u);
+            XCTAssertEqual(snapshot.recovery_blocked_connections, 0u);
+
+            [coordinator handleAppForeground];
+            [coordinator handleAppForeground];
+            XCTestExpectation *healthy = [self expectationWithDescription:@"same guest answers after restore"];
+            [h verifyAliveWithCompletion:^(BOOL alive) {
+                XCTAssertTrue(alive);
+                [healthy fulfill];
+            }];
+            [self waitForExpectations:@[healthy] timeout:60];
+            XCTAssertEqual(h.guestPid, pid);
+            XCTAssertEqual(h.restartCount, restarts);
+            XCTAssertEqual(h.authenticationGeneration, authentication);
+        }
+    } @finally {
+        // A failed drain assertion must not leave later integration tests
+        // parked behind a closed gate.
+        [coordinator handleAppForeground];
+    }
 }
 
 - (void)testGuestSelfTestPasses {

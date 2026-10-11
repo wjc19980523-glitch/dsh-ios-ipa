@@ -52,6 +52,28 @@ on:
       - "scripts/report-xctests.py"
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
+      - "tests/lifecycle-test.c"
+      - "tests/sqlite-lifecycle-test.c"
+      - "tests/fakefs-db-failure-test.c"
+      - "tests/fakefs-db-init-test.c"
+      - "tests/fakefs-mount-recovery-test.c"
+      - "tests/fakefs-umount-failure-test.c"
+      - "tests/fakefs-db-failure-test.sh"
+      - "tests/fakefs-db-init-test.c"
+      - "tests/legacy-fakefs-wrapper-test.sh"
+      - "tests/legacy-fakefs-wrapper-test.c"
+      - "tests/fakefs-quiesce-test.c"
+      - "tests/fakefs-quiesce-test.sh"
+      - "tests/sqlite-fault-vfs.h"
+      - "tests/lifecycle-admission-test.c"
+      - "tests/lifecycle-admission-test.sh"
+      - "tests/lifecycle-poll-cleanup-test.c"
+      - "tests/lifecycle-poll-wait-test.c"
+      - "tests/lifecycle-poll-wait-test.sh"
+      - "tests/lifecycle-sigsuspend-test.c"
+      - "tests/lifecycle-sigsuspend-test.sh"
+      - "tests/lifecycle-tty-read-test.c"
+      - "tests/lifecycle-tty-read-test.sh"
       - "tests/guest-exit-test.c"
       - "tests/guest-exit-test.sh"
       - "tests/futex-idle-test.c"
@@ -342,8 +364,6 @@ jobs:
   # Runs as its own job so a guest regression cannot invalidate a good IPA.
   verify-guest:
     name: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
-    needs: build-and-test
-    if: always()
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 150
 
@@ -394,6 +414,15 @@ jobs:
       - name: Native lifecycle regression tests
         run: bash tests/lifecycle-test.sh
 
+      - name: Real SQLite and fakefs fault injection regressions
+        run: bash tests/fakefs-db-failure-test.sh
+
+      - name: Legacy fakefs API error propagation regressions
+        run: bash tests/legacy-fakefs-wrapper-test.sh
+
+      - name: Real SQLite background transaction boundaries
+        run: bash tests/fakefs-quiesce-test.sh
+
       - name: XCTest runner count and exit-code regressions
         run: python3 tests/xctest-runner-test.py
 
@@ -405,6 +434,15 @@ jobs:
 
       - name: Idle workers preserve a healthy guest (production futex + pthreads)
         run: bash tests/futex-idle-test.sh
+
+      - name: Lifecycle admission regression (real pthreads + native flock)
+        run: bash tests/lifecycle-admission-test.sh
+
+      - name: Signal wait quiescence regression (production sigsuspend + pthreads)
+        run: bash tests/lifecycle-sigsuspend-test.sh
+
+      - name: TTY read quiescence regression (production read + pthreads + fd reuse)
+        run: bash tests/lifecycle-tty-read-test.sh
 
       - name: Project test suites (script contract + emulator regressions + guest integration)
         run: |

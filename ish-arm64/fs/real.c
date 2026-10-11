@@ -295,7 +295,9 @@ off_t realfs_lseek(struct fd *fd, off_t offset, int whence) {
 }
 
 int realfs_poll(struct fd *fd) {
-    DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
+    // Called with poll_->lock held. This is a nonblocking readiness query,
+    // with no file mutation or acquired file lock; waiting for admission here
+    // would block an admitted fd close while it removes its poll registration.
     struct pollfd p = {.fd = fd->real_fd, .events = POLLPRI};
     // prevent POLLNVAL
     int flags = fcntl(fd->real_fd, F_GETFL, 0);
@@ -511,23 +513,32 @@ int realfs_symlink(struct mount *mount, const char *target, const char *link) {
     return err;
 }
 
-int realfs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ UNUSED(dev)) {
+int realfs_mknod_with_effect(struct mount *mount, const char *path, mode_t_ mode,
+        dev_t_ UNUSED(dev), bool *host_created) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
+    if (host_created != NULL) *host_created = false;
     int err;
     if (S_ISFIFO(mode)) {
         lock_fchdir(mount->root_fd);
         err = mkfifo(fix_path(path), mode & ~S_IFMT);
+        if (err == 0 && host_created != NULL) *host_created = true;
         unlock_fchdir();
     } else if (S_ISREG(mode)) {
         err = openat(mount->root_fd, fix_path(path), O_CREAT|O_EXCL|O_RDONLY, mode & ~S_IFMT);
-        if (err >= 0)
+        if (err >= 0) {
+            if (host_created != NULL) *host_created = true;
             err = close(err);
+        }
     } else {
         return _EPERM;
     }
     if (err < 0)
         return errno_map();
     return err;
+}
+
+int realfs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ dev) {
+    return realfs_mknod_with_effect(mount, path, mode, dev, NULL);
 }
 
 int realfs_truncate(struct mount *mount, const char *path, off_t_ size) {

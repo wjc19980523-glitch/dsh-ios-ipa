@@ -126,6 +126,9 @@ struct fs_ops {
     int magic;
 
     int (*mount)(struct mount *mount);
+    /* 0: teardown succeeded. Negative errno: teardown is incomplete, retain
+     * the operational mount. Positive errno: teardown is irreversible; detach
+     * and free the mount, but report the corresponding negative error. */
     int (*umount)(struct mount *mount);
     int (*statfs)(struct mount *mount, struct statfsbuf *stat);
 

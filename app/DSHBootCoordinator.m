@@ -20,9 +20,12 @@
 #import "DSHActivityCapability.h"
 #import "DSHStartupMetrics.h"
 #import "DSHLifecycleDiagnostics.h"
+#import "DSHAppLifecycle.h"
+#import "DSHLifecycleCoordinator.h"
 #import "AppDelegate.h"
 #import "ISHShellExecutor.h"
 #import <UIKit/UIKit.h>
+#include "../ish-arm64/fs/dsh-lifecycle.h"
 
 NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidChangeNotification";
 
@@ -83,6 +86,9 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
     AppDelegate *app = (AppDelegate *) UIApplication.sharedApplication.delegate;
 
     dispatch_async(self.queue, ^{
+        // Native import/mount has no syscall dispatcher. Admit its complete
+        // operation before Foundation or fakefs can change any host file.
+        DSH_LIFECYCLE_SCOPE(-1);
         NSDate *t0 = NSDate.date;
         // 1. Import the bundled image when this build ships a new one. On a
         //    fresh install this is where the 95 MB root filesystem lands.
@@ -121,6 +127,7 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
 
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{
+            [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{
             if (upgrader.pendingMigrationRoot != nil) {
                 [self setPhase:DSHBootPhaseMigratingData message:@"Moving your sessions to the new image…" progress:-1];
                 [upgrader migrateIfNeededWithCompletion:^(BOOL migrated, NSError *error) {
@@ -131,6 +138,7 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
             } else {
                 [self finishReady];
             }
+            }];
         });
     });
 }

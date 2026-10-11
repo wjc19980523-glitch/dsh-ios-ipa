@@ -13,8 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface FileProviderItem : NSObject <NSFileProviderItem>
 
 - (instancetype)initWithIdentifier:(NSFileProviderItemIdentifier)identifier mount:(struct fakefs_mount *)mount error:(NSError *_Nullable *)err;
-- (void)loadToURL:(NSURL *)url;
-- (void)saveFromURL:(NSURL *)url;
+- (BOOL)loadToURL:(NSURL *)url error:(NSError *_Nullable *)error;
+- (BOOL)saveFromURL:(NSURL *)url error:(NSError *_Nullable *)error;
 - (int)openNewFDWithError:(NSError *_Nullable *)err;
 
 @property (readonly) NSString *path;

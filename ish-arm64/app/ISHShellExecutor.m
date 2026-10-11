@@ -15,6 +15,7 @@
 #include "fs/devices.h"
 #include "fs/real.h"
 #include "fs/sockrestart.h"
+#include "fs/dsh-lifecycle.h"
 
 #pragma mark - Result Implementation
 
@@ -131,6 +132,14 @@ static dispatch_once_t _onceToken;
              environment:(NSDictionary<NSString *, NSString *> *)environment
             lineCallback:(ISHShellLineCallback)lineCallback
               completion:(ISHShellCompletionCallback)completion {
+
+    struct dsh_lifecycle_scope admission __attribute__((cleanup(dsh_lifecycle_scope_end))) =
+        {dsh_lifecycle_try_operation_begin("native_guest_launch", current ? current->pid : -1)};
+    if (!admission.token) {
+        // UIKit must remain able to reopen admission on foreground. Callers
+        // already handle a negative launch result; no host/guest work began.
+        return ISHShellExecutorErrorCancelled;
+    }
 
     ISHShellExecutionContext *ctx = [[ISHShellExecutionContext alloc] init];
     ctx.lineCallback = lineCallback;

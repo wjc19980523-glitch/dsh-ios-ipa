@@ -9,13 +9,13 @@
     struct dsh_lifecycle_snapshot s;
     dsh_lifecycle_get_snapshot(&s);
     NSMutableArray *transactions = [NSMutableArray new], *operations = [NSMutableArray new], *flocks = [NSMutableArray new];
-    uint64_t oldest = 0;
     for (unsigned i = 0; i < s.transaction_count; i++) {
         struct dsh_lifecycle_transaction_snapshot t = s.transactions[i];
-        oldest = MAX(oldest, t.age_ns);
         [transactions addObject:@{@"connection": @(t.connection_id), @"guest_pid": @(t.owner.guest_pid),
             @"thread": @(t.owner.thread_id), @"mode": @(t.mode), @"age_ms": @(t.age_ns / 1000000),
             @"cached_autocommit": @(t.cached_autocommit), @"sqlite_result": @(t.cached_result),
+            @"recovery_required": @(t.recovery_required),
+            @"recovery_result": @(t.recovery_result),
             @"observed_monotonic_ns": @(t.observed_monotonic_ns), @"phase": @(t.phase)}];
     }
     for (unsigned i = 0; i < s.operation_count; i++) {
@@ -37,14 +37,16 @@
         @"suspend_count": @(ISHShellExecutor.lifecycleSuspendCount), @"resume_count": @(ISHShellExecutor.lifecycleResumeCount),
         @"filesystem_state": @(s.state), @"quiescing": @(s.state == DSH_LIFECYCLE_QUIESCING),
         @"quiesce_generation": @(s.generation), @"sampled_monotonic_ns": @(s.sampled_monotonic_ns),
+        @"active_operations": @(s.active_operations), @"paused_tty_reads": @(s.paused_fileless_operations),
         @"active_fakefs_operations": @(s.active_fakefs_operations),
         @"active_fakefs_operations_complete": @(s.tracking_overflows == 0),
         @"fakefs_operation_counting": @"covered fakefs_ entry scopes; includes nesting, not unique syscalls",
-        @"active_operations": @(s.active_operations), @"active_transactions": @(s.active_deferred_transactions + s.active_read_transactions + s.active_write_transactions),
+        @"active_transactions": @(s.active_deferred_transactions + s.active_read_transactions + s.active_write_transactions),
         @"read_transactions": @(s.active_read_transactions), @"write_transactions": @(s.active_write_transactions),
-        @"deferred_transactions": @(s.active_deferred_transactions), @"oldest_transaction_ms": @(oldest / 1000000),
+        @"deferred_transactions": @(s.active_deferred_transactions), @"oldest_transaction_ms": @(s.oldest_transaction_age_ns / 1000000),
         @"native_flock_count": @(s.active_native_flocks), @"tracking_overflows": @(s.tracking_overflows),
         @"sqlite_busy_observations": @(s.sqlite_busy_observations), @"sqlite_error_observations": @(s.sqlite_error_observations),
+        @"recovery_blocked_connections": @(s.recovery_blocked_connections),
         @"last_sqlite_result": @(s.last_sqlite_result), @"native_close_failures": @(s.native_close_failures),
         @"sqlite_observation": @"cached on SQL owner thread; snapshot never calls SQLite",
         @"operations": operations, @"transactions": transactions, @"native_flocks": flocks};

@@ -15,6 +15,10 @@ int realfs_rmdir(struct mount *mount, const char *path);
 int realfs_rename(struct mount *mount, const char *src, const char *dst);
 int realfs_symlink(struct mount *mount, const char *target, const char *link);
 int realfs_mknod(struct mount *mount, const char *path, mode_t_ mode, dev_t_ UNUSED(dev));
+/* Reports successful host creation even when its subsequent close fails.
+ * A metadata transaction must not roll back on that post-create error. */
+int realfs_mknod_with_effect(struct mount *mount, const char *path, mode_t_ mode,
+        dev_t_ dev, bool *host_created);
 
 int realfs_stat(struct mount *mount, const char *path, struct statbuf *fake_stat);
 int realfs_statfs(struct mount *mount, struct statfsbuf *stat);

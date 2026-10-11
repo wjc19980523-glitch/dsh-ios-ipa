@@ -150,6 +150,8 @@ struct tty {
 
 // if blocking, may return _EINTR, otherwise, may return _EAGAIN
 ssize_t tty_input(struct tty *tty, const char *input, size_t len, bool blocking);
+// Caller keeps tty alive and holds no tty/pids lock. Updates under tty->lock,
+// releases it, then signals the snapshotted foreground group without tty access.
 void tty_set_winsize(struct tty *tty, struct winsize_ winsize);
 void tty_hangup(struct tty *tty);
 

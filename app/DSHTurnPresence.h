@@ -7,16 +7,8 @@
 //  else. Today that is silent: the user switches away mid-turn, comes back, and
 //  finds a conversation that stopped without saying why.
 //
-//  This does two things about it, neither of which is the real fix (turns that
-//  resume where they left off, which is a change to the harness rather than to
-//  the app):
-//
-//    - Asks iOS for the extra seconds it grants on the way out, so a step that
-//      is already in flight — a capability call, an HTTP response being written
-//      — finishes instead of being cut mid-write.
-//    - Notices that a turn was in progress when the app left, and says so on
-//      the way back, at the moment the user is looking at the stall and
-//      wondering.
+//  Persists whether a turn was in progress and explains an interruption on
+//  return. DSHLifecycleCoordinator owns the finite background drain task.
 //
 
 #import <Foundation/Foundation.h>

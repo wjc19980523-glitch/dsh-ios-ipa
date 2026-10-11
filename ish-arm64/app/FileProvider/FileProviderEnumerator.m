@@ -11,6 +11,7 @@
 #import "FileProviderEnumerator.h"
 #import "FileProviderItem.h"
 #import "NSError+ISHErrno.h"
+#import "FileProviderDB.h"
 #include "fs/fake-db.h"
 
 @interface FileProviderEnumerator ()
@@ -62,9 +63,19 @@
         if (strcmp(dirent->d_name, "..") == 0) {
             childIdent = _item.parentItemIdentifier;
         } else if (strcmp(dirent->d_name, ".") != 0) {
-            db_begin_read(&_item.mount->db);
+            int result = db_begin_read(&_item.mount->db);
+            if (!FileProviderDBResult(result, &error)) {
+                [observer finishEnumeratingWithError:error];
+                closedir(dir);
+                return;
+            }
             inode_t inode = path_get_inode(&_item.mount->db, [path stringByAppendingFormat:@"/%@", [NSString stringWithUTF8String:dirent->d_name]].fileSystemRepresentation);
-            db_commit(&_item.mount->db);
+            result = FileProviderDBFinishRead(&_item.mount->db, SQLITE_OK);
+            if (!FileProviderDBResult(result, &error)) {
+                [observer finishEnumeratingWithError:error];
+                closedir(dir);
+                return;
+            }
             if (inode == 0) {
                 NSLog(@"could not find %s in database, assuming nonexistent", dirent->d_name);
                 continue;

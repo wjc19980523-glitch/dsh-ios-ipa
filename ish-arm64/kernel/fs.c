@@ -10,6 +10,8 @@
 #include "fs/path.h"
 #include "fs/dev.h"
 #include "fs/real.h"
+#include "fs/tty.h"
+#include "fs/dsh-lifecycle.h"
 
 static struct fd *at_fd(fd_t f) {
     if (f == AT_FDCWD_)
@@ -214,22 +216,31 @@ dword_t sys_mknod(addr_t path_addr, mode_t_ mode, dev_t_ dev) {
 }
 
 static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
-    struct fd *fd = f_get(fd_no);
+    struct fd *fd = f_get_retained(fd_no);
     if (fd == NULL)
         return _EBADF;
-    if (S_ISDIR(fd->type))
-        return _EISDIR;
-
-    ssize_t res;
+    ssize_t res = _EBADF;
+    if (S_ISDIR(fd->type)) {
+        res = _EISDIR;
+        goto out;
+    }
     if (fd->ops->read) {
+        // This stream-read boundary holds no fd/tty/mm/pids lock. Retaining the
+        // same open description pins tty lifetime even if its number is reused.
+        // Known tty_read only waits/consumes TTY memory into this private buffer;
+        // restore the original outer permit after its locks are released, before
+        // releasing the fd or exposing data to guest memory. All other fd types,
+        // nested scopes and uncertain lock owners retain normal admission.
+        uint64_t paused = 0;
+        if (fd->ops == &tty_dev.fd && fd->tty != NULL)
+            paused = dsh_lifecycle_pause_tty_read();
         res = fd->ops->read(fd, buf, size);
+        dsh_lifecycle_resume_tty_read(paused);
     } else if (fd->ops->pread) {
         res = fd->ops->pread(fd, buf, size, fd->offset);
         if (res > 0) {
             fd->ops->lseek(fd, res, LSEEK_CUR);
         }
-    } else {
-        return _EBADF;
     }
 
     if (res >= 0) {
@@ -237,6 +248,8 @@ static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
         if (print_size > 100) print_size = 100;
         STRACE(" \"%.*s\"", print_size, buf);
     }
+out:
+    fd_close(fd);
     return res;
 }
 

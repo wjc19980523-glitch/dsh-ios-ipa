@@ -18,7 +18,6 @@ static const NSTimeInterval kWorkingWindow = 20;
 
 @implementation DSHTurnPresence {
     NSDate *_lastActivity;
-    UIBackgroundTaskIdentifier _backgroundTask;
     BOOL _started;
 }
 
@@ -30,12 +29,6 @@ static const NSTimeInterval kWorkingWindow = 20;
 }
 
 + (NSTimeInterval)workingWindow { return kWorkingWindow; }
-
-- (instancetype)init {
-    if (self = [super init])
-        _backgroundTask = UIBackgroundTaskInvalid;
-    return self;
-}
 
 - (void)start {
     if (_started) return;
@@ -74,19 +67,11 @@ static const NSTimeInterval kWorkingWindow = 20;
     _interruptedAt = NSDate.date;
     [NSUserDefaults.standardUserDefaults setObject:_interruptedAt forKey:kInterruptedAtKey];
 
-    // Whatever iOS is willing to give — usually around half a minute. It buys a
-    // step that is already in flight, not a turn: an assertion cannot keep an
-    // agent running in the background, and pretending otherwise (silent audio
-    // and its relatives) is how an app gets removed rather than shipped.
-    if (_backgroundTask != UIBackgroundTaskInvalid) return;
-    __weak typeof(self) weakSelf = self;
-    _backgroundTask = [UIApplication.sharedApplication
-        beginBackgroundTaskWithName:@"dsh.turn-in-flight"
-                  expirationHandler:^{ [weakSelf endBackgroundTask]; }];
+    // The lifecycle coordinator owns the one finite filesystem-drain task.
+    // Presence only persists the recovery notice; it cannot extend the turn.
 }
 
 - (void)didBecomeActive {
-    [self endBackgroundTask];
     if (!_leftMidTurn) return;
     _leftMidTurn = NO;
     [NSUserDefaults.standardUserDefaults removeObjectForKey:kInterruptedAtKey];
@@ -105,13 +90,6 @@ static const NSTimeInterval kWorkingWindow = 20;
     _leftMidTurn = NO;
     _interruptedAt = nil;
     [NSUserDefaults.standardUserDefaults removeObjectForKey:kInterruptedAtKey];
-    [self endBackgroundTask];
-}
-
-- (void)endBackgroundTask {
-    if (_backgroundTask == UIBackgroundTaskInvalid) return;
-    [UIApplication.sharedApplication endBackgroundTask:_backgroundTask];
-    _backgroundTask = UIBackgroundTaskInvalid;
 }
 
 @end

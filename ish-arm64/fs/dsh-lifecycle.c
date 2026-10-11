@@ -13,6 +13,7 @@
 
 struct operation_record {
     bool used;
+    bool paused_fileless;
     struct dsh_lifecycle_operation_snapshot value;
 };
 struct connection_record {
@@ -26,14 +27,18 @@ struct flock_record {
 
 /* No I/O, SQLite calls, guest locks, callbacks or allocations while held. */
 static pthread_mutex_t diagnostic_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t admission_changed = PTHREAD_COND_INITIALIZER;
+static bool admission_enabled;
 static struct operation_record operations[OPERATION_CAPACITY];
 static struct connection_record connections[CONNECTION_CAPACITY];
 static struct flock_record native_flocks[FLOCK_CAPACITY];
 static enum dsh_lifecycle_state lifecycle_state = DSH_LIFECYCLE_RUNNING;
 static uint64_t lifecycle_generation;
+static uint64_t last_resume_monotonic_ns;
 static uint64_t next_id = 1;
 static uint64_t next_thread_id = 1;
 static uint64_t active_operations;
+static uint64_t paused_fileless_operations;
 static uint64_t open_connections;
 static uint64_t tracking_overflows;
 static uint64_t operations_after_quiesce;
@@ -44,6 +49,7 @@ static int last_sqlite_result;
 static _Thread_local uint64_t thread_id;
 static _Thread_local unsigned operation_depth;
 static _Thread_local int operation_guest_pid = -1;
+static _Thread_local uint64_t paused_tty_token;
 
 static uint64_t monotonic_ns(void) {
     struct timespec ts;
@@ -77,10 +83,34 @@ static struct connection_record *find_connection(uint64_t id) {
     return NULL;
 }
 
-uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid) {
-    int saved_errno = errno;
+/* A pre-existing flock critical section may span multiple guest syscalls.
+ * Its known owner must be able to finish the protected work and unlock; parking
+ * it would itself preserve the host lock. Such work prevents quiescence until
+ * the actual unlock/close is observed. We never release/recreate those locks.
+ */
+static bool owns_existing_critical_section(int guest_pid) {
+    for (unsigned i = 0; i < FLOCK_CAPACITY; i++) {
+        if (!native_flocks[i].key) continue;
+        struct dsh_lifecycle_owner o = native_flocks[i].value.owner;
+        if ((thread_id && o.thread_id == thread_id) || (guest_pid >= 0 && o.guest_pid == guest_pid)) return true;
+    }
+    for (unsigned i = 0; i < CONNECTION_CAPACITY; i++) {
+        if (!connections[i].used) continue;
+        struct dsh_lifecycle_transaction_snapshot *t = &connections[i].value;
+        if (thread_id && t->owner.thread_id == thread_id &&
+                (t->recovery_required || !t->cached_autocommit || t->mode != DSH_LIFECYCLE_TXN_DEFERRED)) return true;
+    }
+    return false;
+}
+
+static void await_admission(int guest_pid) {
+    while (admission_enabled && lifecycle_state != DSH_LIFECYCLE_RUNNING &&
+            operation_depth == 0 && !owns_existing_critical_section(guest_pid))
+        pthread_cond_wait(&admission_changed, &diagnostic_lock);
+}
+
+static uint64_t record_operation_begin(const char *name, int guest_pid) {
     uint64_t now = monotonic_ns();
-    pthread_mutex_lock(&diagnostic_lock);
     uint64_t token = next_id++;
     if (operation_depth == 0) operation_guest_pid = guest_pid;
     operation_depth++;
@@ -90,6 +120,7 @@ uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid) {
     for (i = 0; i < OPERATION_CAPACITY; i++) {
         if (operations[i].used) continue;
         operations[i].used = true;
+        operations[i].paused_fileless = false;
         operations[i].value = (struct dsh_lifecycle_operation_snapshot) {
             .id = token,
             .owner = owner(guest_pid),
@@ -103,6 +134,27 @@ uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid) {
         tracking_overflows++;
         token |= UNTRACKED_TOKEN;
     }
+    return token;
+}
+
+uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    await_admission(guest_pid);
+    uint64_t token = record_operation_begin(name, guest_pid);
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+    return token;
+}
+
+uint64_t dsh_lifecycle_try_operation_begin(const char *name, int guest_pid) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    uint64_t token = 0;
+    // Native launch callers must never create fresh work merely because their
+    // thread or init PID happens to own an unrelated old critical section.
+    if (!admission_enabled || lifecycle_state == DSH_LIFECYCLE_RUNNING || operation_depth)
+        token = record_operation_begin(name, guest_pid);
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
     return token;
@@ -112,14 +164,21 @@ void dsh_lifecycle_operation_end(uint64_t token) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
     bool found = (token & UNTRACKED_TOKEN) != 0;
+    bool paused = false;
     for (unsigned i = 0; !found && i < OPERATION_CAPACITY; i++) {
         if (!operations[i].used || operations[i].value.id != token) continue;
+        paused = operations[i].paused_fileless;
         operations[i].used = false;
         found = true;
     }
     if (found) {
-        if (active_operations > 0) active_operations--;
-        if (operation_depth > 0) operation_depth--;
+        if (paused) {
+            if (paused_fileless_operations > 0) paused_fileless_operations--;
+            if (paused_tty_token == token) paused_tty_token = 0;
+        } else {
+            if (active_operations > 0) active_operations--;
+            if (operation_depth > 0) operation_depth--;
+        }
         if (operation_depth == 0) operation_guest_pid = -1;
     }
     pthread_mutex_unlock(&diagnostic_lock);
@@ -128,6 +187,58 @@ void dsh_lifecycle_operation_end(uint64_t token) {
 
 unsigned dsh_lifecycle_operation_depth(void) {
     return operation_depth;
+}
+
+uint64_t dsh_lifecycle_pause_tty_read(void) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    uint64_t token = 0;
+    if (operation_depth == 1 && !paused_tty_token && !tracking_overflows &&
+            !native_close_failures && !owns_existing_critical_section(operation_guest_pid)) {
+        for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
+            struct operation_record *record = &operations[i];
+            if (!record->used || record->paused_fileless ||
+                    record->value.owner.thread_id != thread_id ||
+                    record->value.nesting_depth != 1) continue;
+            record->paused_fileless = true;
+            token = paused_tty_token = record->value.id;
+            active_operations--;
+            paused_fileless_operations++;
+            operation_depth = 0;
+            operation_guest_pid = -1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+    return token;
+}
+
+void dsh_lifecycle_resume_tty_read(uint64_t token) {
+    int saved_errno = errno;
+    if (!token) return;
+    pthread_mutex_lock(&diagnostic_lock);
+    if (paused_tty_token == token && operation_depth == 0) {
+        // tty_read has returned with all of its locks released. Unlike a new
+        // critical-section owner, a fileless reader has no work to drain and
+        // must wait through both Quiescent and Resuming before guest copyout.
+        while (admission_enabled && lifecycle_state != DSH_LIFECYCLE_RUNNING)
+            pthread_cond_wait(&admission_changed, &diagnostic_lock);
+        for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
+            struct operation_record *record = &operations[i];
+            if (!record->used || !record->paused_fileless || record->value.id != token) continue;
+            record->paused_fileless = false;
+            record->value.started_monotonic_ns = monotonic_ns();
+            operation_guest_pid = record->value.owner.guest_pid;
+            operation_depth = 1;
+            active_operations++;
+            paused_fileless_operations--;
+            paused_tty_token = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
 }
 
 uint64_t dsh_lifecycle_sqlite_open(int guest_pid) {
@@ -265,6 +376,14 @@ void dsh_lifecycle_native_flock_close_failed(const void *key) {
     errno = saved_errno;
 }
 
+void dsh_lifecycle_native_close_uncertain(void) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    native_close_failures++;
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
 void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     int saved_errno = errno;
     if (snapshot == NULL) return;
@@ -274,7 +393,9 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     snapshot->state = lifecycle_state;
     snapshot->generation = lifecycle_generation;
     snapshot->sampled_monotonic_ns = now;
+    snapshot->last_resume_monotonic_ns = last_resume_monotonic_ns;
     snapshot->active_operations = active_operations;
+    snapshot->paused_fileless_operations = paused_fileless_operations;
     snapshot->open_connections = open_connections;
     snapshot->tracking_overflows = tracking_overflows;
     snapshot->operations_after_quiesce = operations_after_quiesce;
@@ -283,7 +404,7 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     snapshot->native_close_failures = native_close_failures;
     snapshot->last_sqlite_result = last_sqlite_result;
     for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
-        if (!operations[i].used) continue;
+        if (!operations[i].used || operations[i].paused_fileless) continue;
         if (strncmp(operations[i].value.name, "fakefs_", 7) == 0)
             snapshot->active_fakefs_operations++;
         if (snapshot->operation_count == DSH_LIFECYCLE_SNAPSHOT_ITEMS) continue;
@@ -293,17 +414,24 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
         value->age_ns = now >= value->started_monotonic_ns ? now - value->started_monotonic_ns : 0;
     }
     for (unsigned i = 0; i < CONNECTION_CAPACITY; i++) {
-        if (!connections[i].used || (connections[i].value.cached_autocommit &&
-                    connections[i].value.mode == DSH_LIFECYCLE_TXN_DEFERRED)) continue;
+        if (!connections[i].used) continue;
         struct dsh_lifecycle_transaction_snapshot *cached = &connections[i].value;
-        if (cached->mode == DSH_LIFECYCLE_TXN_WRITE) snapshot->active_write_transactions++;
-        else if (cached->mode == DSH_LIFECYCLE_TXN_READ) snapshot->active_read_transactions++;
-        else snapshot->active_deferred_transactions++;
+        if (cached->recovery_required) snapshot->recovery_blocked_connections++;
+        bool active = !cached->cached_autocommit || cached->mode != DSH_LIFECYCLE_TXN_DEFERRED;
+        if (!active && !cached->recovery_required) continue;
+        if (active) {
+            if (cached->mode == DSH_LIFECYCLE_TXN_WRITE) snapshot->active_write_transactions++;
+            else if (cached->mode == DSH_LIFECYCLE_TXN_READ) snapshot->active_read_transactions++;
+            else snapshot->active_deferred_transactions++;
+            uint64_t age = now >= cached->started_monotonic_ns ? now - cached->started_monotonic_ns : 0;
+            if (age > snapshot->oldest_transaction_age_ns) snapshot->oldest_transaction_age_ns = age;
+        }
         if (snapshot->transaction_count == DSH_LIFECYCLE_SNAPSHOT_ITEMS) continue;
         struct dsh_lifecycle_transaction_snapshot *value =
             &snapshot->transactions[snapshot->transaction_count++];
         *value = *cached;
-        value->age_ns = now >= value->started_monotonic_ns ? now - value->started_monotonic_ns : 0;
+        value->age_ns = active && value->started_monotonic_ns && now >= value->started_monotonic_ns
+            ? now - value->started_monotonic_ns : 0;
     }
     for (unsigned i = 0; i < FLOCK_CAPACITY; i++) {
         if (native_flocks[i].key == NULL) continue;
@@ -321,7 +449,7 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
 uint64_t dsh_lifecycle_request_quiesce(void) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
-    if (lifecycle_state == DSH_LIFECYCLE_RUNNING) {
+    if (lifecycle_state == DSH_LIFECYCLE_RUNNING || lifecycle_state == DSH_LIFECYCLE_RESUMING) {
         lifecycle_state = DSH_LIFECYCLE_QUIESCING;
         lifecycle_generation++;
     }
@@ -338,7 +466,7 @@ bool dsh_lifecycle_mark_quiescent(uint64_t generation) {
         generation == lifecycle_generation && active_operations == 0 &&
         tracking_overflows == 0 && native_close_failures == 0;
     for (unsigned i = 0; clean && i < CONNECTION_CAPACITY; i++)
-        if (connections[i].used && (!connections[i].value.cached_autocommit ||
+        if (connections[i].used && (connections[i].value.recovery_required || !connections[i].value.cached_autocommit ||
                     connections[i].value.mode != DSH_LIFECYCLE_TXN_DEFERRED)) clean = false;
     for (unsigned i = 0; clean && i < FLOCK_CAPACITY; i++)
         if (native_flocks[i].key != NULL) clean = false;
@@ -351,8 +479,79 @@ bool dsh_lifecycle_mark_quiescent(uint64_t generation) {
 void dsh_lifecycle_resume(void) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
-    lifecycle_state = DSH_LIFECYCLE_RUNNING;
-    lifecycle_generation++;
+    if (lifecycle_state != DSH_LIFECYCLE_RUNNING) {
+        lifecycle_state = DSH_LIFECYCLE_RUNNING;
+        lifecycle_generation++;
+        last_resume_monotonic_ns = monotonic_ns();
+    }
+    pthread_cond_broadcast(&admission_changed);
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
+void dsh_lifecycle_enable_admission_gate(void) {
+    pthread_mutex_lock(&diagnostic_lock);
+    admission_enabled = true;
+    pthread_mutex_unlock(&diagnostic_lock);
+}
+
+void dsh_lifecycle_begin_resume(void) {
+    pthread_mutex_lock(&diagnostic_lock);
+    if (lifecycle_state != DSH_LIFECYCLE_RUNNING && lifecycle_state != DSH_LIFECYCLE_RESUMING) {
+        lifecycle_state = DSH_LIFECYCLE_RESUMING;
+        lifecycle_generation++;
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+}
+
+void dsh_lifecycle_checkpoint(int guest_pid) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    await_admission(guest_pid);
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
+void dsh_lifecycle_thread_exit(void) {
+    pthread_mutex_lock(&diagnostic_lock);
+    // pthread_exit skips C cleanup attributes. Its outer task cleanup runs only
+    // after do_exit has released fds, so it can retire these operation permits.
+    // SQL/host-lock observations are deliberately retained if not really ended.
+    for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
+        if (operations[i].used && operations[i].value.owner.thread_id == thread_id) {
+            if (operations[i].paused_fileless && paused_fileless_operations > 0)
+                paused_fileless_operations--;
+            operations[i].used = false;
+        }
+    }
+    active_operations = active_operations >= operation_depth ? active_operations - operation_depth : 0;
+    operation_depth = 0;
+    operation_guest_pid = -1;
+    paused_tty_token = 0;
+    pthread_mutex_unlock(&diagnostic_lock);
+}
+
+void dsh_lifecycle_sqlite_recovery_required(uint64_t connection_id, int result) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    struct connection_record *connection = find_connection(connection_id);
+    if (connection) {
+        if (!connection->value.recovery_required) connection->value.recovery_result = result;
+        connection->value.recovery_required = true;
+        connection->value.cached_result = result;
+    } else tracking_overflows++;
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
+void dsh_lifecycle_sqlite_recovery_resolved(uint64_t connection_id) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    struct connection_record *connection = find_connection(connection_id);
+    if (connection && thread_id && connection->value.owner.thread_id == thread_id) {
+        connection->value.recovery_required = false;
+        connection->value.recovery_result = 0;
+    }
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
 }

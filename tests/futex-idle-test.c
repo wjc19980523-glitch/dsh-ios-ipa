@@ -119,6 +119,7 @@ _Noreturn void do_exit_group(int status) {
 
 static void finished(void *unused) {
     (void)unused;
+    dsh_lifecycle_thread_exit();
     assert(pthread_mutex_lock(&control) == 0);
     done = true;
     assert(pthread_cond_broadcast(&changed) == 0);

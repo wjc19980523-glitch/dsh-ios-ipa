@@ -10,6 +10,7 @@
 #include <dirent.h>
 #import "FileProviderExtension.h"
 #import "FileProviderItem.h"
+#import "FileProviderDB.h"
 #include "fs/fake-db.h"
 #include "kernel/errno.h"
 
@@ -43,19 +44,30 @@
     if (self.isRoot) {
         fd = open(_mount->source, O_DIRECTORY | O_RDONLY);
     } else {
-        db_begin_read(&_mount->db);
+        int result = db_begin_read(&_mount->db);
+        if (!FileProviderDBResult(result, error)) return -1;
         sqlite3_stmt *stmt = _mount->db.stmt.path_from_inode;
-        sqlite3_bind_int64(_mount->db.stmt.path_from_inode, 1, _identifier.longLongValue);
-        while (db_exec(&_mount->db, stmt)) {
+        result = sqlite3_bind_int64(stmt, 1, _identifier.longLongValue);
+        int hostError = ENOENT;
+        while (result == SQLITE_OK && (result = db_exec(&_mount->db, stmt)) == SQLITE_ROW) {
             const char *path = (const char *) sqlite3_column_text(stmt, 0);
             fd = openat(_mount->root_fd, fix_path(path), O_RDWR);
             if (fd == -1 && errno == EISDIR)
                 fd = openat(_mount->root_fd, fix_path(path), O_RDONLY);
-            if (fd == -1 && errno != ENOENT)
-                break;
+            if (fd >= 0) break;
+            hostError = errno;
+            if (hostError != ENOENT) break;
+            result = SQLITE_OK;
         }
-        db_reset(&_mount->db, stmt);
-        db_commit(&_mount->db);
+        int reset = db_reset(&_mount->db, stmt);
+        if ((result == SQLITE_OK || result == SQLITE_ROW || result == SQLITE_DONE) && reset != SQLITE_OK)
+            result = reset;
+        result = FileProviderDBFinishRead(&_mount->db, result);
+        if (!FileProviderDBResult(result, error)) {
+            if (fd >= 0) close(fd);
+            return -1;
+        }
+        if (fd < 0) errno = hostError;
     }
     if (fd == -1) {
         if (error != nil) {
@@ -64,7 +76,7 @@
             else
                 *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
         }
-        NSLog(@"opening %@ failed: %@", self.identifier, *error);
+        NSLog(@"opening %@ failed (%d)", self.identifier, errno);
         return -1;
     }
     return fd;
@@ -87,12 +99,14 @@
 
 - (struct ish_stat)ishStat {
     struct ish_stat stat = {};
-    db_begin_read(&_mount->db);
+    int result = db_begin_read(&_mount->db);
+    if (!FileProviderDBResult(result, nil)) return stat;
     inode_t inode = _identifier.longLongValue;
     if ([_identifier isEqualToString:NSFileProviderRootContainerItemIdentifier])
         inode = path_get_inode(&_mount->db, "");
     inode_read_stat_or_die(&_mount->db, inode, &stat);
-    db_commit(&_mount->db);
+    result = FileProviderDBFinishRead(&_mount->db, SQLITE_OK);
+    if (!FileProviderDBResult(result, nil)) memset(&stat, 0, sizeof(stat));
     return stat;
 }
 - (struct stat)realStat {
@@ -115,10 +129,11 @@
     NSString *parentPath = self.path.stringByDeletingLastPathComponent;
     if ([parentPath isEqualToString:@"/"])
         return NSFileProviderRootContainerItemIdentifier;
-    db_begin_read(&_mount->db);
+    int result = db_begin_read(&_mount->db);
+    if (!FileProviderDBResult(result, nil)) return nil;
     inode_t parentInode = path_get_inode(&_mount->db, parentPath.UTF8String);
-    db_commit(&_mount->db);
-    assert(parentInode != 0);
+    result = FileProviderDBFinishRead(&_mount->db, SQLITE_OK);
+    if (!FileProviderDBResult(result, nil) || parentInode == 0) return nil;
     NSString *parent = [NSString stringWithFormat:@"%lu", (unsigned long) parentInode];
     NSLog(@"parent of %@ is %@", self.path, parent);
     return parent;
@@ -194,34 +209,39 @@
 // locking on these keeps the remove/copy operation atomic
 // or at least tries to
 
-- (void)loadToURL:(NSURL *)url {
+- (BOOL)loadToURL:(NSURL *)url error:(NSError **)error {
     NSLog(@"copying %@ to %@", self.path, url);
     NSURL *itemURL = self.URL;
-    NSError *err;
-    sqlite3_mutex_enter(_mount->db.lock);
+    int result = db_begin_read(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
     [NSFileManager.defaultManager removeItemAtURL:url error:nil];
     BOOL success = [NSFileManager.defaultManager copyItemAtURL:itemURL
                                                          toURL:url
-                                                         error:&err];
-    sqlite3_mutex_leave(_mount->db.lock);
+                                                         error:error];
     if (!success) {
-        NSLog(@"error copying to %@: %@", url, err);
+        // A copy can fail after replacing or partially writing its destination.
+        // Preserve the coordination transaction instead of pretending rollback
+        // can reverse that host mutation.
+        db_require_recovery(&_mount->db, SQLITE_IOERR);
+        return NO;
     }
+    return FileProviderDBResult(db_commit(&_mount->db), error);
 }
 
-- (void)saveFromURL:(NSURL *)url {
+- (BOOL)saveFromURL:(NSURL *)url error:(NSError **)error {
     NSLog(@"copying %@ from %@", self.path, url);
     NSURL *itemURL = self.URL;
-    NSError *err;
-    sqlite3_mutex_enter(_mount->db.lock);
+    int result = db_begin_read(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
     [NSFileManager.defaultManager removeItemAtURL:itemURL error:nil];
     BOOL success = [NSFileManager.defaultManager copyItemAtURL:url
                                                          toURL:itemURL
-                                                         error:&err];
-    sqlite3_mutex_leave(_mount->db.lock);
+                                                         error:error];
     if (!success) {
-        NSLog(@"error copying to %@: %@", url, err);
+        db_require_recovery(&_mount->db, SQLITE_IOERR);
+        return NO;
     }
+    return FileProviderDBResult(db_commit(&_mount->db), error);
 }
 
 - (void)dealloc {

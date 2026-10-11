@@ -158,9 +158,7 @@ static NSMapTable<NSUUID *, Terminal *> *terminalsByUUID;
         if (self.tty == NULL)
             return;
 #if !ISH_LINUX
-        lock(&self.tty->lock);
         tty_set_winsize(self.tty, (struct winsize_) {.col = cols, .row = rows});
-        unlock(&self.tty->lock);
 #else
         async_do_in_workqueue(^{
             self->_tty->ops->resize(self->_tty, cols, rows);

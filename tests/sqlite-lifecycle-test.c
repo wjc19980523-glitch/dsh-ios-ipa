@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
 
     sqlite3_stmt *implicit_read = NULL;
     assert(sqlite3_prepare_v2(fs.db, "select inode from stats", -1, &implicit_read, NULL) == SQLITE_OK);
-    assert(db_exec(&fs, implicit_read));
+    assert(db_exec(&fs, implicit_read) == SQLITE_ROW);
     dsh_lifecycle_get_snapshot(&value);
     assert(value.active_read_transactions == 1);
     assert(value.transactions[0].cached_autocommit == 1);
@@ -103,9 +103,6 @@ int main(int argc, char **argv) {
     assert(sqlite3_finalize(implicit_read) == SQLITE_OK);
 
     assert(fake_db_deinit(&fs) == SQLITE_OK);
-    /* Production deinit currently leaves fs.lock allocated; the test owns the
-     * fixture and releases that memory explicitly instead of changing behavior. */
-    sqlite3_mutex_free(fs.lock);
     dsh_lifecycle_operation_end(scope);
     dsh_lifecycle_get_snapshot(&value);
     assert(value.open_connections == 0 && value.active_operations == 0);

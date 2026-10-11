@@ -8,14 +8,16 @@
 #import "FileProviderExtension.h"
 #import "FileProviderItem.h"
 #import "FileProviderEnumerator.h"
+#import "FileProviderDB.h"
 #import "NSError+ISHErrno.h"
 #import "../AppGroup.h"
 #import "../ExceptionExfiltrator.h"
 #include "fs/fake-db.h"
+#include <sys/stat.h>
 
 @interface FileProviderExtension () {
     BOOL _mounted;
-    struct fakefs_mount _mount;
+    struct fakefs_mount *_mount;
 };
 @property NSURL *root;
 @end
@@ -24,32 +26,54 @@
 
 - (struct fakefs_mount *)mount {
     NSAssert(_mounted, @"");
-    return &_mount;
+    return _mount;
 }
 
 - (BOOL)getMount:(struct fakefs_mount **)mount error:(NSError **)error {
     @synchronized (self) {
         if (!_mounted) {
             if (self.domain == nil) {
-                *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNotAuthenticated userInfo:nil];
+                if (error) *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNotAuthenticated userInfo:nil];
+                return NO;
+            }
+            _mount = calloc(1, sizeof(*_mount));
+            if (!_mount) {
+                if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
                 return NO;
             }
             NSURL *container = ContainerURL();
             NSURL *fs_dir = [[container URLByAppendingPathComponent:@"roots"]
                       URLByAppendingPathComponent:self.domain.identifier];
             _root = [fs_dir URLByAppendingPathComponent:@"data"];
-            _mount.source = strdup(_root.fileSystemRepresentation);
-            _mount.root_fd = open(_mount.source, O_RDONLY | O_DIRECTORY);
-            int err = fake_db_init(&_mount.db, [fs_dir URLByAppendingPathComponent:@"meta.db"].fileSystemRepresentation, _mount.root_fd);
-            if (err < 0) {
-                NSLog(@"error opening root: %d", err);
-                close(_mount.root_fd);
-                *error = [NSError errorWithISHErrno:err itemIdentifier:NSFileProviderRootContainerItemIdentifier];
+            _mount->source = strdup(_root.fileSystemRepresentation);
+            _mount->root_fd = _mount->source ? open(_mount->source, O_RDONLY | O_DIRECTORY) : -1;
+            if (_mount->root_fd < 0) {
+                int hostError = _mount->source ? errno : ENOMEM;
+                free((void *)_mount->source);
+                free(_mount); _mount = NULL;
+                if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:hostError userInfo:nil];
                 return NO;
             }
-            *mount = &_mount;
+            int err = fake_db_init(&_mount->db, [fs_dir URLByAppendingPathComponent:@"meta.db"].fileSystemRepresentation, _mount->root_fd);
+            if (err < 0) {
+                NSLog(@"error opening root: %d", err);
+                // SQLite profile callbacks retain this userdata address. An
+                // unresolved initialization transaction must outlive dealloc.
+                if (!fakefs_db_recovery_required(&_mount->db)) {
+                    close(_mount->root_fd);
+                    free((void *)_mount->source);
+                    free(_mount);
+                } else {
+                    NSLog(@"file provider retaining failed mount: connection=%llu SQLite=%d",
+                          (unsigned long long)_mount->db.lifecycle_connection_id, db_blocked_error(&_mount->db));
+                }
+                _mount = NULL;
+                if (error) *error = [NSError errorWithISHErrno:err itemIdentifier:NSFileProviderRootContainerItemIdentifier];
+                return NO;
+            }
             _mounted = YES;
         }
+        *mount = _mount;
 
         // Run a cleanup every once in a while. The idea here is that this
         // function gets called while the file provider is being interacted
@@ -79,7 +103,7 @@
     if (![self getMount:&mount error:error]) return nil;
     NSLog(@"item for id %@", identifier);
     NSError *err;
-    FileProviderItem *item = [[FileProviderItem alloc] initWithIdentifier:identifier mount:&_mount error:&err];
+    FileProviderItem *item = [[FileProviderItem alloc] initWithIdentifier:identifier mount:_mount error:&err];
     if (item == nil) {
         if (error != nil)
             *error = err;
@@ -156,15 +180,17 @@
         completionHandler(err);
         return;
     }
-    [item loadToURL:url];
-    completionHandler(nil);
+    if (![item loadToURL:url error:&err]) completionHandler(err);
+    else completionHandler(nil);
 }
 
 - (void)itemChangedAtURL:(NSURL *)url {
     FileProviderItem *item = [self itemForIdentifier:[self persistentIdentifierForItemAtURL:url] error:nil];
     if (item == nil)
         return;
-    [item saveFromURL:url];
+    NSError *error = nil;
+    if (![item saveFromURL:url error:&error])
+        NSLog(@"file provider could not save changed item: %@", error);
 }
 
 #pragma mark - Action helpers
@@ -172,51 +198,58 @@
 // FIXME: not dry enough
 // It's ok to use _mount in these because in each case the caller has already invoked itemForIdentifier:error: at least once
 - (BOOL)doCreateDirectoryAt:(NSString *)path inode:(ino_t *)inode error:(NSError **)error {
-    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount.source]] URLByAppendingPathComponent:path];
-    db_begin_write(&_mount.db);
-    if (![NSFileManager.defaultManager createDirectoryAtURL:url
-                                withIntermediateDirectories:NO
-                                                 attributes:@{NSFilePosixPermissions: @0777}
-                                                      error:error]) {
-        db_rollback(&_mount.db);
-        return nil;
-    }
+    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount->source]] URLByAppendingPathComponent:path];
+    int result = db_begin_write(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
     struct ish_stat stat;
     NSString *parentPath = [path substringToIndex:[path rangeOfString:@"/" options:NSBackwardsSearch].location];
-    if (!path_read_stat(&_mount.db, parentPath.fileSystemRepresentation, &stat, NULL)) {
-        db_rollback(&_mount.db);
-        *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil];
-        return nil;
+    if (!path_read_stat(&_mount->db, parentPath.fileSystemRepresentation, &stat, NULL)) {
+        result = FileProviderDBRollback(&_mount->db, db_transaction_error(&_mount->db));
+        if (FileProviderDBResult(result, error) && error)
+            *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil];
+        return NO;
     }
     stat.mode = (stat.mode & ~S_IFMT) | S_IFDIR;
-    path_create(&_mount.db, path.fileSystemRepresentation, &stat);
-    if (inode != NULL)
-        *inode = path_get_inode(&_mount.db, path.fileSystemRepresentation);
-    db_commit(&_mount.db);
+    inode_t created = path_create(&_mount->db, path.fileSystemRepresentation, &stat);
+    result = db_transaction_error(&_mount->db);
+    if (result != SQLITE_OK) return FileProviderDBResult(FileProviderDBRollback(&_mount->db, result), error);
+    // mkdir is atomic on failure; prepare all SQL before touching the host.
+    if (mkdir(url.fileSystemRepresentation, 0777) < 0) {
+        int hostError = errno;
+        result = FileProviderDBRollback(&_mount->db, SQLITE_OK);
+        if (FileProviderDBResult(result, error) && error)
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:hostError userInfo:nil];
+        return NO;
+    }
+    if (!FileProviderDBResult(db_commit(&_mount->db), error)) return NO;
+    if (inode) *inode = created;
     return YES;
 }
 
 - (BOOL)doCreateFileAt:(NSString *)path importFrom:(NSURL *)importURL inode:(ino_t *)inode error:(NSError **)error {
-    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount.source]] URLByAppendingPathComponent:path];
-    db_begin_write(&_mount.db);
-    if (![NSFileManager.defaultManager copyItemAtURL:importURL
-                                               toURL:url
-                                               error:error]) {
-        db_rollback(&_mount.db);
-        return nil;
-    }
+    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount->source]] URLByAppendingPathComponent:path];
+    int result = db_begin_write(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
     struct ish_stat stat;
     NSString *parentPath = [path substringToIndex:[path rangeOfString:@"/" options:NSBackwardsSearch].location];
-    if (!path_read_stat(&_mount.db, parentPath.fileSystemRepresentation, &stat, NULL)) {
-        db_rollback(&_mount.db);
-        *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil];
-        return nil;
+    if (!path_read_stat(&_mount->db, parentPath.fileSystemRepresentation, &stat, NULL)) {
+        result = FileProviderDBRollback(&_mount->db, db_transaction_error(&_mount->db));
+        if (FileProviderDBResult(result, error) && error)
+            *error = [NSError errorWithDomain:NSFileProviderErrorDomain code:NSFileProviderErrorNoSuchItem userInfo:nil];
+        return NO;
     }
     stat.mode = (stat.mode & ~S_IFMT & ~0111) | S_IFREG;
-    path_create(&_mount.db, path.fileSystemRepresentation, &stat);
-    if (inode != NULL)
-        *inode = path_get_inode(&_mount.db, path.fileSystemRepresentation);
-    db_commit(&_mount.db);
+    inode_t created = path_create(&_mount->db, path.fileSystemRepresentation, &stat);
+    result = db_transaction_error(&_mount->db);
+    if (result != SQLITE_OK) return FileProviderDBResult(FileProviderDBRollback(&_mount->db, result), error);
+    if (![NSFileManager.defaultManager copyItemAtURL:importURL toURL:url error:error]) {
+        // Foundation may have written part of the destination. It cannot tell
+        // us that reverting SQL would leave metadata consistent with the host.
+        db_require_recovery(&_mount->db, SQLITE_IOERR);
+        return NO;
+    }
+    if (!FileProviderDBResult(db_commit(&_mount->db), error)) return NO;
+    if (inode) *inode = created;
     return YES;
 }
 
@@ -285,7 +318,7 @@
 }
 
 - (NSString *)pathFromURL:(NSURL *)url {
-    NSURL *root = [NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount.source]];
+    NSURL *root = [NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount->source]];
     assert([url.path hasPrefix:root.path]);
     NSString *path = [url.path substringFromIndex:root.path.length];
     assert([path hasPrefix:@"/"]);
@@ -295,7 +328,7 @@
 }
 
 - (BOOL)doDelete:(NSString *)path itemIdentifier:(NSFileProviderItemIdentifier)identifier error:(NSError **)error {
-    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount.source]] URLByAppendingPathComponent:path];
+    NSURL *url = [[NSURL fileURLWithPath:[NSString stringWithUTF8String:_mount->source]] URLByAppendingPathComponent:path];
     NSDirectoryEnumerator<NSURL *> *enumerator = [NSFileManager.defaultManager enumeratorAtURL:url
                                                                     includingPropertiesForKeys:nil
                                                                                        options:NSDirectoryEnumerationSkipsSubdirectoryDescendants
@@ -304,18 +337,22 @@
         if (![self doDelete:[self pathFromURL:suburl] itemIdentifier:identifier error:error])
             return NO;
     }
-    db_begin_write(&_mount.db);
-    path_unlink(&_mount.db, path.fileSystemRepresentation);
-    int err = unlinkat(_mount.root_fd, fix_path(path.fileSystemRepresentation), 0);
+    int result = db_begin_write(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
+    path_unlink(&_mount->db, path.fileSystemRepresentation);
+    result = db_transaction_error(&_mount->db);
+    if (result != SQLITE_OK) return FileProviderDBResult(FileProviderDBRollback(&_mount->db, result), error);
+    int err = unlinkat(_mount->root_fd, fix_path(path.fileSystemRepresentation), 0);
     if (err < 0)
-        err = unlinkat(_mount.root_fd, fix_path(path.fileSystemRepresentation), AT_REMOVEDIR);
+        err = unlinkat(_mount->root_fd, fix_path(path.fileSystemRepresentation), AT_REMOVEDIR);
     if (err < 0) {
-        db_rollback(&_mount.db);
-        *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        int hostError = errno;
+        result = FileProviderDBRollback(&_mount->db, SQLITE_OK);
+        if (FileProviderDBResult(result, error) && error)
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:hostError userInfo:nil];
         return NO;
     }
-    db_commit(&_mount.db);
-    return YES;
+    return FileProviderDBResult(db_commit(&_mount->db), error);
 }
 
 - (void)deleteItemWithIdentifier:(NSFileProviderItemIdentifier)itemIdentifier completionHandler:(void (^)(NSError * _Nullable))completionHandler {
@@ -332,16 +369,20 @@
 }
 
 - (BOOL)doRename:(NSString *)src to:(NSString *)dst itemIdentifier:(NSFileProviderItemIdentifier)identifier error:(NSError **)error {
-    db_begin_write(&_mount.db);
-    path_rename(&_mount.db, src.fileSystemRepresentation, dst.fileSystemRepresentation);
-    int err = renameat(_mount.root_fd, fix_path(src.fileSystemRepresentation), _mount.root_fd, fix_path(dst.fileSystemRepresentation));
+    int result = db_begin_write(&_mount->db);
+    if (!FileProviderDBResult(result, error)) return NO;
+    path_rename(&_mount->db, src.fileSystemRepresentation, dst.fileSystemRepresentation);
+    result = db_transaction_error(&_mount->db);
+    if (result != SQLITE_OK) return FileProviderDBResult(FileProviderDBRollback(&_mount->db, result), error);
+    int err = renameat(_mount->root_fd, fix_path(src.fileSystemRepresentation), _mount->root_fd, fix_path(dst.fileSystemRepresentation));
     if (err < 0) {
-        db_rollback(&_mount.db);
-        *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        int hostError = errno;
+        result = FileProviderDBRollback(&_mount->db, SQLITE_OK);
+        if (FileProviderDBResult(result, error) && error)
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:hostError userInfo:nil];
         return NO;
     }
-    db_commit(&_mount.db);
-    return YES;
+    return FileProviderDBResult(db_commit(&_mount->db), error);
 }
 
 - (void)renameItemWithIdentifier:(NSFileProviderItemIdentifier)itemIdentifier toName:(NSString *)itemName completionHandler:(void (^)(NSFileProviderItem _Nullable, NSError * _Nullable))completionHandler {
@@ -391,9 +432,17 @@
 
 - (void)dealloc {
     if (_mounted) {
-        free((void *) _mount.source);
-        close(_mount.root_fd);
-        fake_db_deinit(&_mount.db);
+        int result = fake_db_deinit(&_mount->db);
+        if (result != SQLITE_OK) {
+            // There is no error outlet from dealloc. Preserve callback userdata,
+            // host fd and recovery ownership until this extension process exits.
+            NSLog(@"file provider retaining blocked mount: connection=%llu SQLite=%d",
+                  (unsigned long long)_mount->db.lifecycle_connection_id, result);
+            return;
+        }
+        free((void *) _mount->source);
+        close(_mount->root_fd);
+        free(_mount);
     }
 }
 
@@ -415,11 +464,15 @@
             continue;
 
         // TODO: make this a function in fake-db.c
-        db_begin_read(&_mount.db);
-        sqlite3_bind_int64(_mount.db.stmt.inode_read_stat, 1, inode);
-        BOOL exists = db_exec(&_mount.db, _mount.db.stmt.inode_read_stat);
-        db_reset(&_mount.db, _mount.db.stmt.inode_read_stat);
-        db_rollback(&_mount.db);
+        int result = db_begin_read(&_mount->db);
+        if (!FileProviderDBResult(result, nil)) return;
+        result = sqlite3_bind_int64(_mount->db.stmt.inode_read_stat, 1, inode);
+        if (result == SQLITE_OK) result = db_exec(&_mount->db, _mount->db.stmt.inode_read_stat);
+        BOOL exists = result == SQLITE_ROW;
+        int reset = db_reset(&_mount->db, _mount->db.stmt.inode_read_stat);
+        if ((result == SQLITE_ROW || result == SQLITE_DONE) && reset != SQLITE_OK) result = reset;
+        result = FileProviderDBFinishRead(&_mount->db, result);
+        if (!FileProviderDBResult(result, nil)) return;
 
         if (!exists) {
             NSLog(@"removing dead inode %llu", inode);
@@ -435,7 +488,11 @@
     FileProviderItem *item = [self itemForIdentifier:[self persistentIdentifierForItemAtURL:url] error:nil];
     if (item == nil)
         return;
-    [item saveFromURL:url];
+    NSError *error = nil;
+    if (![item saveFromURL:url error:&error]) {
+        NSLog(@"file provider could not stop providing item: %@", error);
+        return;
+    }
     [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
     [NSFileProviderManager writePlaceholderAtURL:[NSFileProviderManager placeholderURLForURL:url]
                                     withMetadata:item

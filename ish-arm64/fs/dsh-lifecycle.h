@@ -16,6 +16,7 @@ enum dsh_lifecycle_state {
     DSH_LIFECYCLE_RUNNING = 0,
     DSH_LIFECYCLE_QUIESCING = 1,
     DSH_LIFECYCLE_QUIESCENT = 2,
+    DSH_LIFECYCLE_RESUMING = 3,
 };
 
 enum dsh_lifecycle_transaction_mode {
@@ -50,6 +51,8 @@ struct dsh_lifecycle_transaction_snapshot {
     enum dsh_lifecycle_transaction_mode mode;
     int cached_autocommit;
     int cached_result;
+    bool recovery_required;
+    int recovery_result;
     char phase[24];
     uint64_t started_monotonic_ns;
     uint64_t observed_monotonic_ns;
@@ -74,15 +77,19 @@ struct dsh_lifecycle_snapshot {
     enum dsh_lifecycle_state state;
     uint64_t generation;
     uint64_t sampled_monotonic_ns;
+    uint64_t last_resume_monotonic_ns;
     uint64_t active_operations;
     /* Covered fakefs_ entry scopes, including nesting, not unique syscalls.
      * Counted over the full tracked table, not the truncated item array;
      * an incomplete lower bound when tracking_overflows is nonzero. */
     uint64_t active_fakefs_operations;
+    uint64_t paused_fileless_operations;
     uint64_t open_connections;
     uint64_t active_deferred_transactions;
     uint64_t active_read_transactions;
     uint64_t active_write_transactions;
+    uint64_t oldest_transaction_age_ns;
+    uint64_t recovery_blocked_connections;
     uint64_t active_native_flocks;
     uint64_t tracking_overflows;
     uint64_t operations_after_quiesce;
@@ -98,13 +105,23 @@ struct dsh_lifecycle_snapshot {
     struct dsh_lifecycle_flock_snapshot native_flocks[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
 };
 
-/* Diagnostic observation only: these functions DO NOT block or reject work.
- * Tokens must be paired on the same thread. Nested scopes retain guest context
- * so a later admission gate can admit an entire operation before host effects.
+/* Tokens must be paired on the same thread. With admission enabled, outer
+ * scopes wait before host effects and kernel locks; nested scopes finish the
+ * operation already admitted. Without admission these only observe work.
  */
 DSH_LIFECYCLE_API uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid);
 DSH_LIFECYCLE_API void dsh_lifecycle_operation_end(uint64_t token);
 DSH_LIFECYCLE_API unsigned dsh_lifecycle_operation_depth(void);
+/* Only the common stream-read boundary may call these after retaining a known
+ * tty_dev fd and releasing the fdtable lock. A pause is refused unless exactly
+ * one tracked permit is owned and no SQLite/native-flock uncertainty exists.
+ * The tty read uses private kernel memory. Resume the SAME token after tty_read
+ * has released its locks, before fd release, guest copyout or signal cleanup.
+ * A nonzero token reserves its original record while excluded from active
+ * operations; zero means the caller must retain its normal permit.
+ */
+DSH_LIFECYCLE_API uint64_t dsh_lifecycle_pause_tty_read(void);
+DSH_LIFECYCLE_API void dsh_lifecycle_resume_tty_read(uint64_t token);
 
 DSH_LIFECYCLE_API uint64_t dsh_lifecycle_sqlite_open(int guest_pid);
 /* sqlite_txn_state uses SQLite's NONE=0/READ=1/WRITE=2 values; -1 if unavailable.
@@ -113,6 +130,8 @@ DSH_LIFECYCLE_API uint64_t dsh_lifecycle_sqlite_open(int guest_pid);
 DSH_LIFECYCLE_API void dsh_lifecycle_sqlite_update(uint64_t connection_id,
         int guest_pid, int autocommit, int sqlite_txn_state, int result, const char *phase);
 DSH_LIFECYCLE_API void dsh_lifecycle_sqlite_close(uint64_t connection_id, int result);
+DSH_LIFECYCLE_API void dsh_lifecycle_sqlite_recovery_required(uint64_t connection_id, int result);
+DSH_LIFECYCLE_API void dsh_lifecycle_sqlite_recovery_resolved(uint64_t connection_id);
 
 /* fd_key identifies the retained emulator fd object, not a reusable host fd.
  * Call only after a successful flock; confirmed final close removes the record.
@@ -122,12 +141,26 @@ DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_update(const void *fd_key,
         int host_fd, int guest_pid, enum dsh_lifecycle_flock_mode mode);
 DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_close(const void *fd_key);
 DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_close_failed(const void *fd_key);
+/* An untracked/native descriptor close has uncertain ownership. Do not retry
+ * that descriptor number; retain a process-local diagnostic safety barrier. */
+DSH_LIFECYCLE_API void dsh_lifecycle_native_close_uncertain(void);
 
 DSH_LIFECYCLE_API void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot);
-/* Intent state only in this diagnostic stage; no runtime gate is connected. */
+/* State transitions and quiescence validation are atomic with admission. */
 DSH_LIFECYCLE_API uint64_t dsh_lifecycle_request_quiesce(void);
 DSH_LIFECYCLE_API bool dsh_lifecycle_mark_quiescent(uint64_t generation);
 DSH_LIFECYCLE_API void dsh_lifecycle_resume(void);
+/* The app enables admission once, before starting any guest work. CLI tools
+ * keep diagnostic-only semantics unless a lifecycle test explicitly enables it.
+ * An outer permit MUST precede guest/kernel locks and host effects. Nested
+ * scopes drain using that permit; no new scope waits mid-transaction.
+ */
+DSH_LIFECYCLE_API void dsh_lifecycle_enable_admission_gate(void);
+DSH_LIFECYCLE_API void dsh_lifecycle_begin_resume(void);
+DSH_LIFECYCLE_API void dsh_lifecycle_checkpoint(int guest_pid);
+DSH_LIFECYCLE_API void dsh_lifecycle_thread_exit(void);
+/* Native main-thread callers must fail/defer instead of blocking UIKit. */
+DSH_LIFECYCLE_API uint64_t dsh_lifecycle_try_operation_begin(const char *name, int guest_pid);
 
 struct dsh_lifecycle_scope { uint64_t token; };
 static inline void dsh_lifecycle_scope_end(struct dsh_lifecycle_scope *scope) {

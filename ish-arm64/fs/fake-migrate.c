@@ -2,7 +2,6 @@
 #include "debug.h"
 #include "kernel/errno.h"
 #include "fs/fake-db.h"
-#include "fs/sqlutil.h"
 
 // The value of the user_version pragma is used to decide what needs migrating.
 
@@ -35,28 +34,35 @@ static struct migration {
 };
 
 int fakefs_migrate(struct fakefs_db *fs, int UNUSED(root_fd)) {
-    sqlite3 *db = fs->db;
-    int err;
-    sqlite3_stmt *user_version = PREPARE("pragma user_version");
-    STEP(user_version);
+    sqlite3_stmt *user_version = NULL;
+    int err = db_prepare(fs, "pragma user_version", &user_version);
+    if (err != SQLITE_OK) return _EIO;
+    err = db_exec(fs, user_version);
+    if (err != SQLITE_ROW) { sqlite3_finalize(user_version); return _EIO; }
     int version = sqlite3_column_int(user_version, 0);
-    FINALIZE(user_version);
+    if (sqlite3_finalize(user_version) != SQLITE_OK) return _EIO;
 
-    EXEC("begin");
+    if (db_begin_write(fs) != SQLITE_OK) return _EIO;
     int versions = sizeof(migrations)/sizeof(migrations[0]);
     while (version < versions) {
         struct migration m = migrations[version];
         if (m.sql != NULL)
-            EXEC(m.sql);
+            if (db_exec_sql(fs, m.sql) != SQLITE_OK) goto fail;
         if (m.migrate != NULL)
             m.migrate(fs);
         version++;
     }
     // for some reason placeholders aren't allowed in pragmas
     char *pragma_user_version = sqlite3_mprintf("pragma user_version = %d", version);
-    EXEC(pragma_user_version);
+    if (!pragma_user_version) goto fail;
+    err = db_exec_sql(fs, pragma_user_version);
     sqlite3_free(pragma_user_version);
-    EXEC("commit");
+    if (err != SQLITE_OK) goto fail;
+    if (db_commit(fs) != SQLITE_OK) goto fail;
 
     return 0;
+fail:
+    /* Migration only changes metadata; no host filesystem mutation occurred. */
+    db_rollback(fs);
+    return _EIO;
 }

@@ -10,6 +10,8 @@
 #import "DSHHarness.h"
 #import "ISHShellExecutor.h"
 #import "DSHLifecycleDiagnostics.h"
+#import "DSHAppLifecycle.h"
+#import "DSHLifecycleCoordinator.h"
 
 static BOOL DSHSceneIsXCTestHost(void) {
     return [NSProcessInfo.processInfo.environment[@"DSH_TEST_HOST"] isEqualToString:@"1"];
@@ -27,6 +29,7 @@ static BOOL DSHSceneIsXCTestHost(void) {
         [self.window makeKeyAndVisible];
         return;
     }
+    (void)DSHAppLifecycle.sharedCoordinator;
     [DSHLifecycleDiagnostics recordEvent:@"sceneWillConnect" harness:DSHHarness.shared];
     UIWindowScene *windowScene = (UIWindowScene *) scene;
     self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
@@ -43,37 +46,23 @@ static BOOL DSHSceneIsXCTestHost(void) {
 
 #pragma mark - Backgrounding
 
-// This app declares UIApplicationSceneManifest in Info.plist, so it runs the
-// UIScene lifecycle. Since iOS 13 UIKit stops calling
-// -applicationDidEnterBackground: and -applicationWillEnterForeground: for such
-// apps and posts the equivalent UISceneDelegate callbacks instead. The socket
-// hooks below therefore have to live *here*: while they were only in
-// DSHAppDelegate they never ran on device, so the guest's listening sockets were
-// never recorded or rebuilt and every return from the background cost a full
-// ~40-second harness restart.
+// UIKit routes this app through UIScene. One coordinator owns the finite task,
+// file-operation admission, socket pairing and foreground health supervision.
 - (void)sceneDidEnterBackground:(UIScene *)scene {
     if (DSHSceneIsXCTestHost()) return;
+    [DSHAppLifecycle.sharedCoordinator handleAppBackground];
     [DSHLifecycleDiagnostics recordEvent:@"sceneDidEnterBackground" harness:DSHHarness.shared];
-    [DSHHarness.shared handleAppBackground];
-    // iOS frees the backing socket of every listening fd this process owns
-    // while it is suspended. Without this, the guest's dsh-serve keeps a
-    // listen() fd that looks valid but can never accept again: the app returns
-    // to the foreground, the health check correctly finds nothing listening, and
-    // the harness reboots a guest that was never broken.
-    // Recording the sockets here lets -sceneWillEnterForeground rebuild them.
-    [ISHShellExecutor handleAppSuspend];
-    [DSHLifecycleDiagnostics recordEvent:@"socketSuspend" harness:DSHHarness.shared];
 }
 
 - (void)sceneWillEnterForeground:(UIScene *)scene {
     if (DSHSceneIsXCTestHost()) return;
     [DSHLifecycleDiagnostics recordEvent:@"sceneWillEnterForeground" harness:DSHHarness.shared];
-    [ISHShellExecutor handleAppResume];
-    [DSHHarness.shared handleAppResume];
+    [DSHAppLifecycle.sharedCoordinator handleAppForeground];
 }
 
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     if (DSHSceneIsXCTestHost()) return;
+    [DSHAppLifecycle.sharedCoordinator handleAppForeground];
     [DSHLifecycleDiagnostics recordEvent:@"sceneDidBecomeActive" harness:DSHHarness.shared];
     UIViewController *root = self.window.rootViewController;
     if ([root isKindOfClass:DSHRootViewController.class])

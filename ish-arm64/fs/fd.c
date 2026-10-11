@@ -135,7 +135,7 @@ struct fdtable *fdtable_copy(struct fdtable *table) {
 }
 
 static int fdtable_expand(struct fdtable *table, fd_t max) {
-    unsigned size = max + 1;
+    unsigned size = (unsigned) max + 1;
     if (size > rlimit(RLIMIT_NOFILE_))
         return _EMFILE;
     if (table->size >= size)
@@ -153,6 +153,15 @@ struct fd *f_get(fd_t f) {
     lock(&current->files->lock);
     struct fd *fd = fdtable_get(current->files, f);
     unlock(&current->files->lock);
+    return fd;
+}
+
+struct fd *f_get_retained(fd_t f) {
+    struct fdtable *table = current->files;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, f);
+    if (fd != NULL) fd_retain(fd);
+    unlock(&table->lock);
     return fd;
 }
 
@@ -244,28 +253,36 @@ void fdtable_do_cloexec(struct fdtable *table) {
 
 dword_t sys_dup(fd_t f) {
     STRACE("dup(%d)", f);
-    struct fd *fd = f_get(f);
+    struct fd *fd = f_get_retained(f);
     if (fd == NULL)
         return _EBADF;
-    fd->refcount++;
     return f_install(fd, 0);
 }
 
 dword_t sys_dup3(fd_t f, fd_t new_f, int_t flags) {
     STRACE("dup3(%d, %d, %d)", f, new_f, flags);
     struct fdtable *table = current->files;
-    struct fd *fd = f_get(f);
-    if (fd == NULL)
-        return _EBADF;
-    int err = fdtable_expand(table, new_f);
-    if (err < 0)
-        return err;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, f);
+    int err = _EBADF;
+    if (fd == NULL || new_f < 0)
+        goto out;
+    // The source stays pinned across target close, including f == new_f.
+    // Expansion/replacement share the lookup lock with f_get_retained readers.
     fd_retain(fd);
-    f_close(new_f);
+    err = fdtable_expand(table, new_f);
+    if (err < 0) {
+        fd_close(fd);
+        goto out;
+    }
+    fdtable_close(table, new_f);
     table->files[new_f] = fd;
     if (flags & O_CLOEXEC_)
         bit_set(new_f, table->cloexec);
-    return new_f;
+    err = new_f;
+out:
+    unlock(&table->lock);
+    return err;
 }
 
 dword_t sys_dup2(fd_t f, fd_t new_f) {
@@ -286,28 +303,37 @@ int fd_setflags(struct fd *fd, int flags) {
     return 0;
 }
 
+static fd_t f_dupfd(fd_t source, addr_t minimum, bool cloexec) {
+    struct fdtable *table = current->files;
+    lock(&table->lock);
+    struct fd *fd = fdtable_get(table, source);
+    fd_t result = _EBADF;
+    if (fd == NULL) goto out;
+    if (minimum >= rlimit(RLIMIT_NOFILE_) || minimum > INT32_MAX) {
+        result = _EINVAL;
+        goto out;
+    }
+    // f_install_start steals this reference, including its failure path.
+    result = f_install_start(fd_retain(fd), (fd_t)minimum);
+    if (result >= 0 && cloexec) bit_set(result, table->cloexec);
+out:
+    unlock(&table->lock);
+    return result;
+}
+
 dword_t sys_fcntl(fd_t f, dword_t cmd, addr_t arg) {
+    if (cmd == F_DUPFD_ || cmd == F_DUPFD_CLOEXEC_) {
+        STRACE("fcntl(%d, F_DUPFD%s, %d)", f, cmd == F_DUPFD_CLOEXEC_ ? "_CLOEXEC" : "", arg);
+        return f_dupfd(f, arg, cmd == F_DUPFD_CLOEXEC_);
+    }
     struct fdtable *table = current->files;
     struct fd *fd = f_get(f);
     if (fd == NULL)
         return _EBADF;
     struct flock32_ flock32;
     struct flock_ flock;
-    fd_t new_f;
     int err;
     switch (cmd) {
-        case F_DUPFD_:
-            STRACE("fcntl(%d, F_DUPFD, %d)", f, arg);
-            fd->refcount++;
-            return f_install_start(fd, arg);
-
-        case F_DUPFD_CLOEXEC_:
-            STRACE("fcntl(%d, F_DUPFD_CLOEXEC, %d)", f, arg);
-            fd->refcount++;
-            new_f = f_install_start(fd, arg);
-            bit_set(new_f, table->cloexec);
-            return new_f;
-
         case F_GETFD_:
             STRACE("fcntl(%d, F_GETFD)", f);
             return bit_test(f, table->cloexec);

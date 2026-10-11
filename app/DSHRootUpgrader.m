@@ -4,6 +4,8 @@
 //
 
 #import "DSHRootUpgrader.h"
+#import "DSHAppLifecycle.h"
+#import "DSHLifecycleCoordinator.h"
 #import "Roots.h"
 #import "ISHShellExecutor.h"
 #import "AppGroup.h"
@@ -32,6 +34,13 @@ static NSString *const kPrevMountPoint = @"/mnt/dsh-previous-root";
 
 @interface DSHRootUpgrader ()
 @property (nonatomic, readwrite, nullable) NSString *bundledRootHash;
+- (NSUserDefaults *)migrationDefaults;
+- (int)unmountMigrationRoot;
+- (BOOL)destroyPreviousRoot:(NSString *)previous error:(NSError **)error;
+- (void)finishMigrationFromRoot:(NSString *)previous
+                      exitCode:(int)exitCode
+                       sawDone:(BOOL)sawDone
+                    completion:(void (^)(BOOL, NSError *_Nullable))completion;
 @end
 
 @implementation DSHRootUpgrader
@@ -58,8 +67,10 @@ static NSString *const kPrevMountPoint = @"/mnt/dsh-previous-root";
 }
 
 - (NSString *)pendingMigrationRoot {
-    return [NSUserDefaults.standardUserDefaults stringForKey:kPendingMigrationRootKey];
+    return [self.migrationDefaults stringForKey:kPendingMigrationRootKey];
 }
+
+- (NSUserDefaults *)migrationDefaults { return NSUserDefaults.standardUserDefaults; }
 
 - (BOOL)repairScheduled {
     return [NSUserDefaults.standardUserDefaults boolForKey:kRepairRootOnNextLaunchKey];
@@ -172,23 +183,50 @@ static NSString *const kPrevMountPoint = @"/mnt/dsh-previous-root";
         if ([line containsString:@"MIGRATION-DONE"]) sawDone = YES;
         NSLog(@"[dsh-ios] migrate: %@", line);
     } completion:^(ISHShellExecutionResult *result) {
-        do_umount(kPrevMountPoint.UTF8String);
-        NSError *e = nil;
-        BOOL ok = result.exitCode == 0 && sawDone;
-        if (ok) {
-            NSError *destroyErr;
-            if ([Roots.instance destroyRootNamed:previous error:&destroyErr])
-                NSLog(@"[dsh-ios] removed previous root %@", previous);
-            else
-                NSLog(@"[dsh-ios] previous root %@ kept: %@", previous, destroyErr);
-            [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingMigrationRootKey];
-        } else {
-            e = [NSError errorWithDomain:@"DSH" code:result.exitCode userInfo:@{NSLocalizedDescriptionKey: @"user data migration failed; previous root kept"}];
-            NSLog(@"[dsh-ios] %@ (exit %d)", e.localizedDescription, result.exitCode);
-            // Leave the pending marker so the next launch retries.
-        }
-        completion(ok, e);
+        [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{
+            [self finishMigrationFromRoot:previous exitCode:result.exitCode
+                                 sawDone:sawDone completion:completion];
+        }];
     }];
+}
+
+- (int)unmountMigrationRoot { return do_umount(kPrevMountPoint.UTF8String); }
+
+- (BOOL)destroyPreviousRoot:(NSString *)previous error:(NSError **)error {
+    return [Roots.instance destroyRootNamed:previous error:error];
+}
+
+- (void)finishMigrationFromRoot:(NSString *)previous
+                      exitCode:(int)exitCode
+                       sawDone:(BOOL)sawDone
+                    completion:(void (^)(BOOL, NSError *_Nullable))completion {
+    NSAssert(NSThread.isMainThread, @"Migration completion requires the main thread");
+    int unmountError = [self unmountMigrationRoot];
+    if (unmountError < 0) {
+        // An error can also mean the mount was detached but close/cleanup was
+        // uncertain. Neither case authorizes deleting the migration source.
+        NSError *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:-unmountError
+            userInfo:@{NSLocalizedDescriptionKey: @"could not unmount previous root; user data preserved for retry"}];
+        NSLog(@"[dsh-ios] %@ (%d)", error.localizedDescription, unmountError);
+        completion(NO, error);
+        return;
+    }
+    NSError *error = nil;
+    BOOL ok = exitCode == 0 && sawDone;
+    if (ok) {
+        NSError *destroyError = nil;
+        if ([self destroyPreviousRoot:previous error:&destroyError])
+            NSLog(@"[dsh-ios] removed previous root %@", previous);
+        else
+            NSLog(@"[dsh-ios] previous root %@ kept: %@", previous, destroyError);
+        [self.migrationDefaults removeObjectForKey:kPendingMigrationRootKey];
+    } else {
+        error = [NSError errorWithDomain:@"DSH" code:exitCode
+            userInfo:@{NSLocalizedDescriptionKey: @"user data migration failed; previous root kept"}];
+        NSLog(@"[dsh-ios] %@ (exit %d)", error.localizedDescription, exitCode);
+        // Leave the pending marker so the next launch retries.
+    }
+    completion(ok, error);
 }
 
 @end

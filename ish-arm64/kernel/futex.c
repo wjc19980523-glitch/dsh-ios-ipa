@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "kernel/calls.h"
+#include "fs/dsh-lifecycle.h"
 
 #define FUTEX_WAIT_ 0
 #define FUTEX_WAKE_ 1
@@ -198,6 +199,7 @@ static int futex_wait(addr_t uaddr, dword_t val, struct timespec *timeout) {
 
         current->blocking = true;
         int stall_count = 0;
+        uint64_t stall_resume_ns = 0;
         struct pollfd pfd = { .fd = current->futex_pipe[0], .events = POLLIN };
         for (;;) {
             // Compute poll timeout
@@ -223,7 +225,14 @@ static int futex_wait(addr_t uaddr, dword_t val, struct timespec *timeout) {
             }
             // ret == 0 (timeout) or ret < 0 (EINTR from signal) — check conditions
 
-            stall_count++;
+            struct dsh_lifecycle_snapshot lifecycle;
+            dsh_lifecycle_get_snapshot(&lifecycle);
+            if (lifecycle.state != DSH_LIFECYCLE_RUNNING ||
+                    lifecycle.last_resume_monotonic_ns != stall_resume_ns)
+                stall_count = 0;
+            stall_resume_ns = lifecycle.last_resume_monotonic_ns;
+            if (lifecycle.state == DSH_LIFECYCLE_RUNNING)
+                stall_count++;
             if (current->group->doing_group_exit) {
                 err = _EINTR; break;
             }

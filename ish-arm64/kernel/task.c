@@ -7,6 +7,7 @@
 #include "kernel/task.h"
 #include "kernel/memory.h"
 #include "emu/tlb.h"
+#include "fs/dsh-lifecycle.h"
 
 __thread struct task *current;
 
@@ -152,6 +153,10 @@ void task_destroy(struct task *task) {
 }
 
 static void task_run_tlb_cleanup(void *arg) {
+    // Orphan/exit paths can skip handle_interrupt's normal scope. Releasing a
+    // deferred mm can orphan file inodes, so admit before taking any mm/inode
+    // lock, and retire all TLS permits only after that cleanup is complete.
+    (void)dsh_lifecycle_operation_begin("guest_thread_cleanup", current ? current->pid : -1);
     tlb_free((struct tlb *)arg);
     // [T-ish-mm-leak-refcount-handoff] If the do_exit_group safety valve
     // orphaned this thread (stuck in an uninterruptible host syscall) it
@@ -167,6 +172,7 @@ static void task_run_tlb_cleanup(void *arg) {
         self->mm = NULL;
         self->mem = NULL;
     }
+    dsh_lifecycle_thread_exit();
 }
 
 void task_run_current() {
@@ -193,11 +199,14 @@ void task_run_current() {
             pthread_exit(NULL);
         }
         if (self->group->doing_group_exit) {
+            (void)dsh_lifecycle_operation_begin("guest_group_exit", self->pid);
             do_exit(self->group->group_exit_code);
         }
         if (self->mem == NULL) {
             pthread_exit(NULL);
         }
+        // No guest mm/inode/SQLite mutex or incomplete host operation here.
+        dsh_lifecycle_checkpoint(self->pid);
         read_wrlock(&self->mem->lock);
         tlb_refresh(tlb, &self->mem->mmu);
         int interrupt = cpu_run_to_interrupt(cpu, tlb);

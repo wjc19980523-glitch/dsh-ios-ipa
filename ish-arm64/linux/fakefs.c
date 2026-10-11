@@ -19,14 +19,40 @@ struct fakefs_super {
     int root_fd;
 };
 
+static int fakefs_db_error(int result) {
+    switch (result & 0xff) {
+        case SQLITE_BUSY: case SQLITE_LOCKED: return -EBUSY;
+        case SQLITE_NOMEM: return -ENOMEM;
+        case SQLITE_FULL: return -ENOSPC;
+        case SQLITE_READONLY: return -EROFS;
+        default: return -EIO;
+    }
+}
+
+/* Rollback is only valid before an irreversible host mutation. */
+static int fakefs_rollback_error(struct fakefs_db *db, int error) {
+    int result = db_rollback(db);
+    return result == SQLITE_OK ? error : fakefs_db_error(result);
+}
+
+static int fakefs_finish_read(struct fakefs_db *db, int error) {
+    int result = db_transaction_error(db);
+    if (error < 0 || result != SQLITE_OK)
+        return fakefs_rollback_error(db, error < 0 ? error : fakefs_db_error(result));
+    result = db_commit(db);
+    return result == SQLITE_OK ? 0 : fakefs_rollback_error(db, fakefs_db_error(result));
+}
+
 // free with __putname
 static char *dentry_name(struct dentry *dentry) {
     char *name = __getname();
     if (name == NULL)
         return ERR_PTR(-ENOMEM);
     char *path = dentry_path_raw(dentry, name, PATH_MAX);
-    if (IS_ERR(path))
+    if (IS_ERR(path)) {
+        __putname(name);
         return path;
+    }
     BUG_ON(path[0] != '/');
     if (strcmp(path, "/") == 0)
         path[0] = '\0';
@@ -55,9 +81,18 @@ static struct dentry *fakefs_lookup(struct inode *ino, struct dentry *dentry, un
     char *path = dentry_name(dentry);
     if (IS_ERR(path))
         return ERR_PTR(PTR_ERR(path));
-    db_begin_read(&info->db);
+    int result = db_begin_read(&info->db);
+    if (result != SQLITE_OK) {
+        __putname(path);
+        return ERR_PTR(fakefs_db_error(result));
+    }
     inode_t child_ino = path_get_inode(&info->db, path);
     __putname(path);
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) {
+        child = ERR_PTR(fakefs_db_error(result));
+        goto out;
+    }
     if (child_ino == 0)
         goto out;
 
@@ -88,35 +123,24 @@ static struct dentry *fakefs_lookup(struct inode *ino, struct dentry *dentry, un
     }
 
 out:
-    if (IS_ERR(child)) {
-        db_rollback(&info->db);
-        printk("fakefs_lookup failed: %pe\n", child);
-    } else {
-        db_commit(&info->db);
+    result = fakefs_finish_read(&info->db, IS_ERR(child) ? PTR_ERR(child) : 0);
+    if (result < 0) {
+        if (child && !IS_ERR(child)) iput(child);
+        return ERR_PTR(result);
     }
     return d_splice_alias(child, dentry);
 }
 
-static int __finish_make_node(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode, dev_t rdev, int fd) {
+static int fakefs_make_node(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry,
+        umode_t mode, dev_t rdev, const char *target) {
     struct fakefs_super *info = dir->i_sb->s_fs_info;
     struct inode *child = NULL;
     int err;
-
-    if (fd == -1)
-        fd = open_fd_for_dentry(dir, dentry);
-    if (fd < 0) {
-        err = fd;
-        goto fail;
-    }
-
     child = new_inode(dir->i_sb);
     err = -ENOMEM;
-    if (child == NULL) {
-        host_close(fd);
-        goto fail;
-    }
+    if (child == NULL) return err;
+    INODE_FD(child) = -1;
     inode_init_owner(mnt_userns, child, dir, mode);
-    INODE_FD(child) = fd;
 
     char *path = dentry_name(dentry);
     if (IS_ERR(path)) {
@@ -124,7 +148,12 @@ static int __finish_make_node(struct user_namespace *mnt_userns, struct inode *d
         goto fail;
     }
 
-    db_begin_write(&info->db);
+    int result = db_begin_write(&info->db);
+    if (result != SQLITE_OK) {
+        __putname(path);
+        err = fakefs_db_error(result);
+        goto fail;
+    }
     struct ish_stat ishstat = {
         .mode = mode,
         .uid = i_uid_read(child),
@@ -133,32 +162,68 @@ static int __finish_make_node(struct user_namespace *mnt_userns, struct inode *d
     };
     child->i_ino = path_create(&info->db, path, &ishstat);
     __putname(path);
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) {
+        err = fakefs_rollback_error(&info->db, fakefs_db_error(result));
+        goto fail;
+    }
+
+    int fd;
+    if (S_ISDIR(mode)) {
+        err = host_mkdirat(INODE_FD(dir), dentry->d_name.name, 0777);
+        if (err < 0) {
+            err = fakefs_rollback_error(&info->db, err);
+            goto fail;
+        }
+        fd = open_fd_for_dentry(dir, dentry);
+    } else {
+        // VFS create runs for a new dentry; never truncate an untracked host
+        // file that another worker may have created while metadata was absent.
+        fd = host_openat(INODE_FD(dir), dentry->d_name.name, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (fd < 0) {
+            err = fakefs_rollback_error(&info->db, fd);
+            goto fail;
+        }
+    }
+    if (fd < 0) {
+        err = fd; // mkdir already changed the host; preserve SQL for recovery.
+        db_require_recovery(&info->db, SQLITE_IOERR);
+        goto fail;
+    }
+    INODE_FD(child) = fd;
+    if (target) {
+        size_t length = strlen(target);
+        ssize_t written = host_write(fd, target, length);
+        if (written < 0 || (size_t)written != length) {
+            err = written < 0 ? (int)written : -EIO;
+            db_require_recovery(&info->db, SQLITE_IOERR);
+            goto fail;
+        }
+    }
 
     err = read_inode(child);
     if (err < 0) {
-        db_rollback(&info->db);
+        result = db_transaction_error(&info->db);
+        db_require_recovery(&info->db, result == SQLITE_OK ? SQLITE_IOERR : result);
         goto fail;
     }
-    db_commit(&info->db);
+    result = db_commit(&info->db);
+    if (result != SQLITE_OK) {
+        err = fakefs_db_error(result);
+        goto fail;
+    }
     d_instantiate(dentry, child);
     return 0;
 
 fail:
     if (child != NULL)
         iput(child);
-    host_unlinkat(INODE_FD(dir), dentry->d_name.name);
     return err;
 }
 
-static int finish_make_node(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode, int fd) {
-    return __finish_make_node(mnt_userns, dir, dentry, mode, 0, fd);
-}
-
 static int fakefs_create(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode, bool excl) {
-    int fd = host_openat(INODE_FD(dir), dentry->d_name.name, O_CREAT | O_RDWR | (excl ? O_EXCL : 0), 0666);
-    if (fd < 0)
-        return fd;
-    return finish_make_node(mnt_userns, dir, dentry, mode, fd);
+    (void)excl;
+    return fakefs_make_node(mnt_userns, dir, dentry, mode, 0, NULL);
 }
 
 static int fakefs_rename(struct user_namespace *mnt_userns, struct inode *from_dir, struct dentry *from_dentry, struct inode *to_dir, struct dentry *to_dentry, unsigned flags) {
@@ -175,20 +240,24 @@ static int fakefs_rename(struct user_namespace *mnt_userns, struct inode *from_d
         return PTR_ERR(to_path);
     }
 
-    db_begin_write(&info->db);
+    int result = db_begin_write(&info->db);
+    if (result != SQLITE_OK) {
+        __putname(from_path); __putname(to_path);
+        return fakefs_db_error(result);
+    }
     path_rename(&info->db, from_path, to_path);
     __putname(from_path);
     __putname(to_path);
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) return fakefs_rollback_error(&info->db, fakefs_db_error(result));
 
     int err = host_renameat(INODE_FD(from_dir), from_dentry->d_name.name,
                             INODE_FD(to_dir), to_dentry->d_name.name);
     if (err < 0) {
-        db_rollback(&info->db);
-        return err;
+        return fakefs_rollback_error(&info->db, err);
     }
-    db_commit(&info->db);
-
-    return 0;
+    result = db_commit(&info->db);
+    return result == SQLITE_OK ? 0 : fakefs_db_error(result);
 }
 
 static int fakefs_link(struct dentry *from, struct inode *ino, struct dentry *to) {
@@ -204,18 +273,24 @@ static int fakefs_link(struct dentry *from, struct inode *ino, struct dentry *to
         return PTR_ERR(to_path);
     }
 
-    db_begin_write(&info->db);
+    int result = db_begin_write(&info->db);
+    if (result != SQLITE_OK) {
+        __putname(from_path); __putname(to_path);
+        return fakefs_db_error(result);
+    }
     path_link(&info->db, from_path, to_path);
     __putname(from_path);
     __putname(to_path);
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) return fakefs_rollback_error(&info->db, fakefs_db_error(result));
 
     int err = host_linkat(INODE_FD(d_inode(from->d_parent)), from->d_name.name,
                           INODE_FD(d_inode(to->d_parent)), to->d_name.name);
     if (err < 0) {
-        db_rollback(&info->db);
-        return err;
+        return fakefs_rollback_error(&info->db, err);
     }
-    db_commit(&info->db);
+    result = db_commit(&info->db);
+    if (result != SQLITE_OK) return fakefs_db_error(result);
 
     inode = d_inode(from);
     ihold(inode);
@@ -229,17 +304,22 @@ static int unlink_common(struct inode *dir, struct dentry *dentry, int is_dir) {
     if (IS_ERR(path))
         return PTR_ERR(path);
 
-    db_begin_write(&info->db);
+    int result = db_begin_write(&info->db);
+    if (result != SQLITE_OK) {
+        __putname(path);
+        return fakefs_db_error(result);
+    }
     path_unlink(&info->db, path);
     __putname(path);
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) return fakefs_rollback_error(&info->db, fakefs_db_error(result));
 
     int err = (is_dir ? host_rmdirat : host_unlinkat)(INODE_FD(dir), dentry->d_name.name);
     if (err < 0) {
-        db_rollback(&info->db);
-        return err;
+        return fakefs_rollback_error(&info->db, err);
     }
-    db_commit(&info->db);
-    return 0;
+    result = db_commit(&info->db);
+    return result == SQLITE_OK ? 0 : fakefs_db_error(result);
 }
 
 static int fakefs_unlink(struct inode *dir, struct dentry *dentry) {
@@ -251,33 +331,15 @@ static int fakefs_rmdir(struct inode *dir, struct dentry *dentry) {
 }
 
 static int fakefs_symlink(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, const char *target) {
-    int fd = host_openat(INODE_FD(dir), dentry->d_name.name, O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0)
-        return fd;
-    ssize_t res = host_write(fd, target, strlen(target));
-    if (res < 0) {
-        host_close(fd);
-        host_unlinkat(INODE_FD(dir), dentry->d_name.name);
-        return res;
-    }
-    return finish_make_node(mnt_userns, dir, dentry, S_IFLNK | 0777, fd);
+    return fakefs_make_node(mnt_userns, dir, dentry, S_IFLNK | 0777, 0, target);
 }
 
 static int fakefs_mkdir(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode) {
-    int err = host_mkdirat(INODE_FD(dir), dentry->d_name.name, 0777);
-    if (err < 0)
-        return err;
-    err = finish_make_node(mnt_userns, dir, dentry, S_IFDIR | mode, -1);
-    if (err < 0)
-        host_rmdirat(INODE_FD(dir), dentry->d_name.name);
-    return err;
+    return fakefs_make_node(mnt_userns, dir, dentry, S_IFDIR | mode, 0, NULL);
 }
 
 static int fakefs_mknod(struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev) {
-    int fd = host_openat(INODE_FD(dir), dentry->d_name.name, O_RDWR | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0)
-        return fd;
-    return __finish_make_node(mnt_userns, dir, dentry, mode, dev, fd);
+    return fakefs_make_node(mnt_userns, dir, dentry, mode, dev, NULL);
 }
 
 static int fakefs_setattr(struct user_namespace *mnt_userns, struct dentry *dentry, struct iattr *attr) {
@@ -289,9 +351,12 @@ static int fakefs_setattr(struct user_namespace *mnt_userns, struct dentry *dent
     // attributes of ishstat
     struct fakefs_super *info = inode->i_sb->s_fs_info;
     if (attr->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID)) {
-        db_begin_write(&info->db);
+        int result = db_begin_write(&info->db);
+        if (result != SQLITE_OK) return fakefs_db_error(result);
         struct ish_stat stat;
         inode_read_stat_or_die(&info->db, inode->i_ino, &stat);
+        result = db_transaction_error(&info->db);
+        if (result != SQLITE_OK) return fakefs_rollback_error(&info->db, fakefs_db_error(result));
         if (attr->ia_valid & ATTR_MODE)
             stat.mode = attr->ia_mode;
         if (attr->ia_valid & ATTR_UID)
@@ -299,7 +364,9 @@ static int fakefs_setattr(struct user_namespace *mnt_userns, struct dentry *dent
         if (attr->ia_valid & ATTR_GID)
             stat.gid = from_kgid(mnt_userns, attr->ia_gid);
         inode_write_stat(&info->db, inode->i_ino, &stat);
-        db_commit(&info->db);
+        // No host mutation has occurred; metadata failures can still rollback.
+        err = fakefs_finish_read(&info->db, 0);
+        if (err < 0) return err;
     }
 
     // size
@@ -412,18 +479,24 @@ static int fakefs_iterate(struct file *file, struct dir_context *ctx) {
         } else if (strcmp(ent.name, "..") == 0) {
             ent.ino = d_inode(file->f_path.dentry->d_parent)->i_ino;
         } else {
-            db_begin_read(&info->db);
             if (dir_path_len + 1 + strlen(ent.name) + 1 > PATH_MAX)
-                continue; // a
+                continue;
+            int result = db_begin_read(&info->db);
+            if (result != SQLITE_OK) {
+                res = fakefs_db_error(result);
+                break;
+            }
             dir_path[dir_path_len] = '/';
             strcpy(&dir_path[dir_path_len + 1], ent.name);
             ent.ino = path_get_inode(&info->db, dir_path);
-            db_commit(&info->db);
+            res = fakefs_finish_read(&info->db, 0);
+            if (res < 0) break;
         }
         if (!dir_emit(ctx, ent.name, strlen(ent.name), ent.ino, ent.type))
             break;
         ctx->pos = host_telldir(dir) + 1;
     }
+    __putname(dir_path);
     return res;
 }
 
@@ -564,6 +637,8 @@ static int read_inode(struct inode *ino) {
     struct fakefs_super *info = ino->i_sb->s_fs_info;
     struct ish_stat ishstat;
     inode_read_stat_or_die(&info->db, ino->i_ino, &ishstat);
+    int result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK) return fakefs_db_error(result);
     ino->i_mode = ishstat.mode;
     i_uid_write(ino, ishstat.uid);
     i_gid_write(ino, ishstat.gid);
@@ -651,22 +726,32 @@ static int fakefs_fill_super(struct super_block *sb, struct fs_context *fc) {
     struct inode *root = new_inode(sb);
     if (root == NULL)
         return -ENOMEM;
-    db_begin_read(&info->db);
-    root->i_ino = path_get_inode(&info->db, "");
-    if (root->i_ino == 0) {
-        printk("fakefs: could not find root inode\n");
-        db_rollback(&info->db);
+    INODE_FD(root) = -1;
+    int result = db_begin_read(&info->db);
+    if (result != SQLITE_OK) {
         iput(root);
-        return -EINVAL;
+        return fakefs_db_error(result);
+    }
+    root->i_ino = path_get_inode(&info->db, "");
+    result = db_transaction_error(&info->db);
+    if (result != SQLITE_OK || root->i_ino == 0) {
+        printk("fakefs: could not find root inode\n");
+        err = fakefs_rollback_error(&info->db, result == SQLITE_OK ? -EINVAL : fakefs_db_error(result));
+        iput(root);
+        return err;
     }
     INODE_FD(root) = info->root_fd;
     err = read_inode(root);
     if (err < 0) {
-        db_rollback(&info->db);
+        err = fakefs_rollback_error(&info->db, err);
         iput(root);
         return err;
     }
-    db_commit(&info->db);
+    err = fakefs_finish_read(&info->db, 0);
+    if (err < 0) {
+        iput(root);
+        return err;
+    }
 
     sb->s_op = &fakefs_super_ops;
     sb->s_d_op = &fakefs_dops;
@@ -748,9 +833,16 @@ static int fakefs_init_fs_context(struct fs_context *fc) {
 
 static void fakefs_kill_sb(struct super_block *sb) {
     struct fakefs_super *info = sb->s_fs_info;
-    fake_db_deinit(&info->db);
-    host_close(info->root_fd);
+    // Eviction still uses s_fs_info and its root fd. Only release SQLite and
+    // callback userdata once all inodes have been evicted.
     kill_anon_super(sb);
+    int result = fake_db_deinit(&info->db);
+    if (result != SQLITE_OK) {
+        printk("fakefs: retaining blocked superblock connection=%llu SQLite=%d\n",
+               (unsigned long long)info->db.lifecycle_connection_id, result);
+        return;
+    }
+    host_close(info->root_fd);
     kfree(info);
 }
 

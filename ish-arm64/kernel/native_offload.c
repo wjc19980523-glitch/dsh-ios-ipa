@@ -373,22 +373,34 @@ static void register_file_if_new(struct fakefs_db *fs, const char *guest_path,
     if (!S_ISREG(st.st_mode))
         return;
 
-    db_begin_write(fs);
-    inode_t existing = path_get_inode(fs, guest_path);
-    if (existing != 0) {
-        db_commit(fs);
+    int rc = db_begin_write(fs);
+    if (rc != SQLITE_OK) {
+        db_require_external_recovery(fs, rc);
         return;
     }
-
-    struct ish_stat ishstat = {
-        .mode = S_IFREG | (st.st_mode & 0777),
-        .uid  = current->euid,
-        .gid  = current->egid,
-        .rdev = 0,
-    };
-    path_create(fs, guest_path, &ishstat);
-    db_commit(fs);
-    printk("native_offload: registered %s in fakefs\n", guest_path);
+    inode_t existing = path_get_inode(fs, guest_path);
+    if (db_transaction_error(fs) != SQLITE_OK) {
+        db_require_external_recovery(fs, db_transaction_error(fs));
+        return;
+    }
+    if (existing == 0) {
+        struct ish_stat ishstat = { .mode = S_IFREG | (st.st_mode & 0777),
+            .uid = current ? current->euid : 0, .gid = current ? current->egid : 0, .rdev = 0 };
+        path_create(fs, guest_path, &ishstat);
+        if (db_transaction_error(fs) != SQLITE_OK) {
+            db_require_external_recovery(fs, db_transaction_error(fs));
+            return;
+        }
+    }
+    rc = db_commit(fs);
+    if (rc != SQLITE_OK) {
+        /* Native code already created the host content. SQL rollback cannot
+         * unregister that side effect or establish host/metadata consistency. */
+        db_require_external_recovery(fs, rc);
+        return;
+    }
+    if (existing == 0) printk("native_offload: file registered; connection=%llu\n",
+            (unsigned long long) fs->lifecycle_connection_id);
 }
 
 // Scan a single directory (non-recursive) for unregistered files

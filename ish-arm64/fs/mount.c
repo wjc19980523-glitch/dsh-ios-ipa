@@ -4,6 +4,14 @@
 #include "kernel/fs.h"
 #include "fs/path.h"
 #include "fs/real.h"
+#include "fs/fake-db.h"
+#include "debug.h"
+
+/* Failed fakefs mounts retain SQLite callback userdata and recovery evidence.
+ * They are deliberately absent from the operational mount lookup list. */
+static struct list failed_fakefs_mounts = {&failed_fakefs_mounts, &failed_fakefs_mounts};
+static pthread_mutex_t failed_fakefs_mounts_lock = PTHREAD_MUTEX_INITIALIZER;
+extern const struct fs_ops fakefs;
 
 #define MAX_FILESYSTEMS 10
 static const struct fs_ops *filesystems[MAX_FILESYSTEMS] = {
@@ -96,7 +104,7 @@ void mount_release(struct mount *mount) {
 }
 
 int do_mount(const struct fs_ops *fs, const char *source, const char *point, const char *info, int flags) {
-    struct mount *new_mount = malloc(sizeof(struct mount));
+    struct mount *new_mount = calloc(1, sizeof(struct mount));
     if (new_mount == NULL)
         return _ENOMEM;
     new_mount->point = strdup(point);
@@ -106,9 +114,26 @@ int do_mount(const struct fs_ops *fs, const char *source, const char *point, con
     new_mount->fs = fs;
     new_mount->data = NULL;
     new_mount->refcount = 0;
+    if (fs == &fakefs) atomic_init(&new_mount->fakefs.blocked_error, SQLITE_OK);
+    if (!new_mount->point || !new_mount->source || !new_mount->info) {
+        free((void *) new_mount->point);
+        free((void *) new_mount->source);
+        free((void *) new_mount->info);
+        free(new_mount);
+        return _ENOMEM;
+    }
     if (fs->mount) {
         int err = fs->mount(new_mount);
         if (err < 0) {
+            if (fs == &fakefs && fakefs_db_recovery_required(&new_mount->fakefs)) {
+                pthread_mutex_lock(&failed_fakefs_mounts_lock);
+                list_add(&failed_fakefs_mounts, &new_mount->mounts);
+                pthread_mutex_unlock(&failed_fakefs_mounts_lock);
+                printk("fakefs failed mount retained: error=%d connection=%llu\n", err,
+                        (unsigned long long) new_mount->fakefs.lifecycle_connection_id);
+                return err;
+            }
+            free((void *) new_mount->info);
             free((void *) new_mount->point);
             free((void *) new_mount->source);
             free(new_mount);
@@ -134,8 +159,11 @@ int mount_remove(struct mount *mount) {
     if (mount->refcount != 0)
         return _EBUSY;
 
-    if (mount->fs->umount)
-        mount->fs->umount(mount);
+    int error = 0;
+    if (mount->fs->umount) {
+        error = mount->fs->umount(mount);
+        if (error < 0) return error;
+    }
     list_remove(&mount->mounts);
     free((void *) mount->info);
     free((void *) mount->source);
@@ -145,7 +173,9 @@ int mount_remove(struct mount *mount) {
     // Invalidate all mount caches
     global_mount_version++;
 
-    return 0;
+    // A positive callback errno means teardown completed irreversibly. Never
+    // leave its dead handles operational or retry close on a reused host fd.
+    return -error;
 }
 
 int do_umount(const char *point) {

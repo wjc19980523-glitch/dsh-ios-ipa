@@ -16,6 +16,7 @@
     XCTAssertEqualObjects(s[@"host_launch_id"], DSHLogBuffer.hostLaunchID);
     XCTAssertEqualObjects(s[@"event"], @"test");
     XCTAssertNotNil(s[@"health_generation"]);
+    XCTAssertNotNil(s[@"paused_tty_reads"]);
     XCTAssertGreaterThanOrEqual([s[@"active_operations"] unsignedLongLongValue], 1u);
     XCTAssertGreaterThanOrEqual([s[@"active_fakefs_operations"] unsignedLongLongValue], 1u);
     XCTAssertEqualObjects(s[@"active_fakefs_operations_complete"], @([s[@"tracking_overflows"] unsignedLongLongValue] == 0));

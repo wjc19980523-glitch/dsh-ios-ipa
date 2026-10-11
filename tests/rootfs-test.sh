@@ -306,7 +306,10 @@ start=$(date +%s)
 # DSH_PROBE_LISTEN turns on the CI-only listen/close probe. It is never set in
 # the shipped app, so the probe file stays inert there; here it is how we tell
 # "never listened" from "listened and then something closed it" in one run.
-( "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
+# DSH_SOCK_DIAG turns on the iSH kernel-side socket lifecycle diagnostic (in
+# sock.c), tracing bind/listen on $PORT. It is a host env var, read by the ish
+# process via getenv, so it is set *before* the ish command, not inside guest.
+( DSH_SOCK_DIAG=$PORT "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
 up=0
 prev_bytes=0
 server_noticed=0
@@ -485,6 +488,13 @@ if [ "$up" != 1 ]; then
     echo "     --- probe (net.Server listen/close trace) ---"
     grep '\[probe\]' "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/       /' || echo "       (no [probe] lines — probe did not load)"
     echo "     --- end probe ---"
+    # The kernel-side socket lifecycle trace (sock.c, DSH_SOCK_DIAG): bind/listen
+    # return values, real_fd, bound address, and SO_ACCEPTCONN after listen. This
+    # is the ground truth for "did the host really listen", kept apart from the
+    # Node-level [probe] trace.
+    echo "     --- DSH_DIAG (kernel socket lifecycle) ---"
+    grep 'DSH_DIAG' "$WORK/dsh-serve.log" 2>/dev/null | sed 's/^/       /' || echo "       (no DSH_DIAG lines — iSH built without the diagnostic, or env var not set)"
+    echo "     --- end DSH_DIAG ---"
     echo "     --- dsh-serve.log (last 60 lines) ---"
     # Redaction at the point of display, for the case where the file itself was
     # never rewritten (the token was never captured, so line 306 never ran).

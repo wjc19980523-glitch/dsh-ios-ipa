@@ -1,6 +1,10 @@
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -14,6 +18,36 @@
 #include "debug.h"
 
 #define SOCKET_TYPE_MASK 0xf
+
+// --- DSH socket lifecycle diagnostic (CI-only) ---
+// Activated by the DSH_SOCK_DIAG environment variable, whose value is the
+// decimal port to trace. Only bind/listen on that port are logged, so the rest
+// of the guest's socket traffic is untouched. The shipped app never sets this
+// variable, so the diagnostic is inert in a release build.
+static int dsh_diag_port(void) {
+    static int initialized = 0, port = 0;
+    if (!initialized) {
+        const char *p = getenv("DSH_SOCK_DIAG");
+        port = p ? atoi(p) : 0;
+        initialized = 1;
+    }
+    return port;
+}
+static void dsh_diag_sockaddr(const struct sockaddr *sa, char *out, size_t outlen) {
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *sin = (const struct sockaddr_in *) sa;
+        char a[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sin->sin_addr, a, sizeof(a));
+        snprintf(out, outlen, "%s:%u", a, (unsigned) ntohs(sin->sin_port));
+    } else if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *) sa;
+        char a[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &sin6->sin6_addr, a, sizeof(a));
+        snprintf(out, outlen, "[%s]:%u", a, (unsigned) ntohs(sin6->sin6_port));
+    } else {
+        snprintf(out, outlen, "family=%d", sa->sa_family);
+    }
+}
 
 const struct fd_ops socket_fdops;
 
@@ -342,6 +376,18 @@ int_t sys_bind(fd_t sock_fd, addr_t sockaddr_addr, uint_t sockaddr_len) {
         return err;
 
     err = bind(sock->real_fd, (void *) &sockaddr, sockaddr_len);
+    {
+        int diag = dsh_diag_port();
+        if (diag > 0) {
+            struct sockaddr *sa = (struct sockaddr *) &sockaddr;
+            if (sa->sa_family == AF_INET && (int) ntohs(((struct sockaddr_in *) sa)->sin_port) == diag) {
+                char a[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &((struct sockaddr_in *) sa)->sin_addr, a, sizeof(a));
+                printk("DSH_DIAG bind: guest_fd=%d real_fd=%d addr=%s:%d ret=%d errno=%d\n",
+                       sock_fd, sock->real_fd, a, diag, err, err < 0 ? errno : 0);
+            }
+        }
+    }
     if (err < 0) {
         // sockaddr_read_bind() already stashed the freshly-retained inode (and/or
         // abstract socket) into sock->socket on success. When the real bind() then
@@ -417,6 +463,28 @@ int_t sys_listen(fd_t sock_fd, int_t backlog) {
     if (sock == NULL)
         return _EBADF;
     int err = listen(sock->real_fd, backlog);
+    {
+        int diag = dsh_diag_port();
+        if (diag > 0) {
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
+            if (getsockname(sock->real_fd, (struct sockaddr *) &ss, &sslen) == 0) {
+                int is_diag = (ss.ss_family == AF_INET && (int) ntohs(((struct sockaddr_in *) &ss)->sin_port) == diag);
+                if (is_diag) {
+                    char a[128];
+                    dsh_diag_sockaddr((struct sockaddr *) &ss, a, sizeof(a));
+                    printk("DSH_DIAG listen: guest_fd=%d real_fd=%d ret=%d errno=%d bound=%s\n",
+                           sock_fd, sock->real_fd, err, err < 0 ? errno : 0, a);
+                    if (err == 0) {
+                        int acc = -1;
+                        socklen_t acclen = sizeof(acc);
+                        int ga = getsockopt(sock->real_fd, SOL_SOCKET, SO_ACCEPTCONN, &acc, &acclen);
+                        printk("DSH_DIAG verify: SO_ACCEPTCONN=%d getsockopt_ret=%d\n", acc, ga);
+                    }
+                }
+            }
+        }
+    }
     if (err < 0)
         return errno_map();
     sockrestart_begin_listen(sock, backlog);
@@ -1540,6 +1608,21 @@ static ssize_t sock_write(struct fd *fd, const void *buf, size_t size) {
 }
 
 static int sock_close(struct fd *fd) {
+    {
+        int diag = dsh_diag_port();
+        if (diag > 0) {
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
+            if (getsockname(fd->real_fd, (struct sockaddr *) &ss, &sslen) == 0) {
+                int is_diag = (ss.ss_family == AF_INET && (int) ntohs(((struct sockaddr_in *) &ss)->sin_port) == diag);
+                if (is_diag) {
+                    char a[128];
+                    dsh_diag_sockaddr((struct sockaddr *) &ss, a, sizeof(a));
+                    printk("DSH_DIAG close: real_fd=%d bound=%s (closing this socket)\n", fd->real_fd, a);
+                }
+            }
+        }
+    }
     sockrestart_end_listen(fd);
     // FIXME next 3 lines should go in a function like release_unix_names
     inode_release_if_exist(fd->socket.unix_name_inode);

@@ -597,7 +597,12 @@ if [ -n "$serve_url" ] || grep -q 'dsh web:' "$RAW_LOG"; then
         echo "       first served byte:              never (no successful request)"
         echo "     total spent waiting:       ${elapsed}s"
     fi
-    grep -E 'dsh web:|listening|plugin|ready' "$RAW_LOG" 2>/dev/null | tail -8 | sed 's/^/       /'
+    # dsh web: lines carry the token, so scrub it here too — every console
+    # write must be redacted, not just the uploaded file.
+    grep -E 'dsh web:|listening|plugin|ready' "$RAW_LOG" 2>/dev/null \
+        | sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
+              -e 's/token=<redacted>\+/token=<redacted>/g' \
+        | tail -8 | sed 's/^/       /'
     echo "     --- end phased boot ---"
 fi
 # The bound is a guard, so make it loud when it is the only thing that held.

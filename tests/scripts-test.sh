@@ -87,10 +87,11 @@ grep -q 'raw_token}" -ge 43' tests/rootfs-test.sh || {
   echo 'not ok: the launch token is captured before all 43 characters have been written' >&2
   exit 1
 }
-# The redaction pattern must be anchored to the token. `token=[A-Za-z0-9_-]*`
-# also matches the empty string, so a second pass turns an already-redacted line
-# into `token=<redacted><redacted>`.
-grep -qF 's/token=$token\$/token=<redacted>/g' tests/rootfs-test.sh || {
+# The redaction pattern must be anchored to the 43-char token and be idempotent.
+# `token=[A-Za-z0-9_-]*` also matches the empty string, so a second pass turns
+# an already-redacted line into `token=<redacted><redacted>`. The anchored
+# 43-char pattern plus the collapse rule keep two passes stable.
+grep -qF 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' tests/rootfs-test.sh || {
   echo 'not ok: the launch-token redaction is unanchored and is not idempotent' >&2
   exit 1
 }

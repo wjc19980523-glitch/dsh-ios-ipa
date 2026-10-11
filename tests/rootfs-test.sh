@@ -487,10 +487,14 @@ if [ "$up" != 1 ]; then
     # alone is how a refused port and a DNS hang get conflated, and how a fix
     # gets aimed at the wrong layer. Print all three -- code, exit code, wall
     # time -- plus curl's own error string.
-    set +e
+    #
+    # NOTE: this script runs under `set -uo pipefail` (no -e), so a failing
+    # curl does not abort it and we can read $? directly. Do NOT add `set -e`
+    # here — it would turn every later command that is *expected* to fail
+    # (plugin_url's grep on an empty index, curl probes, etc.) into an early
+    # exit, cutting off the phased-boot summary and the rest of the diagnostics.
     probe_out=$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' "$base_url" 2>&1)
     probe_exit=$?
-    set -e
     probe_code=$(printf '%s' "$probe_out" | awk '{print $1}')
     probe_time=$(printf '%s' "$probe_out" | awk '{print $2}')
     case "$probe_exit" in
@@ -543,14 +547,20 @@ if [ "$up" != 1 ]; then
     echo "     --- end dsh-serve.log ---"
 fi
 check "index carries __DSH_BOOT__ manifest" grep -q '__DSH_BOOT__' "$WORK/index.html"
-plugin_url=$(grep -o '/plugins/[^"]*client.js?rev=[0-9a-f]*' "$WORK/index.html" | head -1)
-# The bundle is a separate document. The auth cookie the entry URL minted is
-# the credential now, so replay it rather than re-attaching the token: dsh's
-# authorizeIndex only fires on `GET /?token=`, not on a plugin route, so a
-# token on the bundle URL would be ignored and the request refused 401.
-bundle_url="http://127.0.0.1:$PORT$plugin_url"
-code=$(curl -s -b "$WORK/cookies.txt" -o /dev/null -w '%{http_code}' "$bundle_url")
-check "client plugin bundle served ($plugin_url -> $code)" test "$code" = 200
+# dsh 0.2.x ships the client as `./assets/index-<hash>.js` (Vite output), not
+# the 0.1.x `/plugins/...client.js?rev=` path. Extract the real bundle src and
+# assert it is a JS document, not the HTML index: an empty/absent match would
+# otherwise make bundle_url point at the index itself, and a 200 there would be
+# mistaken for the bundle. The auth cookie minted at the entry URL is the
+# credential; dsh's authorizeIndex only fires on `GET /?token=`, not on an
+# asset route, so replay the cookie rather than re-attaching the token.
+plugin_url=$(grep -oE '\./assets/[^"]+\.js' "$WORK/index.html" | head -1 | sed 's#^\./##')
+check "index.html references a client JS bundle" test -n "$plugin_url"
+bundle_url="http://127.0.0.1:$PORT/$plugin_url"
+code=$(curl -s -b "$WORK/cookies.txt" -o "$WORK/bundle.js" -w '%{http_code}' "$bundle_url")
+check "client bundle served ($plugin_url -> $code)" test "$code" = 200
+grep -q '__DSH_BOOT__' "$WORK/bundle.js"; bundle_is_html=$?
+check "client bundle is JS, not the HTML index" test "$bundle_is_html" != 0
 sleep 5
 check "server still alive after 5s" curl -fs -b "$WORK/cookies.txt" -o /dev/null "http://127.0.0.1:$PORT/"
 grep -Eq 'fatal|Error:' "$RAW_LOG"; noerr=$?

@@ -12,14 +12,34 @@
 //
 // 这三条把「从未监听」和「监听后又被 close 掉」一次区分开，而不是再猜一轮。
 import net from "node:net";
+import fs from "node:fs";
 
 const origListen = net.Server.prototype.listen;
 const origClose = net.Server.prototype.close;
 let seq = 0;
 
+function countFds() {
+  try {
+    return fs.readdirSync("/proc/self/fd").length;
+  } catch {
+    return -1;
+  }
+}
+function countHandles() {
+  try {
+    return process._getActiveHandles().length;
+  } catch {
+    return -1;
+  }
+}
+
 net.Server.prototype.listen = function (...args) {
   const id = ++seq;
-  console.log(`[probe] #${id} LISTEN port=${args[0]} host=${args[1]}`);
+  // fds/handles at the moment of listen: if iSH's socket forwarding breaks
+  // under a large fd/socket table (the one delta left between the clean sanity
+  // servers that DID reach the host and dsh, which did not), these numbers name
+  // the threshold.
+  console.log(`[probe] #${id} LISTEN port=${args[0]} host=${args[1]} fds=${countFds()} handles=${countHandles()}`);
   const r = origListen.apply(this, args);
   this.once("listening", () => {
     console.log(`[probe] #${id} LISTENING addr=${JSON.stringify(this.address())} listening=${this.listening}`);

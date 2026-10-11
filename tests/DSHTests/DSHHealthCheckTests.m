@@ -268,7 +268,9 @@
     [server stop];
 }
 
-/// A healthy server is reported healthy, and the cheap method is used.
+/// A healthy server is reported healthy. GET is used, not HEAD: dsh 0.2.x only
+/// completes launch-token authentication on a GET, so HEAD would be answered
+/// 401 and misread a healthy guest as needing re-authentication.
 - (void)testProbeSucceedsAgainstHealthyServer {
     DSHTestHTTPServer *server = [[DSHTestHTTPServer alloc] initWithPort:0];
     XCTAssertNotNil(server);
@@ -277,8 +279,8 @@
         XCTAssertTrue(result.alive);
         XCTAssertEqual(result.outcome, DSHProbeOutcomeAnswered);
         XCTAssertEqual(result.statusCode, 200);
-        XCTAssertEqualObjects(result.method, @"HEAD", @"HEAD is tried first");
-        XCTAssertGreaterThan(server.headRequestCount, 0u);
+        XCTAssertEqualObjects(result.method, @"GET", @"GET is used so the token handshake can complete");
+        XCTAssertGreaterThan(server.getRequestCount, 0u);
         [e fulfill];
     }];
     [self waitForExpectations:@[e] timeout:15];

@@ -21,7 +21,7 @@ typedef NS_ENUM(NSInteger, DSHProbeOutcome) {
     /// to whoever asked, which for 127.0.0.1 means this app.
     DSHProbeOutcomeAnswered = 0,
     /// The request exceeded its budget. On this emulator a cold JIT plus a
-    /// busy CPU can push a trivial HEAD well past a few seconds.
+    /// busy CPU can push a trivial GET well past a few seconds.
     DSHProbeOutcomeTimedOut,
     /// The connection was refused, reset, or could not be established: no
     /// listener is bound, so the server is genuinely gone.
@@ -54,7 +54,7 @@ typedef NS_ENUM(NSInteger, DSHProbeOutcome) {
 @property (nonatomic, readonly) NSInteger statusCode;
 /// Wall-clock duration of the request in seconds.
 @property (nonatomic, readonly) NSTimeInterval duration;
-/// HTTP method actually used ("HEAD", or "GET" after the HEAD fallback).
+/// HTTP method actually used ("GET").
 @property (nonatomic, readonly, copy) NSString *method;
 /// Underlying transport error, when there was one.
 @property (nonatomic, readonly, nullable) NSError *error;
@@ -99,9 +99,9 @@ typedef NS_ENUM(NSInteger, DSHProbeOutcome) {
 @property (nonatomic, readonly, getter=isRunning) BOOL running;
 
 /// One-shot check with full diagnostics. `completion` runs on the main queue.
-/// A HEAD request is tried first (cheap, and the bundled frontend answers it);
-/// if HEAD fails in a way that suggests method rejection rather than a dead
-/// listener, the check retries once with GET before giving up.
+/// Uses GET, because dsh 0.2.x only completes launch-token authentication on a
+/// GET (HEAD is answered 401), so a HEAD-only check would misread a healthy
+/// guest as needing re-authentication.
 + (void)checkURL:(NSURL *)url
          timeout:(NSTimeInterval)timeout
        completion:(void (^)(DSHProbeResult *result))completion;

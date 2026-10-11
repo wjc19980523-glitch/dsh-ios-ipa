@@ -120,7 +120,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
         // The guest boots in about three minutes on a real iPad under dsh
         // 0.2.x (see _startupTimeout above; it was ~40s under 0.1.x).
         // Immediately afterwards the emulated CPU is cold and the JIT is still
-        // warming, so a 5-second budget for a single HEAD was optimistic enough
+        // warming, so a 5-second budget for a single GET was optimistic enough
         // to be wrong: it reported healthy servers dead and rebooted a working
         // guest in a loop.
         _healthCheckTimeout = 15;

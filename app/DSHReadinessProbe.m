@@ -140,7 +140,13 @@
         return;
     }
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:self.url];
-    req.HTTPMethod = @"HEAD";
+    // dsh 0.2.x only completes launch-token authentication on a GET: its
+    // authorizeIndex() runs on `GET /?token=...` (which 303s into the app with
+    // a Set-Cookie), while `HEAD /?token=...` is answered 401. Polling with
+    // HEAD therefore never sees the authenticated document and the app spins
+    // in Starting forever. GET drives the real auth flow (303 -> cookie -> 200)
+    // and NSURLSession follows the redirect to the final 200.
+    req.HTTPMethod = @"GET";
     req.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
     __weak typeof(self) weakSelf = self;
     NSURLSessionDataTask *task = [self.session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -236,7 +242,7 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
     config.timeoutIntervalForResource = totalTimeout;
     config.requestCachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
     config.waitsForConnectivity = NO;
-    // A HEAD against a just-resumed server can otherwise reuse a socket the
+    // A request against a just-resumed server can otherwise reuse a socket the
     // kernel already tore down during suspension, which surfaces as a bogus
     // failure on the first request after foregrounding.
     config.HTTPShouldUsePipelining = NO;
@@ -284,13 +290,18 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
     NSTimeInterval total = timeout > 0 ? timeout : 30;
     NSTimeInterval connect = MIN(MAX(total * 0.6, 3.0), total);
 
-    [self performRequestWithMethod:@"HEAD"
+    // Use GET, not HEAD: dsh 0.2.x completes launch-token authentication only
+    // on a GET (authorizeIndex runs on `GET /?token=...` and 303s into the app
+    // with a Set-Cookie). HEAD is answered 401, which the resume path would
+    // misread as "re-authenticate" even though the guest is healthy. GET drives
+    // the real flow and NSURLSession follows the redirect to the final 200.
+    [self performRequestWithMethod:@"GET"
                                url:url
                     connectTimeout:connect
                       totalTimeout:total
                         completion:^(NSURLResponse *response, NSError *error, NSTimeInterval elapsed) {
         DSHProbeResult *result = [DSHProbeResult new];
-        result.method = @"HEAD";
+        result.method = @"GET";
         result.duration = elapsed;
         result.error = error;
 
@@ -301,52 +312,12 @@ static DSHProbeOutcome DSHProbeOutcomeForStatusCode(NSInteger code) {
             // which is a "go and authenticate", never a "ready".
             result.statusCode = code;
             result.outcome = DSHProbeOutcomeForStatusCode(code);
-            completion(result);
-            return;
-        }
-
-        // No HTTP answer from HEAD. A 4xx/405-style refusal never reaches here
-        // (that is a response), so this is a transport-level failure. Retry
-        // once with GET before calling it: some servers and proxies drop HEAD
-        // outright, and a false "dead" verdict would restart a healthy guest.
-        if (error.code == NSURLErrorCancelled) {
+        } else if (error.code == NSURLErrorCancelled) {
             result.outcome = DSHProbeOutcomeCancelled;
-            completion(result);
-            return;
-        }
-
-        NSTimeInterval remaining = total - elapsed;
-        if (remaining < 1.0) {
-            // No budget left for a second attempt; report what we have.
+        } else {
             result.outcome = DSHProbeOutcomeForError(error);
-            completion(result);
-            return;
         }
-
-        [self performRequestWithMethod:@"GET"
-                                   url:url
-                        connectTimeout:MIN(MAX(remaining * 0.6, 3.0), remaining)
-                          totalTimeout:remaining
-                            completion:^(NSURLResponse *retryResponse, NSError *retryError, NSTimeInterval retryElapsed) {
-            DSHProbeResult *retry = [DSHProbeResult new];
-            retry.method = @"GET";
-            retry.duration = elapsed + retryElapsed;
-            retry.error = retryError;
-            if ([retryResponse isKindOfClass:NSHTTPURLResponse.class]) {
-                NSInteger code = ((NSHTTPURLResponse *) retryResponse).statusCode;
-                retry.statusCode = code;
-                retry.outcome = DSHProbeOutcomeForStatusCode(code);
-            } else {
-                // Prefer the GET diagnosis unless it was merely late, in which
-                // case the HEAD timeout is the more informative story.
-                DSHProbeOutcome head = DSHProbeOutcomeForError(error);
-                DSHProbeOutcome get = DSHProbeOutcomeForError(retryError);
-                retry.outcome = (get == DSHProbeOutcomeCancelled && head != DSHProbeOutcomeCancelled) ? head : get;
-                if (retry.error == nil)
-                    retry.error = error;
-            }
-            completion(retry);
-        }];
+        completion(result);
     }];
 }
 

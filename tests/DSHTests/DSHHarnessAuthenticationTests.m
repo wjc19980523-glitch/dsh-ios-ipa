@@ -541,9 +541,10 @@
     [server stop];
 }
 
-/// HEAD is refused too. The readiness poll uses HEAD, so a server that only
-/// protected GET would look healthy to the poll while refusing the page — the
-/// exact shape of the original misdiagnosis.
+/// HEAD is refused too. This is why the readiness poll and the health check
+/// must use GET: a server that only authenticates GET answers HEAD with 401,
+/// so a HEAD-based poll would look "not ready" forever even though the guest
+/// is healthy — the exact shape of the original misdiagnosis.
 - (void)testHeadIsAlsoRefusedWithoutTheToken {
     DSHTestHTTPServer *server = [[DSHTestHTTPServer alloc] initWithPort:0];
     XCTAssertNotNil(server);
@@ -558,6 +559,49 @@
         [done fulfill];
     }] resume];
     [self waitForExpectations:@[done] timeout:10];
+    [server stop];
+}
+
+/// The one-shot health check must drive the token handshake with GET and come
+/// back "alive" against a server that authenticates only GET — a HEAD-based
+/// check would return 401 and misread a healthy guest as needing re-auth.
+- (void)testCheckURLCompletesTheHandshakeWithGET {
+    DSHTestHTTPServer *server = [[DSHTestHTTPServer alloc] initWithPort:0];
+    XCTAssertNotNil(server);
+    server.requiresLaunchToken = YES;
+    server.launchToken = @"check-url-token";
+    NSURL *entry = [DSHHarnessAuth authenticatedEntryURLWithBaseURL:server.baseURL token:@"check-url-token"];
+
+    XCTestExpectation *done = [self expectationWithDescription:@"check url"];
+    [DSHReadinessProbe checkURL:entry timeout:5 completion:^(DSHProbeResult *result) {
+        XCTAssertTrue(result.alive, @"GET must complete the token exchange, got: %@", result.summary);
+        XCTAssertEqual(result.outcome, DSHProbeOutcomeAnswered);
+        XCTAssertEqualObjects(result.method, @"GET");
+        XCTAssertEqual(server.tokenExchangeCount, 1u, @"the token URL minted the cookie");
+        [done fulfill];
+    }];
+    [self waitForExpectations:@[done] timeout:15];
+    [server stop];
+}
+
+/// The startup readiness poll uses GET, so it reaches Ready through the same
+/// handshake (GET ?token= → 303 → cookie → 200) instead of spinning forever on
+/// HEAD's 401. This is the on-device "stuck in Starting" regression.
+- (void)testReadinessPollCompletesTheHandshakeWithGET {
+    DSHTestHTTPServer *server = [[DSHTestHTTPServer alloc] initWithPort:0];
+    XCTAssertNotNil(server);
+    server.requiresLaunchToken = YES;
+    server.launchToken = @"poll-token";
+    NSURL *entry = [DSHHarnessAuth authenticatedEntryURLWithBaseURL:server.baseURL token:@"poll-token"];
+
+    DSHReadinessProbe *probe = [[DSHReadinessProbe alloc] initWithURL:entry interval:0.1 timeout:10];
+    XCTestExpectation *done = [self expectationWithDescription:@"poll ready"];
+    [probe startWithHandler:^(BOOL ready, NSTimeInterval elapsed) {
+        XCTAssertTrue(ready, @"the poll must complete the handshake with GET");
+        XCTAssertEqual(server.tokenExchangeCount, 1u);
+        [done fulfill];
+    }];
+    [self waitForExpectations:@[done] timeout:20];
     [server stop];
 }
 

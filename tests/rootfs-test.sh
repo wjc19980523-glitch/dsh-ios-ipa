@@ -37,7 +37,13 @@ ok()  { pass=$((pass+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 # check <name> <command...>: runs the command (no eval), records the result
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
-filter() { sed '/expose_wasm/d'; }
+# sed block-buffers its output when stdout is a file/pipe, so a healthy server's
+# announcement sits in the buffer until the process exits. That made earlier
+# runs misread "the announcement appeared at 163s" as a live event when it was
+# actually flushed at exit, and paired it with an lsof that ran after exit.
+# perl with $| = 1 flushes every line, so the log is real-time. (grep's
+# --line-buffered is GNU-only; macOS has perl.)
+filter() { perl -ne 'BEGIN { $| = 1 } print unless /expose_wasm/'; }
 timed() {
     if command -v gtimeout >/dev/null 2>&1; then
         gtimeout "$@"
@@ -310,6 +316,8 @@ start=$(date +%s)
 # sock.c), tracing bind/listen on $PORT. It is a host env var, read by the ish
 # process via getenv, so it is set *before* the ish command, not inside guest.
 ( DSH_SOCK_DIAG=$PORT "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "DSH_PORT=$PORT DSH_PROBE_LISTEN=/usr/local/share/dsh/probe-listen.mjs dsh-serve" 2>&1 | filter > "$WORK/dsh-serve.log" ) &
+ISH_PID=$!
+ish_exit=""
 up=0
 prev_bytes=0
 server_noticed=0
@@ -325,6 +333,19 @@ token=""
 idle=0
 for i in $(seq 1 "$BOOT_TIMEOUT"); do
     sleep 1
+    # Detect the host ish process's exit in real time. The previous runs could
+    # not: the log pipe block-buffered, so "the announcement appeared at 163s"
+    # was actually flushed at process exit and got paired with a later lsof.
+    # kill -0 is instant and needs no log, so it tells us when (and how) the
+    # process really went away.
+    if ! kill -0 "$ISH_PID" 2>/dev/null; then
+        wait "$ISH_PID" 2>/dev/null
+        ish_exit=$?
+        sig=""
+        if [ "$ish_exit" -ge 128 ]; then sig=" (signal $((ish_exit - 128)))"; fi
+        echo "     [${i}s] ish process exited: code=$ish_exit$sig"
+        break
+    fi
     if [ -z "$serve_url" ]; then
         # The token is 43 base64url characters, and a 43-character line is not
         # guaranteed to land in one write: the line below was first observed
@@ -342,27 +363,20 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
         fi
         if [ -n "$serve_url" ]; then
             token="${serve_url#*token=}"
-            # The launch token is a bearer credential for this guest's UI. It
-            # must not travel into the CI artefact, the job summary, or an
-            # issue. Replace it the moment it has been parsed, and keep it only
-            # in this shell.
-            #
-            # Anchor the pattern to the token itself rather than using
-            # `token=[A-Za-z0-9_-]*`. `*` matches zero characters too, so an
-            # unanchored pattern rewrites an already-redacted
-            # `token=<redacted>` into `token=<redacted><redacted>` on every
-            # later pass.
-            sed -i.bak "s/token=$token\$/token=<redacted>/g" "$WORK/dsh-serve.log" 2>/dev/null && rm -f "$WORK/dsh-serve.log.bak"
+            # The token is kept only in this shell variable. We deliberately do
+            # NOT sed -i the log here: the filter pipeline is still writing it,
+            # and rewriting a live file corrupts it. Redaction happens at
+            # display/upload time (see the failure-path dump), never by
+            # mutating the in-flight log.
             server_noticed=$i
             served_at=$i
             echo "     [${i}s] server announced its web URL on port $PORT (token captured, not printed)"
-            # The probe says the Node server reached 'listening', so snapshot the
-            # host socket table at this exact moment. If 3181 LISTENs here and is
-            # gone by the failure dump, the port was closed later (by something
-            # that bypasses net.Server.close, which the probe would have seen). If
-            # it is absent even now, iSH's sys_listen returned success without the
-            # host ever listening. The two point at opposite fixes.
-            echo "     [${i}s] host sockets at announcement:"
+            # This snapshot only runs while the ish process is still alive (the
+            # kill -0 check above would have broken out otherwise), so the URL
+            # capture and this lsof are contemporaneous within one second. Note
+            # node may still block-buffer its own stdout, so the URL line itself
+            # can lag; what matters is the pair of (process alive, LISTEN state).
+            echo "     [${i}s] host sockets while process alive:"
             lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sed 's/^/       /' || echo "       (no LISTEN on :$PORT at announcement)"
         fi
     fi
@@ -575,5 +589,16 @@ if [ "$up" = 1 ] && [ "$served_at" -ge "$BOOT_TIMEOUT" ]; then
 fi
 
 echo
+# The process has exited by now (or the timeout expired and we tore it down),
+# so the log is no longer being written. Redact the launch token into the file
+# itself so the uploaded artefact and the workflow's token-hygiene grep (which
+# scans build/rootfs-test/) never see it. This is a fresh copy, not sed -i on a
+# live file.
+if [ -f "$WORK/dsh-serve.log" ]; then
+    sed -e 's/token=[A-Za-z0-9_-]\{43\}/token=<redacted>/g' \
+        -e 's/token=<redacted>\+/token=<redacted>/g' \
+        "$WORK/dsh-serve.log" > "$WORK/dsh-serve.log.safe" 2>/dev/null \
+        && mv "$WORK/dsh-serve.log.safe" "$WORK/dsh-serve.log"
+fi
 echo "passed=$pass failed=$fail"
 [ "$fail" = 0 ]

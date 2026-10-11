@@ -13,6 +13,17 @@
 // 这三条把「从未监听」和「监听后又被 close 掉」一次区分开，而不是再猜一轮。
 import net from "node:net";
 import fs from "node:fs";
+import process from "node:process";
+
+// The real-time guarantee comes from the *filter* (perl $|=1), not from node:
+// node's console.log is already synchronous to a pipe/file (verified: a line
+// is visible immediately). The only buffering layer was sed in the pipeline.
+// Keep setBlocking as a harmless belt-and-braces; it does not change output.
+for (const stream of [process.stdout, process.stderr]) {
+    if (stream && stream._handle && typeof stream._handle.setBlocking === "function") {
+        stream._handle.setBlocking(true);
+    }
+}
 
 const origListen = net.Server.prototype.listen;
 const origClose = net.Server.prototype.close;

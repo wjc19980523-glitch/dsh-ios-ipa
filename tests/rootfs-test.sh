@@ -559,7 +559,11 @@ check "index.html references a client JS bundle" test -n "$plugin_url"
 bundle_url="http://127.0.0.1:$PORT/$plugin_url"
 code=$(curl -s -b "$WORK/cookies.txt" -o "$WORK/bundle.js" -w '%{http_code}' "$bundle_url")
 check "client bundle served ($plugin_url -> $code)" test "$code" = 200
-grep -q '__DSH_BOOT__' "$WORK/bundle.js"; bundle_is_html=$?
+# The JS bundle also references __DSH_BOOT__ (the frontend reads
+# window.__DSH_BOOT__), so that token does not separate it from the HTML index.
+# The index is a full HTML document and carries <html>/<!doctype>; the bundle
+# does not. Use those markers to prove we got JS, not the index.
+grep -qE '<html|<!doctype' "$WORK/bundle.js"; bundle_is_html=$?
 check "client bundle is JS, not the HTML index" test "$bundle_is_html" != 0
 sleep 5
 check "server still alive after 5s" curl -fs -b "$WORK/cookies.txt" -o /dev/null "http://127.0.0.1:$PORT/"

@@ -573,15 +573,19 @@ check "no fatal error in dsh-serve log" test "$noerr" != 0
 # ---------------------------------------------------------------------------
 # settings 回归测试：复现真机「欢迎弹窗确认状态保存失败」。
 # 前端 WelcomeNoticeStore.acknowledge() → scope.set('welcomeNoticeVersion', ...)
-# → settings.mutate("ui-settings-general", [{op:"set",path:["welcomeNoticeVersion"],
+# → settings/mutate("ui-settings-general", [{op:"set",path:["welcomeNoticeVersion"],
 # value:"2026-09-28.1"}], revision) RPC。这里直接走 /api RPC，检查 namespace 注册、
-# describe 的 writable/revision、mutate 的成功/失败与错误码、以及能否读回。
-# 诊断输出始终打印；mutate 失败时 check 会让套件变红，但错误码已在日志里。
+# describe 的 writable/revision、mutate 的成功/失败与错误码、以及 mutate 后再次
+# describe 读回 welcomeNoticeVersion（真实持久化验证，而非只信 mutate 应答）。
+#
+# RPC 端点与官方 web-auth.e2e.ts 一致：POST /api/settings/{describe,mutate}，
+# method 是 "settings/describe" / "settings/mutate"（斜杠分隔），payload 包
+# {"args": ...}。诊断输出始终打印；失败时错误码已在日志里。
 # ---------------------------------------------------------------------------
 echo "== settings: ui-settings-general describe + mutate =="
 curl -s -b "$WORK/cookies.txt" -H "Content-Type: application/json" \
-    -d '{"type":"client-request","rpcId":"s-desc","method":"settings.describe","payload":{}}' \
-    "http://127.0.0.1:$PORT/api/settings.describe" > "$WORK/settings-desc.json" 2>/dev/null
+    -d '{"type":"client-request","rpcId":"s-desc","method":"settings/describe","payload":{"args":{}}}' \
+    "http://127.0.0.1:$PORT/api/settings/describe" > "$WORK/settings-desc.json" 2>/dev/null
 desc_out=$(python3 - "$WORK/settings-desc.json" <<'PYEOF'
 import json, sys
 try:
@@ -603,13 +607,15 @@ else:
 PYEOF
 )
 echo "     describe: $desc_out"
-check "settings namespace is writable" printf '%s' "$desc_out" | grep -q 'writable=True'
-check "ui-settings-general namespace is registered" printf '%s' "$desc_out" | grep -q 'revision=[0-9]'
+printf '%s' "$desc_out" | grep -q 'writable=True'; _rc=$?
+check "settings namespace is writable" test "$_rc" = 0
+printf '%s' "$desc_out" | grep -q 'revision=[0-9]'; _rc=$?
+check "ui-settings-general namespace is registered" test "$_rc" = 0
 
 rev=$(printf '%s' "$desc_out" | grep -o 'revision=[0-9]*' | head -1 | cut -d= -f2)
 curl -s -b "$WORK/cookies.txt" -H "Content-Type: application/json" \
-    -d "{\"type\":\"client-request\",\"rpcId\":\"s-mut\",\"method\":\"settings.mutate\",\"payload\":{\"ns\":\"ui-settings-general\",\"ops\":[{\"op\":\"set\",\"path\":[\"welcomeNoticeVersion\"],\"value\":\"2026-09-28.1\"}],\"expectedRevision\":$rev}}" \
-    "http://127.0.0.1:$PORT/api/settings.mutate" > "$WORK/settings-mut.json" 2>/dev/null
+    -d "{\"type\":\"client-request\",\"rpcId\":\"s-mut\",\"method\":\"settings/mutate\",\"payload\":{\"args\":{\"ns\":\"ui-settings-general\",\"ops\":[{\"op\":\"set\",\"path\":[\"welcomeNoticeVersion\"],\"value\":\"2026-09-28.1\"}],\"expectedRevision\":$rev}}}" \
+    "http://127.0.0.1:$PORT/api/settings/mutate" > "$WORK/settings-mut.json" 2>/dev/null
 mut_out=$(python3 - "$WORK/settings-mut.json" <<'PYEOF'
 import json, sys
 try:
@@ -619,15 +625,36 @@ except Exception as e:
 r = d.get("result", {})
 if r.get("ok"):
     print("ok=True")
-    print("value=%s" % json.dumps(r["value"].get("value"), ensure_ascii=False))
 else:
     print("ok=False")
     print("code=%s message=%s" % (r.get("error", {}).get("code"), r.get("error", {}).get("message")))
 PYEOF
 )
 echo "     mutate: $mut_out"
-check "welcomeNoticeVersion is saved" printf '%s' "$mut_out" | grep -q 'ok=True'
-check "welcomeNoticeVersion reads back 2026-09-28.1" printf '%s' "$mut_out" | grep -q '2026-09-28.1'
+printf '%s' "$mut_out" | grep -q 'ok=True'; _rc=$?
+check "welcomeNoticeVersion is saved" test "$_rc" = 0
+
+# mutate 的应答不算数：再 describe 一次，确认真实持久化后能读回。
+curl -s -b "$WORK/cookies.txt" -H "Content-Type: application/json" \
+    -d '{"type":"client-request","rpcId":"s-desc2","method":"settings/describe","payload":{"args":{}}}' \
+    "http://127.0.0.1:$PORT/api/settings/describe" > "$WORK/settings-desc2.json" 2>/dev/null
+desc2_out=$(python3 - "$WORK/settings-desc2.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("DESCRIBE2_PARSE_FAIL", e); sys.exit(0)
+r = d.get("result", {})
+if not r.get("ok"):
+    print("describe2_error code=%s message=%s" % (r.get("error", {}).get("code"), r.get("error", {}).get("message")))
+    sys.exit(0)
+general = [n for n in r["value"].get("namespaces", []) if n.get("ns") == "ui-settings-general"]
+print("value=%s" % (json.dumps(general[0].get("value"), ensure_ascii=False) if general else "NOT_REGISTERED"))
+PYEOF
+)
+echo "     describe after mutate: $desc2_out"
+printf '%s' "$desc2_out" | grep -q '2026-09-28.1'; _rc=$?
+check "welcomeNoticeVersion persists (reads back 2026-09-28.1)" test "$_rc" = 0
 
 # An unauthenticated request must be refused. This is the contract the iOS side
 # implements, and the reason a bare-origin "it returned a status" is not proof

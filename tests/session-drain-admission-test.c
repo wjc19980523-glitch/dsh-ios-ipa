@@ -198,7 +198,7 @@ static void test_expiration_and_fast_foreground(void) {
 }
 
 static void test_original_lock_and_sql_guards(const char *path) {
-    int key;
+    int key = 0;
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     assert(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
     dsh_lifecycle_native_flock_update(&key, fd, 22, DSH_LIFECYCLE_FLOCK_EXCLUSIVE);

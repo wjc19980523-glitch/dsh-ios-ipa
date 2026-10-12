@@ -34,6 +34,10 @@ for relative, names in [('ish-arm64/kernel/errno.c', ['err_map']),
                 if name == 'getpath':
                     body = body.replace('getpath(', 'production_getpath(', 1)
                     body += '\nstatic int getpath(int fd, char *buf) { if (fail_path) { errno = EACCES; return -1; } return production_getpath(fd, buf); }'
+                if name == 'realfs_flock':
+                    # Scope the host-call injection to this production body;
+                    # sys_flock must retain its real fs_ops.flock member name.
+                    body = '#define flock controlled_flock\n' + body + '\n#undef flock'
                 out.append(body)
                 break
         else: raise SystemExit(f'Unbalanced production function: {name}')

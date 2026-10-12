@@ -1,5 +1,5 @@
 /* Actual realfs/sys_flock bodies + real host files/flock/close. No guest image
- * or user data is touched. Host path/close errors are injected explicitly. */
+ * or user data is touched. Host path/close/flock errors are injected explicitly. */
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +20,7 @@
 __thread struct task *current;
 static struct fd *guest_file;
 static bool fail_path, fail_close;
+static int fail_flock_errno;
 struct fd *f_get(fd_t number) { return number == 7 || number == 8 ? guest_file : NULL; }
 /* Compile the production host-to-Linux mapping too: Darwin EAGAIN is not 11. */
 int errno_map(void) { return err_map(errno); }
@@ -30,6 +31,10 @@ void ish_printk(const char *format, ...) {
 static int controlled_close(int fd) {
     if (fail_close) { errno = EIO; return -1; }
     return close(fd);
+}
+static int controlled_flock(int fd, int operation) {
+    if (fail_flock_errno) { errno = fail_flock_errno; return -1; }
+    return flock(fd, operation);
 }
 #define close controlled_close
 #include "production-flock.h"
@@ -102,8 +107,17 @@ int main(int argc, char **argv) {
     assert((int32_t) sys_flock(7, LOCK_EX_ | LOCK_NB_) == _EBADF && errno == EBADF);
     guest_file = &file;
     assert((int32_t) sys_flock(99, LOCK_EX_ | LOCK_NB_) == _EBADF);
-    assert(realfs_flock(&rival, 0) == _EINVAL && errno == EINVAL);
+    /* Invalid operation handling differs on Darwin. Inject the host errno
+     * explicitly; all contention checks above still use the real syscall. */
+    fail_flock_errno = EINVAL;
+    assert(realfs_flock(&rival, LOCK_EX_ | LOCK_NB_) == _EINVAL && errno == EINVAL);
+    guest_file = &rival;
+    assert((int32_t) sys_flock(7, LOCK_EX_ | LOCK_NB_) == _EINVAL && errno == EINVAL);
+    guest_file = &file;
+    fail_flock_errno = 0;
     assert(snapshot().native_flock_event_total == events_before && snapshot().active_native_flocks == 1);
+    assert(snapshot().native_flocks[0].id == held.id);
+    assert(snapshot().native_flocks[0].mode == DSH_LIFECYCLE_FLOCK_EXCLUSIVE);
     puts("PASS production errno mapping reports guest EAGAIN/EBADF/EINVAL without releasing the held native lock");
     uint64_t generation = dsh_lifecycle_request_quiesce();
     assert(!dsh_lifecycle_mark_quiescent(generation));

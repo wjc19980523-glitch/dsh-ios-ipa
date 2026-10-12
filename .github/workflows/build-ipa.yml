@@ -64,6 +64,8 @@ on:
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
       - "tests/lifecycle-test.c"
+      - "tests/flock-diagnostics-test.sh"
+      - "tests/flock-diagnostics-test.c"
       - "tests/sqlite-lifecycle-test.c"
       - "tests/fakefs-db-failure-test.c"
       - "tests/fakefs-db-init-test.c"
@@ -438,6 +440,9 @@ jobs:
 
       - name: Native lifecycle regression tests
         run: bash tests/lifecycle-test.sh
+
+      - name: Production flock identity, privacy and release regressions (ASan + UBSan)
+        run: bash tests/flock-diagnostics-test.sh
 
       - name: Real SQLite and fakefs fault injection regressions
         run: bash tests/fakefs-db-failure-test.sh

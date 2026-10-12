@@ -4,6 +4,8 @@
 //
 
 #import "DSHLogViewController.h"
+#import "DSHHarness.h"
+#import "DSHLifecycleDiagnostics.h"
 
 @interface DSHLogViewController ()
 @property (nonatomic) DSHLogBuffer *log;
@@ -72,7 +74,9 @@
 }
 
 - (void)share:(UIBarButtonItem *)sender {
-    UIActivityViewController *vc = [[UIActivityViewController alloc] initWithActivityItems:@[self.log.diagnosticReport] applicationActivities:nil];
+    NSString *report = self.log == DSHHarness.shared.log
+        ? [DSHLifecycleDiagnostics reportForHarness:DSHHarness.shared] : self.log.diagnosticReport;
+    UIActivityViewController *vc = [[UIActivityViewController alloc] initWithActivityItems:@[report] applicationActivities:nil];
     vc.popoverPresentationController.barButtonItem = sender;
     [self presentViewController:vc animated:YES completion:nil];
 }

@@ -629,6 +629,25 @@ int realfs_mkdir(struct mount *mount, const char *path, mode_t_ mode) {
     return 0;
 }
 
+/* Observe through the native fd, never generic_getpath/fakefs/SQLite. Raw paths
+ * stay on this stack; only a whitelist category and fstat identity are kept. */
+static struct dsh_lifecycle_flock_identity realfs_flock_identity(struct fd *fd) {
+    struct dsh_lifecycle_flock_identity identity = {0};
+    struct stat st;
+    if (fstat(fd->real_fd, &st) == 0) {
+        identity.device = (uint64_t) st.st_dev;
+        identity.inode = (uint64_t) st.st_ino;
+    } else identity.stat_error = errno;
+    char path[MAX_PATH];
+    if (getpath(fd->real_fd, path) >= 0)
+        identity.file_kind = dsh_lifecycle_flock_classify_path(path);
+    else identity.path_error = errno;
+    const char *name = fd->mount && fd->mount->fs ? fd->mount->fs->name : NULL;
+    if (name) identity.fs_kind = !strcmp(name, "fake") ? DSH_FLOCK_FS_FAKE :
+        !strcmp(name, "real") ? DSH_FLOCK_FS_REAL : DSH_FLOCK_FS_OTHER;
+    return identity;
+}
+
 int realfs_flock(struct fd *fd, int operation) {
     DSH_LIFECYCLE_SCOPE(current ? current->pid : -1);
     int real_op = 0;
@@ -637,13 +656,17 @@ int realfs_flock(struct fd *fd, int operation) {
     if (operation & LOCK_UN_) real_op |= LOCK_UN;
     if (operation & LOCK_NB_) real_op |= LOCK_NB;
     int result = flock(fd->real_fd, real_op);
+    int saved_errno = errno;
     if (result == 0) {
         enum dsh_lifecycle_flock_mode mode = DSH_LIFECYCLE_FLOCK_UNLOCKED;
         if (real_op & LOCK_EX) mode = DSH_LIFECYCLE_FLOCK_EXCLUSIVE;
         else if (real_op & LOCK_SH) mode = DSH_LIFECYCLE_FLOCK_SHARED;
-        dsh_lifecycle_native_flock_update(fd, fd->real_fd,
-                current ? current->pid : -1, mode);
+        struct dsh_lifecycle_flock_identity identity = {0};
+        if (mode != DSH_LIFECYCLE_FLOCK_UNLOCKED) identity = realfs_flock_identity(fd);
+        dsh_lifecycle_native_flock_observe(fd, fd->real_fd,
+                current ? current->pid : -1, mode, &identity);
     }
+    errno = saved_errno;
     return result;
 }
 

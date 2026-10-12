@@ -32,6 +32,8 @@ static bool admission_enabled;
 static struct operation_record operations[OPERATION_CAPACITY];
 static struct connection_record connections[CONNECTION_CAPACITY];
 static struct flock_record native_flocks[FLOCK_CAPACITY];
+static struct dsh_lifecycle_flock_event flock_events[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
+static uint64_t flock_event_total;
 static enum dsh_lifecycle_state lifecycle_state = DSH_LIFECYCLE_RUNNING;
 static uint64_t lifecycle_generation;
 static uint64_t last_resume_monotonic_ns;
@@ -321,8 +323,31 @@ void dsh_lifecycle_sqlite_close(uint64_t id, int result) {
     errno = saved_errno;
 }
 
+enum dsh_lifecycle_flock_file_kind dsh_lifecycle_flock_classify_path(const char *path) {
+    if (path == NULL || *path == '\0') return DSH_FLOCK_FILE_UNKNOWN;
+    const char *slash = strrchr(path, '/');
+    return strcmp(slash ? slash + 1 : path, "session.lock") == 0
+        ? DSH_FLOCK_FILE_SESSION_LOCK : DSH_FLOCK_FILE_OTHER;
+}
+
+/* diagnostic_lock held; bounded memory only, no callbacks or I/O. */
+static void flock_event(const struct dsh_lifecycle_flock_snapshot *value,
+        enum dsh_lifecycle_flock_event_kind kind, int result, uint64_t now) {
+    struct dsh_lifecycle_flock_event *event = &flock_events[flock_event_total % DSH_LIFECYCLE_SNAPSHOT_ITEMS];
+    *event = (struct dsh_lifecycle_flock_event) {
+        .sequence = ++flock_event_total, .observed_monotonic_ns = now,
+        .kind = kind, .result = result, .actor = owner(operation_guest_pid), .lock = *value,
+    };
+    event->lock.age_ns = now >= value->started_monotonic_ns ? now - value->started_monotonic_ns : 0;
+}
+
 void dsh_lifecycle_native_flock_update(const void *key, int host_fd, int guest_pid,
         enum dsh_lifecycle_flock_mode mode) {
+    dsh_lifecycle_native_flock_observe(key, host_fd, guest_pid, mode, NULL);
+}
+
+void dsh_lifecycle_native_flock_observe(const void *key, int host_fd, int guest_pid,
+        enum dsh_lifecycle_flock_mode mode, const struct dsh_lifecycle_flock_identity *identity) {
     int saved_errno = errno;
     if (key == NULL) return;
     uint64_t now = monotonic_ns();
@@ -331,10 +356,15 @@ void dsh_lifecycle_native_flock_update(const void *key, int host_fd, int guest_p
     for (unsigned i = 0; i < FLOCK_CAPACITY; i++) {
         if (native_flocks[i].key == key) {
             if (mode == DSH_LIFECYCLE_FLOCK_UNLOCKED) {
+                flock_event(&native_flocks[i].value, DSH_FLOCK_UNLOCKED, 0, now);
                 native_flocks[i].key = NULL;
             } else {
                 native_flocks[i].value.mode = mode;
                 native_flocks[i].value.owner = owner(guest_pid);
+                native_flocks[i].value.guest_fd = -1;
+                native_flocks[i].value.guest_tgid = -1;
+                if (identity) native_flocks[i].value.identity = *identity;
+                flock_event(&native_flocks[i].value, DSH_FLOCK_UPDATED, 0, now);
             }
             pthread_mutex_unlock(&diagnostic_lock);
             errno = saved_errno;
@@ -353,23 +383,66 @@ void dsh_lifecycle_native_flock_update(const void *key, int host_fd, int guest_p
                 .mode = mode,
                 .owner = owner(guest_pid),
                 .started_monotonic_ns = now,
+                .guest_fd = -1, .guest_tgid = -1,
             };
+            if (identity) native_flocks[empty].value.identity = *identity;
+            flock_event(&native_flocks[empty].value, DSH_FLOCK_ACQUIRED, 0, now);
         }
     }
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
 }
 
+void dsh_lifecycle_native_flock_guest_fd(const void *key, int guest_pid, int guest_fd, int guest_tgid) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    for (unsigned i = 0; key && i < FLOCK_CAPACITY; i++) {
+        struct dsh_lifecycle_flock_snapshot *value = &native_flocks[i].value;
+        if (native_flocks[i].key != key || value->owner.guest_pid != guest_pid) continue;
+        value->guest_fd = guest_fd;
+        value->guest_tgid = guest_tgid;
+        /* Fill the just-recorded acquisition/update too. A concurrent close
+         * or conversion by a different actor must not be relabelled. */
+        unsigned count = flock_event_total < DSH_LIFECYCLE_SNAPSHOT_ITEMS
+            ? (unsigned) flock_event_total : DSH_LIFECYCLE_SNAPSHOT_ITEMS;
+        for (unsigned n = 0; n < count; n++) {
+            struct dsh_lifecycle_flock_event *event = &flock_events[(flock_event_total - 1 - n) % DSH_LIFECYCLE_SNAPSHOT_ITEMS];
+            if (event->lock.id != value->id || event->lock.owner.thread_id != value->owner.thread_id ||
+                    (event->kind != DSH_FLOCK_ACQUIRED && event->kind != DSH_FLOCK_UPDATED)) continue;
+            event->lock.guest_fd = guest_fd;
+            event->lock.guest_tgid = guest_tgid;
+            break;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
 void dsh_lifecycle_native_flock_close(const void *key) {
-    dsh_lifecycle_native_flock_update(key, -1, -1, DSH_LIFECYCLE_FLOCK_UNLOCKED);
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    for (unsigned i = 0; key && i < FLOCK_CAPACITY; i++) {
+        if (native_flocks[i].key != key) continue;
+        flock_event(&native_flocks[i].value, DSH_FLOCK_CLOSED, 0, monotonic_ns());
+        native_flocks[i].key = NULL;
+        break;
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
 }
 
 void dsh_lifecycle_native_flock_close_failed(const void *key) {
+    dsh_lifecycle_native_flock_close_error(key, errno);
+}
+
+void dsh_lifecycle_native_flock_close_error(const void *key, int error) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
     for (unsigned i = 0; i < FLOCK_CAPACITY; i++) {
         if (native_flocks[i].key != key || key == NULL) continue;
         native_close_failures++;
+        flock_event(&native_flocks[i].value, DSH_FLOCK_CLOSE_FAILED, error, monotonic_ns());
         break;
     }
     pthread_mutex_unlock(&diagnostic_lock);
@@ -403,6 +476,12 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     snapshot->sqlite_error_observations = sqlite_error_observations;
     snapshot->native_close_failures = native_close_failures;
     snapshot->last_sqlite_result = last_sqlite_result;
+    snapshot->native_flock_event_total = flock_event_total;
+    snapshot->native_flock_event_count = flock_event_total < DSH_LIFECYCLE_SNAPSHOT_ITEMS
+        ? (unsigned) flock_event_total : DSH_LIFECYCLE_SNAPSHOT_ITEMS;
+    uint64_t first_event = flock_event_total - snapshot->native_flock_event_count;
+    for (unsigned i = 0; i < snapshot->native_flock_event_count; i++)
+        snapshot->native_flock_events[i] = flock_events[(first_event + i) % DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
         if (!operations[i].used || operations[i].paused_fileless) continue;
         if (strncmp(operations[i].value.name, "fakefs_", 7) == 0)

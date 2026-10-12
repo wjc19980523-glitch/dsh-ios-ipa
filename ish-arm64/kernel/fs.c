@@ -1067,7 +1067,10 @@ dword_t sys_flock(fd_t f, dword_t operation) {
     // because a segfault is worse.
     if (fd->mount->fs->flock == NULL)
         return _EBADF;
-    return fd->mount->fs->flock(fd, operation);
+    int result = fd->mount->fs->flock(fd, operation);
+    if (result == 0)
+        dsh_lifecycle_native_flock_guest_fd(fd, current->pid, f, current->tgid);
+    return result;
 }
 
 static dword_t sys_utime_common(fd_t at_f, addr_t path_addr, struct timespec atime, struct timespec mtime, dword_t flags) {

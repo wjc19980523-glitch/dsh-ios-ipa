@@ -31,6 +31,34 @@ enum dsh_lifecycle_flock_mode {
     DSH_LIFECYCLE_FLOCK_EXCLUSIVE = 2,
 };
 
+/* A strict whitelist, never an arbitrary basename or path. */
+enum dsh_lifecycle_flock_file_kind {
+    DSH_FLOCK_FILE_UNKNOWN = 0,
+    DSH_FLOCK_FILE_SESSION_LOCK = 1,
+    DSH_FLOCK_FILE_OTHER = 2,
+};
+enum dsh_lifecycle_flock_fs_kind {
+    DSH_FLOCK_FS_UNKNOWN = 0,
+    DSH_FLOCK_FS_FAKE = 1,
+    DSH_FLOCK_FS_REAL = 2,
+    DSH_FLOCK_FS_OTHER = 3,
+};
+struct dsh_lifecycle_flock_identity {
+    uint64_t device;
+    uint64_t inode;
+    enum dsh_lifecycle_flock_file_kind file_kind;
+    enum dsh_lifecycle_flock_fs_kind fs_kind;
+    int stat_error;             /* Host errno, zero when observed successfully. */
+    int path_error;
+};
+enum dsh_lifecycle_flock_event_kind {
+    DSH_FLOCK_ACQUIRED = 0,
+    DSH_FLOCK_UPDATED = 1,
+    DSH_FLOCK_UNLOCKED = 2,
+    DSH_FLOCK_CLOSED = 3,
+    DSH_FLOCK_CLOSE_FAILED = 4,
+};
+
 struct dsh_lifecycle_owner {
     int guest_pid;              /* -1 when no guest task is available. */
     uint64_t thread_id;         /* Stable, process-local diagnostic ID. */
@@ -66,6 +94,17 @@ struct dsh_lifecycle_flock_snapshot {
     struct dsh_lifecycle_owner owner;
     uint64_t started_monotonic_ns;
     uint64_t age_ns;
+    int guest_fd;              /* Last successful flock's guest fd; -1 if unknown. */
+    int guest_tgid;            /* Thread group of that caller, not the host PID. */
+    struct dsh_lifecycle_flock_identity identity;
+};
+struct dsh_lifecycle_flock_event {
+    uint64_t sequence;
+    uint64_t observed_monotonic_ns;
+    enum dsh_lifecycle_flock_event_kind kind;
+    int result;               /* Host errno for a failed close. */
+    struct dsh_lifecycle_owner actor;
+    struct dsh_lifecycle_flock_snapshot lock;
 };
 
 /* All SQLite values below are cached observations made by the SQL worker.
@@ -100,9 +139,14 @@ struct dsh_lifecycle_snapshot {
     unsigned operation_count;
     unsigned transaction_count;
     unsigned native_flock_count;
+    uint64_t native_flock_event_total;
+    unsigned native_flock_event_count;
     struct dsh_lifecycle_operation_snapshot operations[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     struct dsh_lifecycle_transaction_snapshot transactions[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     struct dsh_lifecycle_flock_snapshot native_flocks[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
+    /* Last 16 transitions, oldest first. Intentional history wrap does not
+     * affect admission or tracking_overflows; active locks remain separate. */
+    struct dsh_lifecycle_flock_event native_flock_events[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
 };
 
 /* Tokens must be paired on the same thread. With admission enabled, outer
@@ -139,8 +183,17 @@ DSH_LIFECYCLE_API void dsh_lifecycle_sqlite_recovery_resolved(uint64_t connectio
  */
 DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_update(const void *fd_key,
         int host_fd, int guest_pid, enum dsh_lifecycle_flock_mode mode);
+/* Host identity is collected by realfs, outside diagnostic/SQLite mutexes.
+ * This core only copies fixed-size metadata. No path is retained. */
+DSH_LIFECYCLE_API enum dsh_lifecycle_flock_file_kind dsh_lifecycle_flock_classify_path(const char *path);
+DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_observe(const void *fd_key,
+        int host_fd, int guest_pid, enum dsh_lifecycle_flock_mode mode,
+        const struct dsh_lifecycle_flock_identity *identity);
+DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_guest_fd(const void *fd_key,
+        int guest_pid, int guest_fd, int guest_tgid);
 DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_close(const void *fd_key);
 DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_close_failed(const void *fd_key);
+DSH_LIFECYCLE_API void dsh_lifecycle_native_flock_close_error(const void *fd_key, int error);
 /* An untracked/native descriptor close has uncertain ownership. Do not retry
  * that descriptor number; retain a process-local diagnostic safety barrier. */
 DSH_LIFECYCLE_API void dsh_lifecycle_native_close_uncertain(void);

@@ -126,23 +126,46 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
         return;
     XCUIElement *action = [dialog.buttons matchingPredicate:
                           [NSPredicate predicateWithFormat:@"label IN %@", actionLabels]].firstMatch;
-    NSPredicate *actionReady = [NSPredicate predicateWithFormat:@"exists == YES AND enabled == YES AND hittable == YES"];
+    // One monotonic budget covers readiness, the tap and closure. In Preview,
+    // repeated AX queries can outlive a separate five-second waiter; collecting
+    // another full snapshot before tapping then describes a different state.
+    // Keep the original closure budget, include readiness in it, and record the
+    // actual successful observation without extra AX calls on the critical path.
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + closureTimeout;
+    __block NSDictionary *readyState;
+    NSPredicate *actionReady = [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+        (void)bindings;
+        XCUIElement *element = object;
+        BOOL exists = element.exists;
+        BOOL enabled = exists && element.enabled;
+        BOOL hittable = enabled && element.hittable;
+        NSTimeInterval observed = NSProcessInfo.processInfo.systemUptime;
+        readyState = @{@"action_present": @(exists), @"action_enabled": @(enabled),
+                       @"action_hittable": @(hittable), @"observed_uptime": @(observed),
+                       @"deadline_uptime": @(deadline), @"within_deadline": @(observed <= deadline)};
+        return exists && enabled && hittable && observed <= deadline;
+    }];
     XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc] initWithPredicate:actionReady object:action];
-    XCTWaiterResult readyResult = [XCTWaiter waitForExpectations:@[ready] timeout:5];
-    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web] phase:@"before-tap" labels:dialogLabels];
+    XCTWaiterResult readyResult = [XCTWaiter waitForExpectations:@[ready]
+                                                       timeout:MAX(0, deadline - NSProcessInfo.processInfo.systemUptime)];
+    [self attachGuestDialogState:readyState ?: @{} phase:@"readiness-observation" labels:dialogLabels];
+    if (readyResult != XCTWaiterResultCompleted) {
+        [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web]
+                              phase:@"readiness-timeout-current-state" labels:dialogLabels];
+        [self attachScreenshot:@"guest-dialog-readiness-timeout"];
+    }
     XCTAssertEqual(readyResult, XCTWaiterResultCompleted,
                    @"the known web dialog needs an enabled, hittable safe action: %@", dialogLabels);
     [action tap];
-    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + closureTimeout;
-    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web] phase:@"after-tap" labels:dialogLabels];
     NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO"];
     XCTNSPredicateExpectation *closed = [[XCTNSPredicateExpectation alloc] initWithPredicate:gone object:dialog];
     XCTWaiterResult closedResult = [XCTWaiter waitForExpectations:@[closed]
                                                        timeout:MAX(0, deadline - NSProcessInfo.processInfo.systemUptime)];
+    BOOL closedInTime = closedResult == XCTWaiterResultCompleted && NSProcessInfo.processInfo.systemUptime <= deadline;
     [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web]
-                          phase:closedResult == XCTWaiterResultCompleted ? @"closed" : @"closure-timeout"
+                          phase:closedInTime ? @"closed" : @"closure-timeout"
                          labels:dialogLabels];
-    XCTAssertEqual(closedResult, XCTWaiterResultCompleted,
+    XCTAssertTrue(closedInTime,
                    @"the known web dialog must close within its original deadline: %@", dialogLabels);
     XCTAssertFalse(dialog.exists, @"the known web dialog must close before opening native controls: %@", dialogLabels);
 }

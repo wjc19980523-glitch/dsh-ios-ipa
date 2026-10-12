@@ -257,6 +257,65 @@ class HelperTest(unittest.TestCase):
         _, output = self.invoke('print("API_KEY=secret-value Token=secret-token Authorization=Bearer secret-value")', timeout=2)
         self.assertNotIn('secret', output)
 
+    def test_redaction_filters_only_standalone_known_noise(self):
+        warning = 'Warning: disabling flag --expose_wasm due to conflicting flags'
+        diagnostic = 'AssertionError {"diagnostic":' + json.dumps(warning + '\nEPERM') + '}\n'
+        business = 'expose_wasm configuration failed; Alarm clock is the captured child message\n'
+        source = ' \t' + warning + ' \r\n\tAlarm clock \n' + diagnostic + business
+        self.assertEqual(runner.redact_output(source), diagnostic + business)
+        self.assertEqual(runner.redact_output(warning), '')
+        self.assertEqual(runner.redact_output(' Alarm clock '), '')
+        self.assertEqual(runner.redact_output('Warning: expose_wasm unknown warning\n'),
+                         'Warning: expose_wasm unknown warning\n')
+
+    def test_mixed_warning_diagnostic_survives_and_credentials_stay_redacted(self):
+        warning = 'Warning: disabling flag --expose_wasm due to conflicting flags'
+        diagnostic = 'AssertionError ' + json.dumps({'diagnostic': warning + '\nEPERM'})
+        line = diagnostic + ' API_KEY=private-key; Token=private-token; Bearer private-bearer\n'
+        expected = diagnostic + ' API_KEY=<redacted>; Token=<redacted>; Bearer <redacted>\n'
+        self.assertEqual(runner.redact_output(line), expected)
+        r, output = self.invoke('print(' + repr(warning) + ')\nprint(' + repr(line.rstrip('\n')) + ')\n'
+                                'raise SystemExit(73)', timeout=2, tee=True)
+        self.assertEqual(output, expected)
+        self.assertTrue(r['business_output'])
+        self.assertEqual(r['wait_status'], 73 << 8)
+        self.assertEqual(r['exit_code'], 73)
+        self.assertEqual(r['helper_exit_status'], 73)
+        self.assertFalse(r['timed_out'])
+        self.assertTrue(r['completed_before_deadline'])
+
+    def test_standalone_warning_then_timeout_has_no_business_output(self):
+        warning = 'Warning: disabling flag --expose_wasm due to conflicting flags'
+        r, output = self.invoke('import time\nprint(' + repr(warning) + ', flush=True)\ntime.sleep(20)')
+        self.assertEqual(output, '')
+        self.assertFalse(r['business_output'])
+        self.assertEqual(r['timeout_kind'], 'no-business-output-timeout')
+        self.assertEqual(r['wait_status'], 14)
+        self.assertEqual(r['helper_exit_status'], 142)
+        self.assertTrue(r['timed_out'])
+
+    def test_mixed_warning_business_output_then_timeout_remains_failure(self):
+        diagnostic = 'AssertionError {"diagnostic":"Warning: disabling flag --expose_wasm due to conflicting flags\\nEPERM"}'
+        line = diagnostic + ' Token=private-token; ' + TEXT
+        r, output = self.invoke('import time\nprint(' + repr(line) + ', flush=True)\ntime.sleep(20)', tee=True)
+        self.assertIn(diagnostic, output)
+        self.assertIn('Token=<redacted>;', output)
+        self.assertNotIn('private-token', output)
+        self.assertTrue(r['business_output'])
+        self.assertEqual(r['timeout_kind'], 'business-output-then-timeout')
+        self.assertEqual(r['wait_status'], 14)
+        self.assertEqual(r['helper_exit_status'], 142)
+        self.assertTrue(r['timed_out'])
+        self.assertFalse(all(refusal.verify(r, output, EVENTS).values()))
+
+    def test_embedded_alarm_clock_is_business_output(self):
+        line = 'AssertionError {"diagnostic":"Alarm clock", "error":"EPERM"}'
+        r, output = self.invoke('print(' + repr(line) + ')', timeout=2)
+        self.assertEqual(output, line + '\n')
+        self.assertTrue(r['business_output'])
+        self.assertEqual(r['wait_status'], 0)
+        self.assertFalse(r['timed_out'])
+
     def test_missing_bridge_evidence_rejected(self):
         r, output = self.invoke('print(' + repr(TEXT) + ')', timeout=2)
         self.assertFalse(all(refusal.verify(r, output, []).values()))

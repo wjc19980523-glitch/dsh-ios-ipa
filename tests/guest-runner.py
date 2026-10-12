@@ -42,8 +42,13 @@ def redact_output(data):
     data = re.sub(r'(?i)Bearer\s+\S+', 'Bearer <redacted>', data)
     data = re.sub(r'(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+',
                   r'\1<redacted>', data)
+    # Filter only complete, known runtime/shell noise lines. Diagnostics can
+    # quote these messages inside an AssertionError or JSON; dropping that
+    # entire line would also erase the actual failure (for example EPERM).
+    noise = {'Warning: disabling flag --expose_wasm due to conflicting flags',
+             'Alarm clock'}
     return ''.join(line for line in data.splitlines(True)
-                   if 'expose_wasm' not in line and not re.search(r'\bAlarm clock\b', line))
+                   if line.strip() not in noise)
 
 
 def run(a):

@@ -104,7 +104,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: dsh-ipa-${{ github.ref }}-${{ github.event.inputs.runner_label || 'xcode-27' }}-${{ github.event.inputs.rootfs_focus || 'full' }}
+  # Hosted jobs use isolated checkouts and simulators. Keep duplicate runs of
+  # one revision serialized, but let a verified fix run while an older revision
+  # finishes collecting its failure evidence. Never cancel an active test run.
+  group: dsh-ipa-${{ github.ref }}-${{ github.sha }}-${{ github.event.inputs.runner_label || 'xcode-27' }}-${{ github.event.inputs.rootfs_focus || 'full' }}
   cancel-in-progress: false
 
 env:

@@ -9,7 +9,6 @@ import base64
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
-import shlex
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +59,7 @@ console.log('SESSION_LEASE_PATCH_INSTALLED');
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--command', action='store_true')
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--include-guest-test', action='store_true')
     parser.add_argument('--tarball', type=Path)
     parser.add_argument('--extract-original', type=Path)
@@ -68,7 +67,7 @@ def main():
     manifest = json.loads((BUNDLE / 'manifest.json').read_text(encoding='utf-8'))
     assert manifest['schema'] == 1
     if options.extract_original:
-        assert options.tarball and not options.command
+        assert options.tarball and not options.output
         target = PurePosixPath(manifest['patches'][0]['target'].lstrip('/'))
         with tarfile.open(options.tarball, 'r:gz') as archive:
             matches = [member for member in archive if PurePosixPath(member.name) == target]
@@ -79,7 +78,7 @@ def main():
         options.extract_original.write_bytes(data)
         print('SESSION_LEASE_ORIGINAL_SOURCE_VERIFIED')
         return
-    assert options.command, 'choose --command or --tarball ... --extract-original ...'
+    assert options.output, 'choose --output FILE or --tarball ... --extract-original ...'
     payload = {'manifest': manifest, 'files': {}}
     for item in manifest['files']:
         name = item['source']
@@ -90,7 +89,10 @@ def main():
     if options.include_guest_test:
         payload['guest_test'] = base64.b64encode((ROOT / 'tests/session-lease-guest-test.mjs').read_bytes()).decode('ascii')
     encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode('utf-8')).decode('ascii')
-    print('node --input-type=module -e ' + shlex.quote(INSTALLER.replace('__PAYLOAD__', encoded)))
+    # The CLI bootstrap accepts a small argv buffer. Deliver the installer as
+    # stdin data, never as a shell/Node argument or a new pipe-reading process.
+    options.output.write_text(INSTALLER.replace('__PAYLOAD__', encoded), encoding='utf-8')
+    print('node --input-type=module -')
 
 
 if __name__ == '__main__':

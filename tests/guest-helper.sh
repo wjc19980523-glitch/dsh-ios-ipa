@@ -10,7 +10,7 @@ guest() {
         --phase "$phase" --result "$GUEST_RESULT" \
         --timeout "$GUEST_TIMEOUT" --sample-after "${DSH_GUEST_SAMPLE_AFTER:-75}" \
         --initial-sample-after "${DSH_GUEST_INITIAL_SAMPLE_AFTER:-0}" \
-        --events "$DSH_TEST_EVENT_LOG" -- \
+        --events "$DSH_TEST_EVENT_LOG" --stdin-file "${3:-}" -- \
         "$ISH_BUILD/ish" -f "$WORK/fakefs" /bin/sh -c "$1"; then
         rc=0
     else

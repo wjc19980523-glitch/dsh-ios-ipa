@@ -33,7 +33,7 @@ EVENTS = [dict(phase='wrong-token', service='bridge', kind='request', request_id
 
 
 class HelperTest(unittest.TestCase):
-    def invoke(self, code, timeout=0.5, tee=False, sample=0, initial=0, ps_delay=False):
+    def invoke(self, code, timeout=0.5, tee=False, sample=0, initial=0, ps_delay=False, stdin=None, missing_stdin=False):
         with tempfile.TemporaryDirectory(prefix='dsh-helper-test-') as tmp:
             root = Path(tmp)
             ish = root / 'ish'
@@ -43,6 +43,13 @@ class HelperTest(unittest.TestCase):
             events = root / 'events.jsonl'
             events.write_text('\n'.join(json.dumps(r) for r in EVENTS) + '\n')
             env = os.environ.copy()
+            input_argument = ''
+            if stdin is not None or missing_stdin:
+                input_file = root / 'installer input.mjs'
+                if not missing_stdin:
+                    input_file.write_bytes(stdin)
+                env['GUEST_INPUT_FILE'] = str(input_file)
+                input_argument = ' "$GUEST_INPUT_FILE"'
             env.update(HERE=str(HERE), WORK=tmp, ISH_BUILD=tmp, GUEST_TIMEOUT=str(timeout),
                        DSH_TEST_EVENT_LOG=str(events), DSH_TEST_PHASE_FILE=str(root / 'phase'),
                        DSH_GUEST_SAMPLE_AFTER=str(sample), DSH_GUEST_INITIAL_SAMPLE_AFTER=str(initial))
@@ -53,8 +60,8 @@ class HelperTest(unittest.TestCase):
                 env['PATH'] = tmp + os.pathsep + env['PATH']
             script = 'set -uo pipefail\nGUEST_SEQUENCE=0; GUEST_FAILURES=0\n. "$HERE/guest-helper.sh"\n'
             script += 'trap \'true\' EXIT\n'
-            script += ('guest ignored wrong-token | tee "$WORK/output"; rc=$?\n' if tee
-                       else 'guest ignored wrong-token > "$WORK/output"; rc=$?\n')
+            script += ('guest ignored wrong-token' + input_argument + ' | tee "$WORK/output"; rc=$?\n' if tee
+                       else 'guest ignored wrong-token' + input_argument + ' > "$WORK/output"; rc=$?\n')
             script += 'true\nprintf "%s" "$rc" > "$WORK/shell-status"\nexit "$rc"\n'
             done = subprocess.run([args.bash, '-c', script], env=env, capture_output=True, text=True, timeout=10)
             self.assertTrue((root / 'guest-diagnostics/wrong-token/result.json').exists(), done.stderr)
@@ -64,6 +71,43 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(result['helper_exit_status'], done.returncode)
             self.assertEqual(result['reader_processes'], 0)
             return result, output
+
+    def test_large_stdin_is_not_copied_into_arguments_or_left_in_a_pipe(self):
+        payload = b'x' * 128000
+        r, output = self.invoke('import sys\nassert max(map(len,sys.argv)) < 100\n'
+            'assert sys.stdin.buffer.read() == b"x" * 128000\nprint("INPUT_OK")',
+            timeout=2, stdin=payload)
+        self.assertEqual(r['wait_status'], 0)
+        self.assertFalse(r['timed_out'])
+        self.assertEqual(output.strip(), 'INPUT_OK')
+        self.assertEqual(r['descendants_at_exit'], [])
+        self.assertEqual(r['residual_processes'], [])
+        self.assertTrue(r['pipe_eof'])
+
+    def test_stdin_nonzero_exit_is_preserved_through_tee_and_cleanup(self):
+        r, output = self.invoke('import sys\nassert sys.stdin.buffer.read() == b"input"\n'
+            'print("READ_OK")\nraise SystemExit(73)', timeout=2, stdin=b'input', tee=True)
+        self.assertEqual(r['wait_status'], 73 << 8)
+        self.assertEqual(r['helper_exit_status'], 73)
+        self.assertEqual(output.strip(), 'READ_OK')
+
+    def test_missing_stdin_fails_before_starting_a_guest(self):
+        r, output = self.invoke('raise AssertionError("must not start")', timeout=2, missing_stdin=True)
+        self.assertEqual(r['helper_exit_status'], 125)
+        self.assertIsNone(r['host_pid'])
+        self.assertIsNone(r['wait_status'])
+        self.assertEqual(r['runner_error'], 'FileNotFoundError')
+        self.assertFalse(r['timed_out'])
+        self.assertEqual(output, '')
+
+    def test_prepared_session_installer_uses_a_short_launcher(self):
+        with tempfile.TemporaryDirectory(prefix='dsh-installer-test-') as tmp:
+            output = Path(tmp) / 'installer.mjs'
+            command = subprocess.check_output([sys.executable, str(HERE / 'session-lease-prepare.py'),
+                '--output', str(output), '--include-guest-test'], text=True).strip()
+            self.assertEqual(command, 'node --input-type=module -')
+            self.assertLess(len(command.encode()), 256)
+            self.assertGreater(output.stat().st_size, 4096)
 
     def test_unauthorized_then_timeout_fails(self):
         r, output = self.invoke('import time\nprint(' + repr(TEXT) + ', flush=True)\ntime.sleep(20)', tee=True)

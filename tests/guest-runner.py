@@ -49,8 +49,26 @@ def redact_output(data):
 def run(a):
     a.result.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    p = subprocess.Popen(a.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         start_new_session=True)
+    source = None
+    try:
+        if getattr(a, 'stdin_file', None):
+            source = open(a.stdin_file, 'rb')
+        p = subprocess.Popen(a.command, stdin=source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    except OSError as error:
+        # No child has started. Preserve an explicit infrastructure failure,
+        # without logging the command, input path or input contents.
+        a.result.write_text(json.dumps(dict(phase=a.phase, host_pid=None, wait_status=None,
+            exit_kind='unknown', exit_code=None, signal=None, timed_out=False,
+            completed_before_deadline=False, helper_exit_status=125, reader_processes=0,
+            runner_error=type(error).__name__, descendants_at_exit=[], residual_processes=[],
+            pipe_eof=True, business_output=False, samples=[]), indent=2) + '\n')
+        return 125
+    finally:
+        # Popen duplicated stdin into the child; the supervisor retains no
+        # input descriptor or background pipeline reader while it waits.
+        if source is not None:
+            source.close()
     identity = process_identity(p.pid)
     os.set_blocking(p.stdout.fileno(), False)
     selector = selectors.DefaultSelector()
@@ -206,6 +224,7 @@ if __name__ == '__main__':
     parser.add_argument('--sample-after', type=float, default=75)
     parser.add_argument('--initial-sample-after', type=float, default=0)
     parser.add_argument('--events', type=Path, required=True)
+    parser.add_argument('--stdin-file')
     separator = sys.argv.index('--')
     args = parser.parse_args(sys.argv[1:separator])
     args.command = sys.argv[separator + 1:]

@@ -23,8 +23,8 @@ export DSH_TEST_PHASE_FILE="$WORK/current-phase"
 : > "$DSH_TEST_EVENT_LOG"
 . "$HERE/guest-helper.sh"
 "$ISH_BUILD/tools/fakefsify" "$TARBALL" "$WORK/fakefs"
-INSTALL_COMMAND="$(python3 "$HERE/session-lease-prepare.py" --command --include-guest-test)"
-guest "$INSTALL_COMMAND" session-lease-install
+INSTALL_COMMAND="$(python3 "$HERE/session-lease-prepare.py" --output "$WORK/session-lease-installer.mjs" --include-guest-test)"
+guest "$INSTALL_COMMAND" session-lease-install "$WORK/session-lease-installer.mjs"
 guest 'unset DSH_SESSION_LIFECYCLE DSH_HOST_BRIDGE_URL DSH_HOST_BRIDGE_TOKEN; node --expose-internals --expose-gc /tmp/dsh-session-lease-test.mjs' session-lease-native
 [ "$GUEST_FAILURES" = 0 ]
 echo 'SESSION_LEASE_GUEST_RUNNER_COMPLETED=1'

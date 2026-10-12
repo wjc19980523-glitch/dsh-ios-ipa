@@ -667,7 +667,9 @@ int realfs_flock(struct fd *fd, int operation) {
                 current ? current->pid : -1, mode, &identity);
     }
     errno = saved_errno;
-    return result;
+    // Filesystem callbacks return Linux negative errno, not host flock's -1.
+    // Darwin's EAGAIN number also differs from the guest ABI.
+    return result < 0 ? errno_map() : result;
 }
 
 int realfs_statfs(struct mount *mount, struct statfsbuf *stat) {

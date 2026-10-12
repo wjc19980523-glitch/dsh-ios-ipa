@@ -18,7 +18,8 @@ import re, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 out = []
-for relative, names in [('ish-arm64/fs/real.c', ['getpath', 'realfs_flock_identity', 'realfs_flock', 'realfs_close']),
+for relative, names in [('ish-arm64/kernel/errno.c', ['err_map']),
+                        ('ish-arm64/fs/real.c', ['getpath', 'realfs_flock_identity', 'realfs_flock', 'realfs_close']),
                         ('ish-arm64/kernel/fs.c', ['sys_flock'])]:
     source = (root / relative).read_text()
     for name in names:

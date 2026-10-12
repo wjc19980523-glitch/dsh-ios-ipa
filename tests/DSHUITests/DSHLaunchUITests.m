@@ -88,6 +88,32 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     }
 }
 
+/// Only record the known dialog/action's state. Never inspect credential fields.
+- (NSDictionary *)guestDialogState:(XCUIElement *)dialog action:(XCUIElement *)action web:(XCUIElement *)web {
+    BOOL present = dialog.exists;
+    BOOL buttonPresent = present && action.exists;
+    return @{@"dialog_present": @(present), @"action_present": @(buttonPresent),
+             @"action_enabled": @(buttonPresent && action.enabled),
+             @"action_hittable": @(buttonPresent && action.hittable),
+             @"action_frame": buttonPresent ? NSStringFromCGRect(action.frame) : @"absent",
+             @"web_frame": NSStringFromCGRect(web.frame),
+             @"keyboard_present": @(self.app.keyboards.firstMatch.exists),
+             @"app_state": @(self.app.state)};
+}
+
+- (void)attachGuestDialogState:(NSDictionary *)state phase:(NSString *)phase labels:(NSArray<NSString *> *)labels {
+    NSMutableDictionary *record = [state mutableCopy];
+    record[@"phase"] = phase;
+    record[@"known_dialog_labels"] = labels;
+    record[@"test_host_uptime"] = @(NSProcessInfo.processInfo.systemUptime);
+    NSData *data = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingSortedKeys error:nil];
+    XCTAttachment *attachment = [XCTAttachment attachmentWithData:data uniformTypeIdentifier:@"public.json"];
+    attachment.name = [@"guest-dialog-" stringByAppendingString:phase];
+    attachment.lifetime = XCTAttachmentLifetimeKeepAlways;
+    [self addAttachment:attachment];
+    NSLog(@"[ui-dialog] %@", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+}
+
 /// Complete only the named, optional web step using its explicit safe action.
 - (void)closeKnownGuestDialogInWebView:(XCUIElement *)web
                               labels:(NSArray<NSString *> *)dialogLabels
@@ -100,11 +126,24 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
         return;
     XCUIElement *action = [dialog.buttons matchingPredicate:
                           [NSPredicate predicateWithFormat:@"label IN %@", actionLabels]].firstMatch;
-    XCTAssertTrue([action waitForExistenceWithTimeout:5], @"the known web dialog needs its own safe action: %@", dialogLabels);
+    NSPredicate *actionReady = [NSPredicate predicateWithFormat:@"exists == YES AND enabled == YES AND hittable == YES"];
+    XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc] initWithPredicate:actionReady object:action];
+    XCTWaiterResult readyResult = [XCTWaiter waitForExpectations:@[ready] timeout:5];
+    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web] phase:@"before-tap" labels:dialogLabels];
+    XCTAssertEqual(readyResult, XCTWaiterResultCompleted,
+                   @"the known web dialog needs an enabled, hittable safe action: %@", dialogLabels);
     [action tap];
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + closureTimeout;
+    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web] phase:@"after-tap" labels:dialogLabels];
     NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO"];
-    XCTestExpectation *closed = [self expectationForPredicate:gone evaluatedWithObject:dialog handler:nil];
-    [self waitForExpectations:@[closed] timeout:closureTimeout];
+    XCTNSPredicateExpectation *closed = [[XCTNSPredicateExpectation alloc] initWithPredicate:gone object:dialog];
+    XCTWaiterResult closedResult = [XCTWaiter waitForExpectations:@[closed]
+                                                       timeout:MAX(0, deadline - NSProcessInfo.processInfo.systemUptime)];
+    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web]
+                          phase:closedResult == XCTWaiterResultCompleted ? @"closed" : @"closure-timeout"
+                         labels:dialogLabels];
+    XCTAssertEqual(closedResult, XCTWaiterResultCompleted,
+                   @"the known web dialog must close within its original deadline: %@", dialogLabels);
     XCTAssertFalse(dialog.exists, @"the known web dialog must close before opening native controls: %@", dialogLabels);
 }
 

@@ -24,7 +24,20 @@ export DSH_TEST_PHASE_FILE="$WORK/current-phase"
 . "$HERE/guest-helper.sh"
 "$ISH_BUILD/tools/fakefsify" "$TARBALL" "$WORK/fakefs"
 INSTALL_COMMAND="$(python3 "$HERE/session-lease-prepare.py" --output "$WORK/session-lease-installer.mjs" --include-guest-test)"
-guest "$INSTALL_COMMAND" session-lease-install "$WORK/session-lease-installer.mjs"
-guest 'unset DSH_SESSION_LIFECYCLE DSH_HOST_BRIDGE_URL DSH_HOST_BRIDGE_TOKEN; node --expose-internals --expose-gc /tmp/dsh-session-lease-test.mjs' session-lease-native
+install_status=0
+guest "$INSTALL_COMMAND" session-lease-install "$WORK/session-lease-installer.mjs" > "$WORK/session-install.log" 2>&1 || install_status=$?
+cat "$WORK/session-install.log"
+[ "$install_status" = 0 ] || exit "$install_status"
+grep -qx 'SESSION_LEASE_PATCH_INSTALLED' "$WORK/session-install.log" || {
+  echo 'guest patch installation did not complete' >&2; exit 1;
+}
+native_status=0
+guest 'unset DSH_SESSION_LIFECYCLE DSH_HOST_BRIDGE_URL DSH_HOST_BRIDGE_TOKEN; node --expose-internals --expose-gc /tmp/dsh-session-lease-test.mjs' session-lease-native > "$WORK/session-native.log" 2>&1 || native_status=$?
+cat "$WORK/session-native.log"
+[ "$native_status" = 0 ] || exit "$native_status"
+# The emulator currently returns host status 0 even for a guest assertion
+# failure. Require the exact complete suite receipt as well as strict host
+# wait/deadline/pipe cleanup; neither result alone can establish a pass.
+python3 "$HERE/check-session-lease-guest.py" --result "$GUEST_RESULT" --output "$WORK/session-native.log"
 [ "$GUEST_FAILURES" = 0 ]
 echo 'SESSION_LEASE_GUEST_RUNNER_COMPLETED=1'

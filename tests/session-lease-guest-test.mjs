@@ -36,10 +36,13 @@ async function contender(lock) {
     catch(error) { await handle.close(); if(error.code==='EAGAIN'||error.code==='EWOULDBLOCK') process.exitCode=23; else throw error; }`;
   return await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let bytes = 0;
-    for (const pipe of [child.stdout, child.stderr]) pipe.on('data', data => { bytes += data.length; });
+    let bytes = 0, diagnostic = '';
+    for (const pipe of [child.stdout, child.stderr]) pipe.on('data', data => {
+      bytes += data.length;
+      diagnostic = (diagnostic + data.toString('utf8')).slice(0, 4096);
+    });
     child.once('error', reject);
-    child.once('close', (exitCode, signal) => signal ? reject(new Error('contender terminated by signal')) : resolve({ exitCode, bytes }));
+    child.once('close', (exitCode, signal) => signal ? reject(new Error('contender terminated by signal')) : resolve({ exitCode, bytes, diagnostic }));
   });
 }
 function injectLogFault(log, mode) {
@@ -76,7 +79,8 @@ try {
   for (const name of sentinels) await writeFile(root + '/' + name, randomBytes(64));
   const initial = await Promise.all(sentinels.map(async name => hash(await readFile(root + '/' + name))));
   await test('native cross-process flock excludes a contender while the session writer is running', async () => {
-    const { handle, lock } = await fixture(); assert.equal((await contender(lock)).exitCode, 23); await handle.close();
+    const { handle, lock } = await fixture(); const held = await contender(lock);
+    assert.equal(held.exitCode, 23, JSON.stringify(held)); await handle.close();
     assert.equal((await contender(lock)).exitCode, 0);
   });
   await test('normal lease suspension releases native flock, preserves the inode and reclaims exclusion on resume', async () => {

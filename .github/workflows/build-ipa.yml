@@ -48,6 +48,7 @@ on:
       - "tests/guest-*"
       - "tests/guest_snapshot.py"
       - "tests/check-bridge-refusal.py"
+      - "tests/check-session-lease-guest*.py"
       - "tests/service-events.mjs"
       - "tests/stub-bridge.mjs"
       - "tests/mock-deepseek.mjs"
@@ -458,6 +459,11 @@ jobs:
           node tests/session-lease-test.mjs build/session-lease-original.js 2>&1 | tee cilogs-verify/session-algorithm.log
           node tests/session-lease-controller-test.mjs 2>&1 | tee cilogs-verify/session-controller.log
 
+      - name: Real guest session receipt and exit-evidence checker regressions
+        run: |
+          set -euo pipefail
+          python3 tests/check-session-lease-guest-test.py 2>&1 | tee cilogs-verify/session-native-checker.log
+
       - name: Real guest session leases and 100 suspend/resume cycles
         run: |
           set -euo pipefail
@@ -552,6 +558,7 @@ jobs:
             build/rootfs-test/*.jsonl
             build/rootfs-test/guest-diagnostics/
             build/session-lease-guest.*/guest-diagnostics/
+            build/session-lease-guest.*/session-native.log
             build/session-lease-guest.*/service-events.jsonl
             build/session-lease-guest.*/current-phase
           if-no-files-found: warn

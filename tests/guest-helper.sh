@@ -4,8 +4,12 @@ guest() {
     local phase="${2:-guest-$((GUEST_SEQUENCE+1))}" rc
     GUEST_SEQUENCE=$((GUEST_SEQUENCE+1))
     GUEST_RESULT="$WORK/guest-diagnostics/$phase/result.json"
-    mkdir -p "$WORK/guest-diagnostics/$phase" || return 125
-    printf '%s\n' "$phase" > "$DSH_TEST_PHASE_FILE" || return 125
+    if ! mkdir -p "$WORK/guest-diagnostics/$phase" ||
+       ! printf '%s\n' "$phase" > "$DSH_TEST_PHASE_FILE"; then
+        GUEST_STATUS=125
+        GUEST_FAILURES=$((GUEST_FAILURES+1))
+        return 125
+    fi
     if python3 "$HERE/guest-runner.py" run \
         --phase "$phase" --result "$GUEST_RESULT" \
         --timeout "$GUEST_TIMEOUT" --sample-after "${DSH_GUEST_SAMPLE_AFTER:-75}" \

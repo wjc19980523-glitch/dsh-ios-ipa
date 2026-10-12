@@ -109,6 +109,55 @@ class HelperTest(unittest.TestCase):
             self.assertLess(len(command.encode()), 256)
             self.assertGreater(output.stat().st_size, 4096)
 
+    def test_stdin_unauthorized_then_timeout_still_fails(self):
+        r, output = self.invoke('import sys,time\nassert sys.stdin.buffer.read() == b"input"\n'
+            'print(' + repr(TEXT) + ', flush=True)\ntime.sleep(20)', stdin=b'input', tee=True)
+        self.assertEqual(r['wait_status'], 14)
+        self.assertTrue(r['timed_out'])
+        self.assertEqual(r['helper_exit_status'], 142)
+        self.assertFalse(all(refusal.verify(r, output, EVENTS).values()))
+
+    def test_prelaunch_setup_errors_update_the_actual_helper_status(self):
+        for failure in ('diagnostic-directory', 'phase-file'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix='dsh-helper-setup-') as tmp:
+                root = Path(tmp)
+                if failure == 'diagnostic-directory':
+                    (root / 'guest-diagnostics').write_text('not a directory')
+                phase = root / 'phase'
+                if failure == 'phase-file':
+                    phase.mkdir()
+                env = os.environ.copy()
+                env.update(HERE=str(HERE), WORK=tmp, DSH_TEST_PHASE_FILE=str(phase))
+                script = 'set -uo pipefail\nGUEST_SEQUENCE=0; GUEST_FAILURES=0; GUEST_STATUS=0\n'
+                script += '. "$HERE/guest-helper.sh"\n'
+                script += 'if guest ignored wrong-token; then exit 99; else rc=$?; fi\n'
+                script += 'test "$rc" = 125 && test "$GUEST_STATUS" = 125 && test "$GUEST_FAILURES" = 1\n'
+                done = subprocess.run([args.bash, '-c', script], env=env, capture_output=True, timeout=5)
+                self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_parent_input_close_error_keeps_supervising_the_real_child(self):
+        with tempfile.TemporaryDirectory(prefix='dsh-input-close-') as tmp:
+            root = Path(tmp)
+            input_path = root / 'input'
+            input_path.write_bytes(b'input')
+            source = input_path.open('rb')
+            class CloseFailure:
+                def fileno(self): return source.fileno()
+                def close(self):
+                    source.close()
+                    raise OSError(errno.EIO, 'injected parent input close failure')
+            options = argparse.Namespace(result=root / 'result.json', phase='stdin-close', events=root / 'events',
+                timeout=2, sample_after=0, initial_sample_after=0, stdin_file=input_path,
+                command=[sys.executable, '-c', 'import sys; assert sys.stdin.buffer.read() == b"input"'])
+            with mock.patch.object(runner, 'open', return_value=CloseFailure(), create=True):
+                status = runner.run(options)
+            result = json.loads(options.result.read_text())
+            self.assertEqual(result['wait_status'], 0)
+            self.assertEqual(status, 125)
+            self.assertEqual(result['runner_error'], 'OSError')
+            self.assertEqual(result['residual_processes'], [])
+            self.assertTrue(source.closed)
+
     def test_unauthorized_then_timeout_fails(self):
         r, output = self.invoke('import time\nprint(' + repr(TEXT) + ', flush=True)\ntime.sleep(20)', tee=True)
         self.assertTrue(r['timed_out'])

@@ -50,6 +50,7 @@ def run(a):
     a.result.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     source = None
+    input_close_error = None
     try:
         if getattr(a, 'stdin_file', None):
             source = open(a.stdin_file, 'rb')
@@ -68,7 +69,12 @@ def run(a):
         # Popen duplicated stdin into the child; the supervisor retains no
         # input descriptor or background pipeline reader while it waits.
         if source is not None:
-            source.close()
+            try:
+                source.close()
+            except OSError as error:
+                # The child already owns its descriptor. Keep supervising it
+                # and preserve its wait status; this cannot become a pass.
+                input_close_error = type(error).__name__
     identity = process_identity(p.pid)
     os.set_blocking(p.stdout.fileno(), False)
     selector = selectors.DefaultSelector()
@@ -83,7 +89,7 @@ def run(a):
     descendants = None
     killed_at = None
     observer_wait_interruptions = 0
-    runner_error = None
+    runner_error = input_close_error
     signal_errors = []
     forced_kill_sent = False
 

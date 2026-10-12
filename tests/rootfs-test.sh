@@ -84,7 +84,7 @@ check "root.tar.gz imports via fakefsify" test -f "$WORK/fakefs/meta.db"
 # headless wrong-token exit path. Only this disposable imported guest changes;
 # the bundled archive/hash and all 62 acceptance assertions stay unchanged.
 SESSION_INSTALL_COMMAND="$(python3 "$HERE/session-lease-prepare.py" --output "$WORK/session-lease-installer.mjs")" || exit $?
-guest "$SESSION_INSTALL_COMMAND" session-lease-install "$WORK/session-lease-installer.mjs" > "$WORK/session-lease-install.txt" || exit "$GUEST_STATUS"
+guest "$SESSION_INSTALL_COMMAND" session-lease-install "$WORK/session-lease-installer.mjs" > "$WORK/session-lease-install.txt" || exit $?
 
 if [ "${DSH_ROOTFS_FOCUS:-}" = wrong-token ]; then
     echo "== focused wrong-token (not the full 62-case suite)"

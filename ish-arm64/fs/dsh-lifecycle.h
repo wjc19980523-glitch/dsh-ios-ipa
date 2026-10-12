@@ -218,9 +218,10 @@ DSH_LIFECYCLE_API void dsh_lifecycle_enable_admission_gate(void);
 DSH_LIFECYCLE_API void dsh_lifecycle_begin_resume(void);
 DSH_LIFECYCLE_API void dsh_lifecycle_checkpoint(int guest_pid);
 DSH_LIFECYCLE_API void dsh_lifecycle_thread_exit(void);
-/* Only the syscall dispatcher installs this thread-local identity, before any
- * guest/kernel locks. Native callers without a matching guest PID do not gain
- * a drain permit. Restore the previous context when leaving the dispatcher. */
+/* Trusted kernel task-loop, syscall and thread-cleanup entries install this
+ * thread-local identity before guest/kernel locks. Native callers without a
+ * matching guest PID do not gain a drain permit. Nested syscall entry restores
+ * the task-loop context; the loop refreshes it from the live task each round. */
 struct dsh_lifecycle_guest_context { int guest_pid; int guest_tgid; };
 DSH_LIFECYCLE_API struct dsh_lifecycle_guest_context dsh_lifecycle_exchange_guest_context(
         struct dsh_lifecycle_guest_context context);

@@ -18,6 +18,7 @@ NATIVE_NAMES = (
     "futex-idle-test.sh",
     "flock-diagnostics-test.sh",
     "session-drain-admission-test.sh",
+    "task-lifecycle-context-test.sh",
 )
 
 

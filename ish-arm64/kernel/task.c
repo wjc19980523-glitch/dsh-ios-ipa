@@ -156,7 +156,13 @@ static void task_run_tlb_cleanup(void *arg) {
     // Orphan/exit paths can skip handle_interrupt's normal scope. Releasing a
     // deferred mm can orphan file inodes, so admit before taking any mm/inode
     // lock, and retire all TLS permits only after that cleanup is complete.
-    (void)dsh_lifecycle_operation_begin("guest_thread_cleanup", current ? current->pid : -1);
+    // pthread_exit skips C cleanup attributes, and can be reached before the
+    // loop installs a context. Refresh from the live task rather than inheriting
+    // a dispatcher identity; a destroyed/cleared task gains no drain permit.
+    struct task *self = current;
+    (void)dsh_lifecycle_exchange_guest_context((struct dsh_lifecycle_guest_context) {
+        self ? self->pid : -1, self ? self->tgid : -1});
+    (void)dsh_lifecycle_operation_begin("guest_thread_cleanup", self ? self->pid : -1);
     tlb_free((struct tlb *)arg);
     // [T-ish-mm-leak-refcount-handoff] If the do_exit_group safety valve
     // orphaned this thread (stuck in an uninterruptible host syscall) it
@@ -165,7 +171,6 @@ static void task_run_tlb_cleanup(void *arg) {
     // critical section, so releasing now can't UAF the mem lock. This reclaims
     // the whole guest address space instead of leaking it forever. `current`
     // is a __thread TLS pointer, still valid inside pthread cleanup.
-    struct task *self = current;
     if (self != NULL && self->mm_release_deferred && self->mm != NULL) {
         self->mm_release_deferred = false;
         mm_release(self->mm);
@@ -198,6 +203,13 @@ void task_run_current() {
             // Exit the host thread silently; cleanup handler frees tlb.
             pthread_exit(NULL);
         }
+        // The outer CPU-loop checkpoint and group-exit path need the same
+        // authenticated group identity as syscall entry. The dispatcher nests
+        // its context and restores this one before the next loop checkpoint.
+        struct dsh_lifecycle_guest_context iteration_guest_context = {self->pid, self->tgid};
+        struct dsh_lifecycle_guest_context previous_guest_context
+            __attribute__((cleanup(dsh_lifecycle_restore_guest_context))) =
+            dsh_lifecycle_exchange_guest_context(iteration_guest_context);
         if (self->group->doing_group_exit) {
             (void)dsh_lifecycle_operation_begin("guest_group_exit", self->pid);
             do_exit(self->group->group_exit_code);

@@ -65,6 +65,7 @@ on:
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
       - "tests/session-*"
+      - "tests/task-lifecycle-context-test.*"
       - ".gitattributes"
       - "tests/lifecycle-test.c"
       - "tests/flock-diagnostics-test.sh"
@@ -451,6 +452,9 @@ jobs:
 
       - name: Generation-scoped Node drain admission (native flock + ASan + UBSan)
         run: bash tests/session-drain-admission-test.sh
+
+      - name: Production task-loop and cleanup identity (positive and old-code negative control)
+        run: bash tests/task-lifecycle-context-test.sh
 
       - name: Session backend algorithm and controller regressions
         run: |

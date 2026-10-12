@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import "DSHLifecycleDiagnostics.h"
 #import "DSHHarness.h"
+#import "DSHGuestLauncher.h"
 #include "../../ish-arm64/fs/dsh-lifecycle.h"
 
 @interface DSHLifecycleDiagnosticsTests : XCTestCase @end
@@ -91,6 +92,13 @@
     }
 }
 - (void)testExportPersistsAnImmediateSnapshotOfCurrentLocks {
+    // Other Harness tests create enough default logs to rotate the singleton's
+    // original file out of the shared directory. Own this test's writer/path;
+    // exercise the real export API without depending on suite order.
+    NSURL *directory = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
+    DSHLogBuffer *log = [[DSHLogBuffer alloc] initPersistentWithCapacity:8 directory:directory];
+    DSHHarness *harness = [[DSHHarness alloc] initWithLauncher:[DSHGuestLauncher new]];
+    [harness setValue:log forKey:@"log"];
     int object = 0;
     struct dsh_lifecycle_flock_identity identity = {.inode = 87654321, .file_kind = DSH_FLOCK_FILE_SESSION_LOCK};
     dsh_lifecycle_native_flock_observe(&object, 99, 23, DSH_LIFECYCLE_FLOCK_EXCLUSIVE, &identity);
@@ -98,7 +106,7 @@
         struct dsh_lifecycle_snapshot snapshot;
         dsh_lifecycle_get_snapshot(&snapshot);
         uint64_t identifier = snapshot.native_flocks[snapshot.native_flock_count - 1].id;
-        NSString *report = [DSHLifecycleDiagnostics reportForHarness:DSHHarness.shared];
+        NSString *report = [DSHLifecycleDiagnostics reportForHarness:harness];
         BOOL found = NO;
         for (NSString *line in [report componentsSeparatedByString:@"\n"]) {
             NSRange marker = [line rangeOfString:@"[lifecycle] "];
@@ -112,9 +120,13 @@
                     found = YES;
         }
         XCTAssertTrue(found, @"export must capture this lock now, without waiting for a lifecycle notification");
-        XCTAssertTrue([DSHHarness.shared.log.diagnosticReport containsString:@"diagnosticReportExported"]);
+        // A different reader must find the event on disk, not just in memory.
+        DSHLogBuffer *reader = [[DSHLogBuffer alloc] initPersistentWithCapacity:8 directory:directory];
+        XCTAssertTrue([reader.diagnosticReport containsString:@"diagnosticReportExported"]);
+        XCTAssertTrue([reader.diagnosticReport containsString:@"87654321"]);
     } @finally {
         dsh_lifecycle_native_flock_close(&object);
+        XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:directory error:nil]);
     }
 }
 @end

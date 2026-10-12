@@ -1,0 +1,385 @@
+#import <XCTest/XCTest.h>
+#import <CommonCrypto/CommonDigest.h>
+#import "DSHSessionLifecycleInstaller.h"
+#include <errno.h>
+
+static NSString *const DSHInstallerTestPackage = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
+static NSString *const DSHInstallerTestController = @"/usr/local/share/dsh/session-lifecycle.mjs";
+static NSString *const DSHInstallerTestCore = @"/usr/local/share/dsh/session-lifecycle-core.mjs";
+
+static NSData *DSHInstallerTestData(NSString *text) { return [text dataUsingEncoding:NSUTF8StringEncoding]; }
+static NSString *DSHInstallerTestHash(NSData *data) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hash = [NSMutableString string];
+    for (NSUInteger i = 0; i < sizeof(digest); i++) [hash appendFormat:@"%02x", digest[i]];
+    return hash;
+}
+
+@class DSHInstallerMemoryFilesystem;
+@interface DSHInstallerMemoryFile : NSObject <DSHSessionLifecycleFile>
+@property (nonatomic) DSHInstallerMemoryFilesystem *filesystem;
+@property (nonatomic) NSString *path;
+@property (nonatomic) BOOL writable;
+@property (nonatomic) BOOL closed;
+@property (nonatomic) NSUInteger offset;
+@end
+
+@interface DSHInstallerMemoryFilesystem : NSObject <DSHSessionLifecycleFilesystem>
+@property (nonatomic) NSMutableDictionary<NSString *, NSData *> *files;
+@property (nonatomic) NSMutableSet<NSString *> *directories;
+@property (nonatomic) NSMutableDictionary<NSString *, DSHSessionLifecycleFileInfo *> *overrides;
+@property (nonatomic) NSMutableArray<NSString *> *createdPaths;
+@property (nonatomic) NSMutableArray<NSString *> *renamedTargets;
+@property (nonatomic) NSMutableArray<NSString *> *removedPaths;
+@property (nonatomic) NSUInteger writeCalls;
+@property (nonatomic) NSUInteger openHandles;
+@property (nonatomic) NSString *failureOperation;
+@property (nonatomic) NSString *failureTarget;
+@property (nonatomic) NSUInteger failuresRemaining;
+@property (nonatomic, copy) void (^onCreate)(void);
+- (BOOL)failOperation:(NSString *)operation path:(NSString *)path error:(NSError **)error;
+@end
+
+@implementation DSHInstallerMemoryFile
+- (NSData *)readDataOfLength:(NSUInteger)length error:(NSError **)error {
+    if ([self.filesystem failOperation:@"read" path:self.path error:error]) return nil;
+    NSData *data = self.filesystem.files[self.path] ?: [NSData data];
+    NSUInteger amount = MIN(length, data.length - self.offset);
+    NSData *part = [data subdataWithRange:NSMakeRange(self.offset, amount)];
+    self.offset += amount;
+    return part;
+}
+- (NSInteger)writeData:(NSData *)data error:(NSError **)error {
+    self.filesystem.writeCalls++;
+    if ([self.filesystem failOperation:@"write" path:self.path error:error]) return -1;
+    if ([self.filesystem failOperation:@"shortWrite" path:self.path error:nil]) {
+        NSUInteger count = data.length ? data.length - 1 : 0;
+        self.filesystem.files[self.path] = [data subdataWithRange:NSMakeRange(0, count)];
+        return count;
+    }
+    self.filesystem.files[self.path] = [data copy];
+    if ([self.filesystem failOperation:@"corruptWrite" path:self.path error:nil])
+        self.filesystem.files[self.path] = DSHInstallerTestData(@"silently corrupted temporary");
+    return data.length;
+}
+- (BOOL)synchronizeWithError:(NSError **)error {
+    return ![self.filesystem failOperation:self.writable ? @"fsync" : @"fsyncDirectory" path:self.path error:error];
+}
+- (BOOL)closeWithError:(NSError **)error {
+    NSAssert(!self.closed, @"Fixture handles must close exactly once");
+    self.closed = YES;
+    self.filesystem.openHandles--;
+    return ![self.filesystem failOperation:self.writable ? @"closeWrite" : @"closeRead" path:self.path error:error];
+}
+@end
+
+@implementation DSHInstallerMemoryFilesystem
+- (instancetype)init {
+    if ((self = [super init])) {
+        _files = [NSMutableDictionary dictionary];
+        _directories = [NSMutableSet setWithObject:@"/"];
+        _overrides = [NSMutableDictionary dictionary];
+        _createdPaths = [NSMutableArray array];
+        _renamedTargets = [NSMutableArray array];
+        _removedPaths = [NSMutableArray array];
+        for (NSString *path in @[DSHInstallerTestPackage, DSHInstallerTestController, DSHInstallerTestCore]) {
+            NSString *parent = path.stringByDeletingLastPathComponent;
+            while (parent.length > 1) { [_directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+        }
+    }
+    return self;
+}
+- (BOOL)failOperation:(NSString *)operation path:(NSString *)path error:(NSError **)error {
+    BOOL matches = [path isEqual:self.failureTarget] ||
+        [path hasPrefix:[self.failureTarget ?: @"<none>" stringByAppendingString:@".dsh-session-"]];
+    if (!self.failuresRemaining || ![operation isEqual:self.failureOperation] || !matches) return NO;
+    self.failuresRemaining--;
+    if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil];
+    return YES;
+}
+- (DSHSessionLifecycleFileInfo *)infoAtPath:(NSString *)path error:(NSError **)error {
+    if ([self failOperation:@"lstat" path:path error:error]) return nil;
+    if (self.overrides[path]) return self.overrides[path];
+    if (!self.files[path] && ![self.directories containsObject:path]) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:nil];
+        return nil;
+    }
+    DSHSessionLifecycleFileInfo *info = [DSHSessionLifecycleFileInfo new];
+    info.type = self.files[path] ? DSHSessionLifecycleFileRegular : DSHSessionLifecycleFileDirectory;
+    info.permissions = self.files[path] ? 0644 : 0755;
+    info.linkCount = 1;
+    return info;
+}
+- (id<DSHSessionLifecycleFile>)openForReadingAtPath:(NSString *)path error:(NSError **)error {
+    if ([self failOperation:@"openRead" path:path error:error]) return nil;
+    if (!self.files[path] && ![self.directories containsObject:path]) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:nil];
+        return nil;
+    }
+    DSHInstallerMemoryFile *file = [DSHInstallerMemoryFile new];
+    file.filesystem = self; file.path = path;
+    self.openHandles++;
+    return file;
+}
+- (id<DSHSessionLifecycleFile>)createExclusiveFileAtPath:(NSString *)path
+                                           permissions:(NSUInteger)permissions error:(NSError **)error {
+    if ([self failOperation:@"create" path:path error:error]) return nil;
+    if (self.files[path] || self.overrides[path]) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EEXIST userInfo:nil];
+        return nil;
+    }
+    [self.createdPaths addObject:path];
+    self.files[path] = [NSData data];
+    DSHInstallerMemoryFile *file = [DSHInstallerMemoryFile new];
+    file.filesystem = self; file.path = path; file.writable = YES;
+    self.openHandles++;
+    if (self.onCreate) self.onCreate();
+    return file;
+}
+- (BOOL)renamePath:(NSString *)source toPath:(NSString *)target error:(NSError **)error {
+    if ([self failOperation:@"rename" path:target error:error]) return NO;
+    self.files[target] = self.files[source];
+    [self.files removeObjectForKey:source];
+    [self.renamedTargets addObject:target];
+    return YES;
+}
+- (BOOL)removeTemporaryFileAtPath:(NSString *)path error:(NSError **)error {
+    [self.removedPaths addObject:path];
+    [self.files removeObjectForKey:path];
+    return YES;
+}
+@end
+
+@interface DSHSessionLifecycleInstallerTests : XCTestCase
+@property (nonatomic) DSHInstallerMemoryFilesystem *filesystem;
+@property (nonatomic) NSDictionary *manifest;
+@property (nonatomic) NSDictionary<NSString *, NSData *> *resources;
+@property (nonatomic) NSDictionary<NSString *, NSData *> *userSentinels;
+@property (nonatomic) NSData *original;
+@property (nonatomic) NSData *patched;
+@end
+
+@implementation DSHSessionLifecycleInstallerTests
+- (void)setUp {
+    [super setUp];
+    self.filesystem = [DSHInstallerMemoryFilesystem new];
+    self.original = DSHInstallerTestData(@"export const state = 'original';\n");
+    self.patched = DSHInstallerTestData(@"export const state = 'patched';\n");
+    self.filesystem.files[DSHInstallerTestPackage] = self.original;
+    self.resources = @{
+        @"session-lifecycle.mjs": DSHInstallerTestData(@"import './session-lifecycle-core.mjs';\n"),
+        @"session-lifecycle-core.mjs": DSHInstallerTestData(@"export const core = 1;\n"),
+    };
+    self.manifest = @{
+        @"schema": @1,
+        @"patches": @[@{
+            @"target": DSHInstallerTestPackage,
+            @"original_sha256": DSHInstallerTestHash(self.original),
+            @"patched_sha256": DSHInstallerTestHash(self.patched),
+            @"replacements": @[@{ @"find": @"'original'", @"replace": @"'patched'", @"count": @1 }],
+        }],
+        @"files": @[
+            @{ @"source": @"session-lifecycle.mjs", @"target": DSHInstallerTestController,
+               @"sha256": DSHInstallerTestHash(self.resources[@"session-lifecycle.mjs"]) },
+            @{ @"source": @"session-lifecycle-core.mjs", @"target": DSHInstallerTestCore,
+               @"sha256": DSHInstallerTestHash(self.resources[@"session-lifecycle-core.mjs"]) },
+        ],
+    };
+    // These are synthetic bytes, never a real API key or a user's filesystem.
+    self.userSentinels = @{
+        @"/root/.dsh/settings.json": DSHInstallerTestData(@"synthetic-api-key-and-config"),
+        @"/root/.dsh/sessions/example/session.jsonl": DSHInstallerTestData(@"synthetic-session-history\n"),
+        @"/root/.dsh/profiles/web/cordis.patch.yml": DSHInstallerTestData(@"synthetic-language-en"),
+        @"/root/workspace/notes.txt": DSHInstallerTestData(@"synthetic-workspace"),
+        @"/opt/custom-workspace/untracked.txt": DSHInstallerTestData(@"synthetic-custom-workspace"),
+    };
+    [self.filesystem.files addEntriesFromDictionary:self.userSentinels];
+}
+- (void)tearDown {
+    for (NSString *path in self.userSentinels)
+        XCTAssertEqualObjects(self.filesystem.files[path], self.userSentinels[path], @"user sentinel changed: %@", path);
+    XCTAssertEqual(self.filesystem.openHandles, 0u, @"installer leaked an adapter handle");
+    for (NSString *removed in self.filesystem.removedPaths)
+        XCTAssertTrue([removed containsString:@".dsh-session-"], @"only owned temporary files may be removed");
+    [super tearDown];
+}
+- (BOOL)install:(NSError **)error {
+    return [[[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest resources:self.resources
+        filesystem:self.filesystem] installWithError:error];
+}
+- (void)primeControllers {
+    self.filesystem.files[DSHInstallerTestController] = self.resources[@"session-lifecycle.mjs"];
+    self.filesystem.files[DSHInstallerTestCore] = self.resources[@"session-lifecycle-core.mjs"];
+}
+- (void)setFailure:(NSString *)operation target:(NSString *)target {
+    self.filesystem.failureOperation = operation;
+    self.filesystem.failureTarget = target;
+    self.filesystem.failuresRemaining = 1;
+}
+- (void)testInstallsResourcesBeforePackageAndIsIdempotent {
+    NSError *error = nil;
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets,
+        (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestPackage]));
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 3u);
+}
+- (void)testUnknownPackageDoesNotWriteAnyFile {
+    self.filesystem.files[DSHInstallerTestPackage] = DSHInstallerTestData(@"user customized or newer package");
+    NSDictionary *before = [self.filesystem.files copy];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testResourceHashFailurePreventsAllWrites {
+    self.resources = @{ @"session-lifecycle.mjs": DSHInstallerTestData(@"corrupt bundle") };
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIntegrityFailure);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.original);
+}
+- (void)testUnknownControllerIsNotOverwritten {
+    self.filesystem.files[DSHInstallerTestCore] = DSHInstallerTestData(@"custom controller");
+    NSDictionary *before = [self.filesystem.files copy];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testAlreadyPatchedPackageStillValidatesAndRestoresMissingResources {
+    self.filesystem.files[DSHInstallerTestPackage] = self.patched;
+    NSError *error = nil;
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore]));
+    self.resources = @{};
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIntegrityFailure);
+}
+- (void)testRejectsTraversalAndUserTargets {
+    for (NSString *target in @[@"/root/.dsh/settings.json", @"/lib/../root/.dsh/settings.json",
+                              @"/usr/local/share/dsh/../../../../root/.dsh/settings.json"]) {
+        NSMutableDictionary *manifest = [self.manifest mutableCopy];
+        NSMutableArray *files = [manifest[@"files"] mutableCopy];
+        NSMutableDictionary *file = [files[0] mutableCopy];
+        file[@"target"] = target; files[0] = file; manifest[@"files"] = files;
+        DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc]
+            initWithManifest:manifest resources:self.resources filesystem:self.filesystem];
+        NSError *error = nil;
+        XCTAssertFalse([installer installWithError:&error]);
+        XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    }
+}
+- (void)testRejectsUnknownSchemaDuplicateResourcesAndMalformedReplacement {
+    NSMutableDictionary *schema = [self.manifest mutableCopy];
+    schema[@"schema"] = @2;
+    NSMutableDictionary *duplicate = [self.manifest mutableCopy];
+    duplicate[@"files"] = @[self.manifest[@"files"][0], self.manifest[@"files"][0]];
+    NSMutableDictionary *malformed = [self.manifest mutableCopy];
+    NSMutableDictionary *patch = [malformed[@"patches"][0] mutableCopy];
+    patch[@"replacements"] = @[@{ @"find": @"", @"replace": @"x", @"count": @1 }];
+    malformed[@"patches"] = @[patch];
+    for (NSDictionary *manifest in @[schema, duplicate, malformed]) {
+        DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc]
+            initWithManifest:manifest resources:self.resources filesystem:self.filesystem];
+        NSError *error = nil;
+        XCTAssertFalse([installer installWithError:&error]);
+        XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    }
+}
+- (void)testRejectsSymlinkAtTargetOrAncestorAndHardLinkedPackage {
+    for (NSString *path in @[DSHInstallerTestPackage, @"/usr/local/lib/node_modules/@deepseek-ai", DSHInstallerTestController]) {
+        DSHSessionLifecycleFileInfo *info = [DSHSessionLifecycleFileInfo new];
+        info.type = DSHSessionLifecycleFileSymbolicLink; info.linkCount = 1;
+        self.filesystem.overrides[path] = info;
+        NSError *error = nil;
+        XCTAssertFalse([self install:&error]);
+        XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+        [self.filesystem.overrides removeAllObjects];
+    }
+    DSHSessionLifecycleFileInfo *info = [DSHSessionLifecycleFileInfo new];
+    info.type = DSHSessionLifecycleFileRegular; info.linkCount = 2;
+    self.filesystem.overrides[DSHInstallerTestPackage] = info;
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testRejectsReplacementCountAndPatchedHashMismatchBeforeWrites {
+    for (NSString *field in @[@"count", @"patched_sha256"]) {
+        NSMutableDictionary *manifest = [self.manifest mutableCopy];
+        NSMutableDictionary *patch = [manifest[@"patches"][0] mutableCopy];
+        if ([field isEqual:@"count"]) {
+            NSMutableDictionary *replacement = [patch[@"replacements"][0] mutableCopy];
+            replacement[@"count"] = @2;
+            patch[@"replacements"] = @[replacement];
+        } else patch[@"patched_sha256"] = DSHInstallerTestHash(DSHInstallerTestData(@"wrong expected result"));
+        manifest[@"patches"] = @[patch];
+        DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc]
+            initWithManifest:manifest resources:self.resources filesystem:self.filesystem];
+        NSError *error = nil;
+        XCTAssertFalse([installer installWithError:&error]);
+        XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIntegrityFailure);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    }
+}
+- (void)testPackageIOFailuresPreserveOriginalAndRetrySuccessfully {
+    [self primeControllers];
+    for (NSString *operation in @[@"openRead", @"read", @"closeRead", @"create", @"write", @"shortWrite",
+                                  @"fsync", @"closeWrite", @"corruptWrite", @"rename"]) {
+        self.filesystem.files[DSHInstallerTestPackage] = self.original;
+        [self setFailure:operation target:DSHInstallerTestPackage];
+        NSError *error = nil;
+        XCTAssertFalse([self install:&error], @"fault %@ was not propagated", operation);
+        XCTAssertNotNil(error);
+        XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.original, @"%@", operation);
+        XCTAssertEqual(self.filesystem.openHandles, 0u, @"%@", operation);
+        XCTAssertTrue([self install:&error], @"retry %@ failed: %@", operation, error);
+        XCTAssertNil(error);
+        XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
+    }
+}
+- (void)testResourceFailureNeverCommitsPackageAndRetryCompletes {
+    [self setFailure:@"rename" target:DSHInstallerTestCore];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.original);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestController], self.resources[@"session-lifecycle.mjs"]);
+    XCTAssertNil(self.filesystem.files[DSHInstallerTestCore]);
+    XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestPackage]);
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
+}
+- (void)testPreflightStatFailureDoesNotCreateDirectoriesOrWriteFiles {
+    [self setFailure:@"lstat" target:@"/usr/local/share/dsh"];
+    NSDictionary *before = [self.filesystem.files copy];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIOFailure);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    [self.filesystem.directories removeObject:@"/usr/local/share/dsh"];
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testTargetChangedAfterPreflightIsNotOverwritten {
+    [self primeControllers];
+    NSData *customized = DSHInstallerTestData(@"changed after source preflight");
+    __weak DSHInstallerMemoryFilesystem *filesystem = self.filesystem;
+    self.filesystem.onCreate = ^{ filesystem.files[DSHInstallerTestPackage] = customized; };
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], customized);
+    XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestPackage]);
+}
+@end

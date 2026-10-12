@@ -1,5 +1,6 @@
 #import "DSHLifecycleCoordinator.h"
 #import <UIKit/UIKit.h>
+#include <math.h>
 
 @interface DSHUIKitLifecycleTasks : NSObject <DSHLifecycleBackgroundTasks>
 @end
@@ -30,6 +31,11 @@
 @property (nonatomic) BOOL expired;
 @property (nonatomic) BOOL denied;
 @property (nonatomic) BOOL socketsSuspended;
+@property (nonatomic) BOOL requiresSessionAcknowledgement;
+@property (nonatomic) BOOL sessionAcknowledged;
+@property (nonatomic) BOOL sessionCompletionReceived;
+@property (nonatomic) BOOL sessionCancelled;
+@property (nonatomic) BOOL pollScheduled;
 @end
 @implementation DSHLifecycleCycle
 @end
@@ -43,9 +49,15 @@
 @property (nonatomic, readwrite) uint64_t generation;
 @property (nonatomic, readwrite) uint64_t coreGeneration;
 @property (nonatomic, readwrite) NSTimeInterval lastQuiesceWaitDuration;
+@property (nonatomic, readwrite) BOOL sessionRecoveryNeedsAttention;
 @property (nonatomic, nullable) DSHLifecycleCycle *cycle;
 @property (nonatomic) NSMutableArray<dispatch_block_t> *pendingActions;
 @property (nonatomic) BOOL flushingActions;
+@property (nonatomic) BOOL pendingBackground;
+@property (nonatomic, nullable) DSHLifecycleCycle *pendingBackgroundCycle;
+@property (nonatomic) BOOL resumeFinished;
+@property (nonatomic) BOOL resumeCancellationRequested;
+@property (nonatomic) NSTimeInterval resumeDeadline;
 @end
 
 @implementation DSHLifecycleCoordinator
@@ -69,18 +81,33 @@
         _clock = [clock copy];
         _state = DSHLifecycleCoordinatorStateRunning;
         _pollInterval = 0.05;
+        _sessionResumeTimeout = 15;
         _pendingActions = [NSMutableArray array];
     }
     return self;
 }
 
 - (void)dealloc {
-    DSHLifecycleCycle *cycle = _cycle;
-    if (cycle.taskIdentifierReturned && !cycle.taskEnded && cycle.backgroundTask != NSUIntegerMax) {
-        id<DSHLifecycleBackgroundTasks> tasks = _backgroundTasks;
-        NSUInteger identifier = cycle.backgroundTask;
-        if (NSThread.isMainThread) [tasks endTask:identifier];
-        else dispatch_async(dispatch_get_main_queue(), ^{ [tasks endTask:identifier]; });
+    if (_cycle || _pendingBackgroundCycle) {
+        id<DSHLifecycleDriver> driver = _driver;
+        dispatch_block_t cancel = ^{
+            if ([driver respondsToSelector:@selector(cancelSessionTransition)]) {
+                @try { [driver cancelSessionTransition]; }
+                @catch (__unused NSException *exception) { /* No caller text is logged during teardown. */ }
+            }
+        };
+        if (NSThread.isMainThread) cancel();
+        else dispatch_async(dispatch_get_main_queue(), cancel);
+    }
+    for (id entry in @[(id)_cycle ?: NSNull.null, (id)_pendingBackgroundCycle ?: NSNull.null]) {
+        if (entry == NSNull.null) continue;
+        DSHLifecycleCycle *cycle = entry;
+        if (cycle.taskIdentifierReturned && !cycle.taskEnded && cycle.backgroundTask != NSUIntegerMax) {
+            id<DSHLifecycleBackgroundTasks> tasks = _backgroundTasks;
+            NSUInteger identifier = cycle.backgroundTask;
+            if (NSThread.isMainThread) [tasks endTask:identifier];
+            else dispatch_async(dispatch_get_main_queue(), ^{ [tasks endTask:identifier]; });
+        }
     }
 }
 
@@ -92,6 +119,9 @@
     NSTimeInterval waited = cycle.waitFinished ? cycle.finishedWaitDuration : MAX(0, self.clock() - cycle.startedAt);
     self.lastQuiesceWaitDuration = waited;
     return @{ @"cycle": @(cycle.generation), @"core_generation": @(cycle.coreGeneration),
+              @"session_ack_required": @(cycle.requiresSessionAcknowledgement),
+              @"session_acknowledged": @(cycle.sessionAcknowledged),
+              @"session_recovery_needs_attention": @(self.sessionRecoveryNeedsAttention),
               @"wait_ms": @(waited * 1000), @"snapshot": [self.driver diagnosticSnapshot] ?: @{} };
 }
 
@@ -114,13 +144,21 @@
 
 - (void)handleAppBackground {
     NSAssert(NSThread.isMainThread, @"Lifecycle transitions require the main thread");
+    if (self.state == DSHLifecycleCoordinatorStateResuming) {
+        [self deferBackgroundDuringResume];
+        return;
+    }
     if (self.state != DSHLifecycleCoordinatorStateRunning) return;
 
-    DSHLifecycleCycle *cycle = [DSHLifecycleCycle new];
+    DSHLifecycleCycle *cycle = self.pendingBackgroundCycle ?: [DSHLifecycleCycle new];
+    self.pendingBackgroundCycle = nil;
     cycle.generation = ++self.generation;
-    cycle.startedAt = self.clock();
-    cycle.lastDiagnosticAt = cycle.startedAt;
-    cycle.backgroundTask = NSUIntegerMax;
+    if (!cycle.taskIdentifierReturned) {
+        cycle.startedAt = self.clock();
+        cycle.lastDiagnosticAt = cycle.startedAt;
+        cycle.backgroundTask = NSUIntegerMax;
+    }
+    cycle.requiresSessionAcknowledgement = [self.driver respondsToSelector:@selector(prepareSessionsForGeneration:completion:)];
     self.cycle = cycle;
     self.state = DSHLifecycleCoordinatorStateQuiescing;
     // Admission closes before any observer, network completion, or guest can
@@ -129,12 +167,14 @@
     [self.driver pauseHarnessSupervision];
 
     __weak typeof(self) weakSelf = self;
-    cycle.backgroundTask = [self.backgroundTasks beginTaskWithName:@"dsh.filesystem-quiesce"
+    if (!cycle.taskIdentifierReturned) {
+        cycle.backgroundTask = [self.backgroundTasks beginTaskWithName:@"dsh.filesystem-quiesce"
                                                 expirationHandler:^{
-        [weakSelf expireCycle:cycle];
-    }];
-    cycle.taskIdentifierReturned = YES;
-    cycle.denied = cycle.backgroundTask == NSUIntegerMax;
+            [weakSelf expireCycle:cycle];
+        }];
+        cycle.taskIdentifierReturned = YES;
+        cycle.denied = cycle.backgroundTask == NSUIntegerMax;
+    }
     if (cycle.endRequested) [self endTaskForCycle:cycle];
     if (![self isCurrentCycle:cycle]) {
         [self endTaskForCycle:cycle];
@@ -143,16 +183,94 @@
     // Acquire the finite UIKit assertion before persisting a diagnostic, whose
     // fsync must not consume our initial background allowance without a task.
     [self recordEvent:@"quiesceRequested" cycle:cycle];
-    if (cycle.denied) [self recordEvent:@"quiesceTaskDenied" cycle:cycle];
-    // Even a denied assertion gets one nonblocking cached check. It cannot
-    // authorize a timer that assumes the app has further background runtime.
-    if (!cycle.expired) [self attemptQuiesceForCycle:cycle];
+    if (cycle.denied) {
+        [self cancelPreparationForCycle:cycle];
+        [self recordEvent:@"quiesceTaskDenied" cycle:cycle];
+    }
+    if (cycle.expired && !cycle.denied && !cycle.sessionCancelled) {
+        [self cancelPreparationForCycle:cycle];
+        [self recordEvent:@"quiesceExpired" cycle:cycle];
+    }
+    if (!cycle.expired && !cycle.denied && cycle.requiresSessionAcknowledgement) {
+        @try {
+            [self.driver prepareSessionsForGeneration:cycle.coreGeneration completion:^(BOOL success) {
+                dispatch_block_t finish = ^{ [weakSelf completePreparation:success cycle:cycle]; };
+                if (NSThread.isMainThread) finish();
+                else dispatch_async(dispatch_get_main_queue(), finish);
+            }];
+        } @catch (__unused NSException *exception) {
+            // Exception reason/name can contain caller input. Persist only a
+            // fixed event and the ordinary metadata-only lifecycle snapshot.
+            [self completePreparation:NO cycle:cycle];
+            [self recordEvent:@"sessionQuiesceDriverException" cycle:cycle];
+        }
+    }
+    // Legacy drivers may perform one cached check after task denial. A managed
+    // guest never gets a new drain permit or a claimed acknowledgement then.
+    if (!cycle.expired && (!cycle.denied || !cycle.requiresSessionAcknowledgement))
+        [self attemptQuiesceForCycle:cycle];
+}
+
+- (void)deferBackgroundDuringResume {
+    if (self.pendingBackground) return;
+    self.pendingBackground = YES;
+    // Writer restoration may itself hold native locks. Acquire this new
+    // background cycle's single finite assertion now, not after a 15s resume.
+    DSHLifecycleCycle *cycle = [DSHLifecycleCycle new];
+    cycle.generation = self.generation;
+    cycle.startedAt = cycle.lastDiagnosticAt = self.clock();
+    cycle.backgroundTask = NSUIntegerMax;
+    self.pendingBackgroundCycle = cycle;
+    __weak typeof(self) weakSelf = self;
+    cycle.backgroundTask = [self.backgroundTasks beginTaskWithName:@"dsh.filesystem-quiesce"
+        expirationHandler:^{ [weakSelf expireCycle:cycle]; }];
+    cycle.taskIdentifierReturned = YES;
+    cycle.denied = cycle.backgroundTask == NSUIntegerMax;
+    if (cycle.endRequested) [self endTaskForCycle:cycle];
+    if (self.pendingBackgroundCycle != cycle) { [self endTaskForCycle:cycle]; return; }
+    [self recordEvent:@"backgroundDeferredDuringSessionResume" cycle:cycle];
+    if (cycle.denied || cycle.expired) {
+        [self cancelSessionResume];
+        [self finishSessionResume:NO timedOut:NO cycle:self.cycle generation:self.generation];
+    }
+}
+
+- (void)cancelSessionTransition {
+    if (![self.driver respondsToSelector:@selector(cancelSessionTransition)]) return;
+    @try { [self.driver cancelSessionTransition]; }
+    @catch (__unused NSException *exception) {
+        [self recordEvent:@"sessionCancelDriverException" cycle:self.cycle];
+    }
+}
+
+- (void)cancelPreparationForCycle:(DSHLifecycleCycle *)cycle {
+    if (cycle.sessionCancelled) return;
+    cycle.sessionCancelled = YES;
+    [self cancelSessionTransition];
+}
+
+- (void)cancelSessionResume {
+    if (self.resumeCancellationRequested) return;
+    self.resumeCancellationRequested = YES;
+    [self cancelSessionTransition];
+}
+
+- (void)completePreparation:(BOOL)success cycle:(DSHLifecycleCycle *)cycle {
+    NSAssert(NSThread.isMainThread, @"Session acknowledgements require the main thread");
+    if (![self isCurrentCycle:cycle] || self.state != DSHLifecycleCoordinatorStateQuiescing ||
+            cycle.expired || cycle.denied || cycle.sessionCancelled || cycle.sessionCompletionReceived) return;
+    cycle.sessionCompletionReceived = YES;
+    cycle.sessionAcknowledged = success;
+    if (!success) [self cancelPreparationForCycle:cycle];
+    [self recordEvent:success ? @"sessionQuiesceAcknowledged" : @"sessionQuiesceFailed" cycle:cycle];
+    [self attemptQuiesceForCycle:cycle];
 }
 
 - (void)attemptQuiesceForCycle:(DSHLifecycleCycle *)cycle {
     NSAssert(NSThread.isMainThread, @"Lifecycle polling requires the main thread");
     if (![self isCurrentCycle:cycle] || self.state != DSHLifecycleCoordinatorStateQuiescing || cycle.expired) return;
-    if ([self.driver markQuiescentForGeneration:cycle.coreGeneration]) {
+    BOOL mayMark = !cycle.requiresSessionAcknowledgement || cycle.sessionAcknowledged;
+    if (mayMark && [self.driver markQuiescentForGeneration:cycle.coreGeneration]) {
         [self finishWaitForCycle:cycle];
         self.state = DSHLifecycleCoordinatorStateQuiesced;
         [self.driver suspendSockets];
@@ -169,15 +287,31 @@
         cycle.lastDiagnosticAt = now;
         [self recordEvent:@"quiesceWaiting" cycle:cycle];
     }
-    if (cycle.denied) return;
+    if (cycle.denied || cycle.pollScheduled) return;
+    cycle.pollScheduled = YES;
     __weak typeof(self) weakSelf = self;
-    self.scheduler(MAX(0.001, self.pollInterval), ^{ [weakSelf attemptQuiesceForCycle:cycle]; });
+    self.scheduler(MAX(0.001, self.pollInterval), ^{
+        cycle.pollScheduled = NO;
+        [weakSelf attemptQuiesceForCycle:cycle];
+    });
 }
 
 - (void)expireCycle:(DSHLifecycleCycle *)cycle {
     NSAssert(NSThread.isMainThread, @"Lifecycle expiration requires the main thread");
+    if (self.pendingBackgroundCycle == cycle && self.state == DSHLifecycleCoordinatorStateResuming) {
+        if (cycle.expired) return;
+        cycle.expired = YES;
+        [self cancelSessionResume];
+        [self finishWaitForCycle:cycle];
+        [self recordEvent:@"deferredBackgroundExpired" cycle:cycle];
+        [self endTaskForCycle:cycle];
+        if (cycle.taskIdentifierReturned)
+            [self finishSessionResume:NO timedOut:NO cycle:self.cycle generation:self.generation];
+        return;
+    }
     if (![self isCurrentCycle:cycle] || self.state != DSHLifecycleCoordinatorStateQuiescing || cycle.expired) return;
     cycle.expired = YES;
+    [self cancelPreparationForCycle:cycle];
     [self finishWaitForCycle:cycle];
     // Keep admission closed. Expiration cannot authorize force-closing SQLite,
     // dropping a native lock, killing a guest, or starting replacement work.
@@ -187,14 +321,72 @@
 
 - (void)handleAppForeground {
     NSAssert(NSThread.isMainThread, @"Lifecycle transitions require the main thread");
+    self.pendingBackground = NO; // The latest notification says foreground.
+    DSHLifecycleCycle *pendingCycle = self.pendingBackgroundCycle;
+    self.pendingBackgroundCycle = nil;
+    if (pendingCycle) [self endTaskForCycle:pendingCycle];
     if (self.state == DSHLifecycleCoordinatorStateRunning || self.state == DSHLifecycleCoordinatorStateResuming) return;
     DSHLifecycleCycle *cycle = self.cycle;
-    ++self.generation;
+    uint64_t resumeGeneration = ++self.generation;
     self.state = DSHLifecycleCoordinatorStateResuming;
+    self.resumeFinished = NO;
+    self.resumeCancellationRequested = NO;
     [self finishWaitForCycle:cycle];
+    [self cancelPreparationForCycle:cycle];
     [self.driver beginResume];
     [self endTaskForCycle:cycle];
     if (cycle.socketsSuspended) [self.driver resumeSockets];
+    if ([self.driver respondsToSelector:@selector(resumeSessionsWithCompletion:)]) {
+        NSTimeInterval timeout = self.sessionResumeTimeout;
+        if (!isfinite(timeout) || timeout <= 0) timeout = 15;
+        self.resumeDeadline = self.clock() + timeout;
+        __weak typeof(self) weakSelf = self;
+        self.scheduler(timeout, ^{
+            [weakSelf finishSessionResume:NO timedOut:YES cycle:cycle generation:resumeGeneration];
+        });
+        @try {
+            [self.driver resumeSessionsWithCompletion:^(BOOL success) {
+                dispatch_block_t finish = ^{
+                    typeof(self) self = weakSelf;
+                    if (!self) return;
+                    [self finishSessionResume:success timedOut:(self.clock() >= self.resumeDeadline)
+                                       cycle:cycle generation:resumeGeneration];
+                };
+                if (NSThread.isMainThread) finish();
+                else dispatch_async(dispatch_get_main_queue(), finish);
+            }];
+        } @catch (__unused NSException *exception) {
+            [self recordEvent:@"sessionResumeDriverException" cycle:cycle];
+            [self finishSessionResume:NO timedOut:NO cycle:cycle generation:resumeGeneration];
+        }
+        return;
+    }
+    [self finishSessionResume:YES timedOut:NO cycle:cycle generation:resumeGeneration];
+}
+
+- (void)finishSessionResume:(BOOL)success timedOut:(BOOL)timedOut
+                     cycle:(DSHLifecycleCycle *)cycle generation:(uint64_t)generation {
+    NSAssert(NSThread.isMainThread, @"Session resume completion requires the main thread");
+    if (self.cycle != cycle || self.generation != generation ||
+            self.state != DSHLifecycleCoordinatorStateResuming || self.resumeFinished) return;
+    self.resumeFinished = YES;
+    // HTTP readiness and opening the native UI gate do not establish that
+    // session writers recovered. Ignore obsolete callbacks before this write.
+    self.sessionRecoveryNeedsAttention = timedOut || !success;
+    if (timedOut || !success) {
+        [self cancelSessionResume];
+        [self recordEvent:timedOut ? @"sessionResumeTimedOut" : @"sessionResumeFailed" cycle:cycle];
+    }
+    if (self.pendingBackground) {
+        // Keep the gate closed across the transition. No transient health check
+        // or deferred native work should run while the latest scene is hidden.
+        [self recordEvent:@"sessionResumeReenteredBackground" cycle:cycle];
+        self.pendingBackground = NO;
+        self.state = DSHLifecycleCoordinatorStateRunning;
+        self.cycle = nil;
+        [self handleAppBackground];
+        return;
+    }
     [self.driver openAdmission];
     self.state = DSHLifecycleCoordinatorStateRunning;
     self.cycle = nil;

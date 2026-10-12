@@ -72,6 +72,10 @@ static bool lifecycle_pure_wait(struct cpu_state *cpu) {
 }
 
 void handle_interrupt(int interrupt) {
+    struct dsh_lifecycle_guest_context previous_guest_context
+        __attribute__((cleanup(dsh_lifecycle_restore_guest_context))) =
+        dsh_lifecycle_exchange_guest_context((struct dsh_lifecycle_guest_context) {
+            current->pid, current->tgid});
     struct cpu_state *cpu = &current->cpu;
     struct dsh_lifecycle_scope lifecycle_scope
         __attribute__((cleanup(dsh_lifecycle_scope_end))) = {0};

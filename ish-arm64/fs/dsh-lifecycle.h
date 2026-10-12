@@ -135,6 +135,12 @@ struct dsh_lifecycle_snapshot {
     uint64_t sqlite_busy_observations;
     uint64_t sqlite_error_observations;
     uint64_t native_close_failures;
+    /* A host-authenticated Harness thread group may finish its cooperative
+     * persistence drain while admission is closed. An active permit always
+     * prevents verified quiescence, even when all observed counters are zero. */
+    bool session_drain_active;
+    int session_drain_guest_tgid;
+    uint64_t session_drain_generation;
     int last_sqlite_result;
     unsigned operation_count;
     unsigned transaction_count;
@@ -212,6 +218,26 @@ DSH_LIFECYCLE_API void dsh_lifecycle_enable_admission_gate(void);
 DSH_LIFECYCLE_API void dsh_lifecycle_begin_resume(void);
 DSH_LIFECYCLE_API void dsh_lifecycle_checkpoint(int guest_pid);
 DSH_LIFECYCLE_API void dsh_lifecycle_thread_exit(void);
+/* Only the syscall dispatcher installs this thread-local identity, before any
+ * guest/kernel locks. Native callers without a matching guest PID do not gain
+ * a drain permit. Restore the previous context when leaving the dispatcher. */
+struct dsh_lifecycle_guest_context { int guest_pid; int guest_tgid; };
+DSH_LIFECYCLE_API struct dsh_lifecycle_guest_context dsh_lifecycle_exchange_guest_context(
+        struct dsh_lifecycle_guest_context context);
+static inline void dsh_lifecycle_restore_guest_context(struct dsh_lifecycle_guest_context *context) {
+    (void)dsh_lifecycle_exchange_guest_context(*context);
+}
+/* Host-only policy: the caller must authenticate and register this exact live
+ * Harness guest group before granting, and revoke on acknowledgement, expiry
+ * or cancellation. The guest persistence controller stops new business writes
+ * before acknowledging. No file name, guest-supplied group, or native thread
+ * identity grants admission. These APIs never release a SQL/native file lock.
+ * Grants are valid only in the current Quiescing/Resuming generation. Revoking
+ * seals that generation against regrant; stale callbacks cannot affect a new
+ * cycle. begin_resume invalidates the old grant; grant again with its new core
+ * generation for Node-only writer/lock reacquisition, then resume normally. */
+DSH_LIFECYCLE_API bool dsh_lifecycle_grant_session_drain(int guest_tgid, uint64_t generation);
+DSH_LIFECYCLE_API bool dsh_lifecycle_revoke_session_drain(int guest_tgid, uint64_t generation);
 /* Native main-thread callers must fail/defer instead of blocking UIKit. */
 DSH_LIFECYCLE_API uint64_t dsh_lifecycle_try_operation_begin(const char *name, int guest_pid);
 

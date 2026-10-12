@@ -22,6 +22,8 @@
 #import "DSHLifecycleDiagnostics.h"
 #import "DSHAppLifecycle.h"
 #import "DSHLifecycleCoordinator.h"
+#import "DSHGuestSessionLifecycle.h"
+#import "DSHSessionLifecycleInstaller.h"
 #import "AppDelegate.h"
 #import "ISHShellExecutor.h"
 #import <UIKit/UIKit.h>
@@ -125,6 +127,20 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
         // dsh-serve permanently unreachable after the first background cycle.
         [ISHShellExecutor setGuestBooted:YES];
 
+        // Keep the bundled root image and all user paths intact. Install only
+        // the hash-verified session backend/controller before Harness exists.
+        // Failure is explicit: never launch a partially patched backend.
+        NSError *sessionInstallError = nil;
+        if (![DSHSessionLifecycleInstaller installBundledPatchWithError:&sessionInstallError]) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:
+                @"[lifecycle] session patch install failed code=%ld operation=%@",
+                (long)sessionInstallError.code, sessionInstallError.userInfo[@"operation"] ?: @"unknown"]];
+            [DSHHarness.shared.log synchronizePersistentDiagnostics];
+            [self setPhase:DSHBootPhaseFailed message:@"The session safety update could not be installed. Your data has been preserved." progress:-1];
+            return;
+        }
+        [DSHHarness.shared.log append:@"[lifecycle] session patch verified"];
+
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{
             [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{
@@ -159,12 +175,16 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
     [DSHShareCapability installOn:bridge];
     [DSHShortcutsCapability installOn:bridge];
     [DSHActivityCapability installOn:bridge];
+    [DSHGuestSessionLifecycle.shared installOnBridge:bridge];
     if ([bridge start]) {
         NSMutableDictionary *env = [DSHHarness.shared.extraEnvironment mutableCopy];
         [env addEntriesFromDictionary:bridge.guestEnvironment];
+        env[@"DSH_SESSION_LIFECYCLE"] = @"1";
         DSHHarness.shared.extraEnvironment = env;
     } else {
-        [DSHHarness.shared.log append:@"[dsh-ios] host bridge could not start; iOS capabilities are unavailable"];
+        [DSHHarness.shared.log append:@"[lifecycle] session control bridge could not start"];
+        [self setPhase:DSHBootPhaseFailed message:@"The session safety service could not start. Please reopen DSH." progress:-1];
+        return;
     }
     [DSHStartupMetrics.shared mark:@"bridge_ready"];
     [DSHHarness.shared start];

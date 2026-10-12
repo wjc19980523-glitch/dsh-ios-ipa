@@ -17,6 +17,7 @@ NATIVE_NAMES = (
     "lifecycle-sigsuspend-test.sh", "lifecycle-tty-read-test.sh",
     "futex-idle-test.sh",
     "flock-diagnostics-test.sh",
+    "session-drain-admission-test.sh",
 )
 
 

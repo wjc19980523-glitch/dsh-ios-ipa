@@ -63,6 +63,8 @@ on:
       - "scripts/report-xctests.py"
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
+      - "tests/session-*"
+      - ".gitattributes"
       - "tests/lifecycle-test.c"
       - "tests/flock-diagnostics-test.sh"
       - "tests/flock-diagnostics-test.c"
@@ -240,6 +242,7 @@ jobs:
           set -euo pipefail
           ls -lh build/root.tar.gz
           shasum -a 256 build/root.tar.gz
+          python3 -c "import hashlib,json; from pathlib import Path; expected=json.loads(Path('app/SessionLifecycle.bundle/manifest.json').read_text())['rootfs_sha256']; actual=hashlib.sha256(Path('build/root.tar.gz').read_bytes()).hexdigest(); assert actual==expected, 'Session-only update must retain the Build 26 rootfs; refusing an unintended data migration'"
 
       - name: Generate Xcode project
         run: |
@@ -428,6 +431,7 @@ jobs:
           set -euo pipefail
           ls -lh build/root.tar.gz
           shasum -a 256 build/root.tar.gz
+          python3 -c "import hashlib,json; from pathlib import Path; expected=json.loads(Path('app/SessionLifecycle.bundle/manifest.json').read_text())['rootfs_sha256']; actual=hashlib.sha256(Path('build/root.tar.gz').read_bytes()).hexdigest(); assert actual==expected, 'Session-only update must retain the Build 26 rootfs; refusing an unintended data migration'"
 
       - name: Native runner execution and failure-propagation regressions
         run: python3 tests/native-runner-test.py
@@ -443,6 +447,21 @@ jobs:
 
       - name: Production flock identity, privacy and release regressions (ASan + UBSan)
         run: bash tests/flock-diagnostics-test.sh
+
+      - name: Generation-scoped Node drain admission (native flock + ASan + UBSan)
+        run: bash tests/session-drain-admission-test.sh
+
+      - name: Session backend algorithm and controller regressions
+        run: |
+          set -euo pipefail
+          python3 tests/session-lease-prepare.py --tarball build/root.tar.gz --extract-original build/session-lease-original.js
+          node tests/session-lease-test.mjs build/session-lease-original.js 2>&1 | tee cilogs-verify/session-algorithm.log
+          node tests/session-lease-controller-test.mjs 2>&1 | tee cilogs-verify/session-controller.log
+
+      - name: Real guest session leases and 100 suspend/resume cycles
+        run: |
+          set -euo pipefail
+          bash tests/session-lease-guest-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/session-native-guest.log
 
       - name: Real SQLite and fakefs fault injection regressions
         run: bash tests/fakefs-db-failure-test.sh
@@ -532,5 +551,8 @@ jobs:
             build/rootfs-test/*.log
             build/rootfs-test/*.jsonl
             build/rootfs-test/guest-diagnostics/
+            build/session-lease-guest.*/guest-diagnostics/
+            build/session-lease-guest.*/service-events.jsonl
+            build/session-lease-guest.*/current-phase
           if-no-files-found: warn
           retention-days: 30

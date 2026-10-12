@@ -9,6 +9,7 @@
 #import "DSHReadinessProbe.h"
 #import "DSHGuestLauncher.h"
 #import "DSHStartupMetrics.h"
+#import "DSHGuestSessionLifecycle.h"
 
 // Both exported to match DSHHarness.h: DSHTests reads the state name and
 // observes the notification through the app's own symbol, not a copy.
@@ -303,6 +304,8 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     self.launchToken = nil;
     self.awaitingAuthentication = NO;
     if (self.guestPid > 0) {
+        if ([self.extraEnvironment[@"DSH_SESSION_LIFECYCLE"] isEqual:@"1"])
+            [DSHGuestSessionLifecycle.shared cancelPendingTransition];
         [self.launcher killProcess:self.guestPid signal:SIGTERM];
         self.guestPid = 0;
     }
@@ -363,6 +366,9 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     [self.log append:[NSString stringWithFormat:@"[dsh-ios] launching %@ on port %u", self.serverExecutable, port]];
 
     __weak typeof(self) weakSelf = self;
+    BOOL sessionManaged = [env[@"DSH_SESSION_LIFECYCLE"] isEqual:@"1"];
+    __block int launchedPID = 0;
+    __block uint64_t sessionGuestIdentity = 0;
     int pid = [self.launcher launchExecutable:self.serverExecutable
                                     arguments:@[]
                                   environment:env
@@ -375,9 +381,13 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
         [self.log append:[self handleServerLine:line generation:generation]];
     } exit:^(int exitCode) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Only the real exit callback can report death. Stop/timeout can
+            // retire a launch before it has released its native descriptors.
+            if (sessionManaged) [DSHGuestSessionLifecycle.shared managedGuestDidExit:launchedPID identity:sessionGuestIdentity];
             [weakSelf processExitedWithCode:exitCode generation:generation];
         });
     }];
+    launchedPID = pid;
     if (pid < 0) {
         self.lastError = [NSString stringWithFormat:@"Could not start %@ (error %d).", self.serverExecutable, pid];
         [self.log append:[@"[dsh-ios] " stringByAppendingString:self.lastError]];
@@ -387,6 +397,8 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
         return;
     }
     self.guestPid = pid;
+    if (sessionManaged)
+        sessionGuestIdentity = [DSHGuestSessionLifecycle.shared managedGuestDidLaunch:pid];
     [self.log append:[NSString stringWithFormat:@"[dsh-ios] guest pid %d", pid]];
 
     // One supervisor for the whole boot. It only reports success once the
@@ -522,8 +534,11 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     [self invalidateHealthCheckDeliveringFailure:YES];
     [self.probe cancel];
     self.probe = nil;
-    if (self.guestPid > 0)
+    if (self.guestPid > 0) {
+        if ([self.extraEnvironment[@"DSH_SESSION_LIFECYCLE"] isEqual:@"1"])
+            [DSHGuestSessionLifecycle.shared cancelPendingTransition];
         [self.launcher killProcess:self.guestPid signal:SIGKILL];
+    }
     self.guestPid = 0;
     [self scheduleRelaunchAfterFailure];
 }

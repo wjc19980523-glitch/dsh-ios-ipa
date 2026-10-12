@@ -14,6 +14,8 @@
 #import "DSHRootUpgrader.h"
 #import "DSHStartupMetrics.h"
 #import "DSHStatusOverlayView.h"
+#import "DSHAppLifecycle.h"
+#import "DSHLifecycleCoordinator.h"
 #import "TerminalViewController.h"
 #import "AppDelegate.h"
 #import <WebKit/WebKit.h>
@@ -33,6 +35,7 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 @property (nonatomic, nullable) TerminalViewController *terminalVC;
 @property (nonatomic) uint16_t loadedPort;
 @property (nonatomic) BOOL pageLoaded;
+@property (nonatomic) uint64_t sessionWarningGeneration;
 @property (nonatomic) NSUInteger pageLoadGeneration;
 /// Authentication generation the in-flight (or last successful) navigation
 /// used. The harness bumps its own counter whenever the server mints a new
@@ -250,6 +253,24 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 
 - (void)logChanged:(NSNotification *)note {
     [self.overlay setLogText:[DSHHarness.shared.log tail:12]];
+    [self showSessionRecoveryIssueIfNeeded];
+}
+
+- (void)showSessionRecoveryIssueIfNeeded {
+    DSHLifecycleCoordinator *coordinator = DSHAppLifecycle.sharedCoordinator;
+    if (!coordinator.sessionRecoveryNeedsAttention || coordinator.state != DSHLifecycleCoordinatorStateRunning ||
+        self.sessionWarningGeneration == coordinator.generation || !self.isViewLoaded || !self.view.window ||
+        self.presentedViewController != nil) return;
+    self.sessionWarningGeneration = coordinator.generation;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Session recovery needs attention"
+        message:@"Session writing has not been confirmed safe to resume. Saved data is preserved; recent content may still be in memory. Keep DSH open and export its diagnostic report before restarting or repairing the environment."
+        preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"View diagnostics" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf presentLog];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Keep open" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)applyHarnessState {
@@ -359,12 +380,15 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     // reconnects on its own, but a dead server needs a restart + reload.
     // Only the harness decides whether to restart — this path just marks the
     // page stale and lets the harness's retry ladder do its job.
-    if (DSHHarness.shared.state == DSHHarnessStateReady && self.pageLoaded) {
-        __weak typeof(self) weakSelf = self;
+    __weak typeof(self) weakSelf = self;
+    [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{
+        typeof(self) self = weakSelf;
+        [self showSessionRecoveryIssueIfNeeded];
+        if (!self || DSHHarness.shared.state != DSHHarnessStateReady || !self.pageLoaded) return;
         [DSHHarness.shared verifyAliveWithCompletion:^(BOOL alive) {
             if (!alive) weakSelf.pageLoaded = NO;
         }];
-    }
+    }];
 }
 
 #pragma mark - Actions

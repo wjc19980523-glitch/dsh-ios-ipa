@@ -114,7 +114,8 @@ Dir[(app_dir + '*.h').to_s].sort.each { |f| app_group.new_file(File.basename(f))
 xcconfig_ref = app_group.new_file('AppDSH.xcconfig')
 app_group.new_file('Info.plist')
 app_group.new_file('DSH.entitlements')
-app_resource_refs = %w[DSHAssets.xcassets DSHLaunchScreen.storyboard PrivacyInfo.xcprivacy].map { |f| app_group.new_file(f) }
+app_resource_refs = %w[DSHAssets.xcassets DSHLaunchScreen.storyboard PrivacyInfo.xcprivacy SessionLifecycle.bundle].map { |f| app_group.new_file(f) }
+app_resource_refs.last.last_known_file_type = 'wrapper.plug-in'
 project.main_group.new_file('README.md')
 project.main_group.new_file('Makefile')
 scripts_group = project.main_group.new_group('scripts', 'scripts')

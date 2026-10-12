@@ -48,10 +48,14 @@ static uint64_t sqlite_busy_observations;
 static uint64_t sqlite_error_observations;
 static uint64_t native_close_failures;
 static int last_sqlite_result;
+static bool session_drain_active;
+static int session_drain_guest_tgid = -1;
+static uint64_t session_drain_generation;
 static _Thread_local uint64_t thread_id;
 static _Thread_local unsigned operation_depth;
 static _Thread_local int operation_guest_pid = -1;
 static _Thread_local uint64_t paused_tty_token;
+static _Thread_local struct dsh_lifecycle_guest_context guest_context = {-1, -1};
 
 static uint64_t monotonic_ns(void) {
     struct timespec ts;
@@ -105,9 +109,19 @@ static bool owns_existing_critical_section(int guest_pid) {
     return false;
 }
 
+/* The dispatcher establishes both immutable guest identifiers. Matching the
+ * PID too prevents a host caller reusing a pthread from inheriting its group. */
+static bool has_session_drain(int guest_pid) {
+    return session_drain_active && session_drain_generation == lifecycle_generation &&
+        (lifecycle_state == DSH_LIFECYCLE_QUIESCING || lifecycle_state == DSH_LIFECYCLE_RESUMING) &&
+        guest_pid > 0 && guest_context.guest_pid == guest_pid &&
+        guest_context.guest_tgid == session_drain_guest_tgid;
+}
+
 static void await_admission(int guest_pid) {
     while (admission_enabled && lifecycle_state != DSH_LIFECYCLE_RUNNING &&
-            operation_depth == 0 && !owns_existing_critical_section(guest_pid))
+            operation_depth == 0 && !owns_existing_critical_section(guest_pid) &&
+            !has_session_drain(guest_pid))
         pthread_cond_wait(&admission_changed, &diagnostic_lock);
 }
 
@@ -475,6 +489,9 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     snapshot->sqlite_busy_observations = sqlite_busy_observations;
     snapshot->sqlite_error_observations = sqlite_error_observations;
     snapshot->native_close_failures = native_close_failures;
+    snapshot->session_drain_active = session_drain_active;
+    snapshot->session_drain_guest_tgid = session_drain_guest_tgid;
+    snapshot->session_drain_generation = session_drain_generation;
     snapshot->last_sqlite_result = last_sqlite_result;
     snapshot->native_flock_event_total = flock_event_total;
     snapshot->native_flock_event_count = flock_event_total < DSH_LIFECYCLE_SNAPSHOT_ITEMS
@@ -531,6 +548,7 @@ uint64_t dsh_lifecycle_request_quiesce(void) {
     if (lifecycle_state == DSH_LIFECYCLE_RUNNING || lifecycle_state == DSH_LIFECYCLE_RESUMING) {
         lifecycle_state = DSH_LIFECYCLE_QUIESCING;
         lifecycle_generation++;
+        session_drain_active = false;
     }
     uint64_t generation = lifecycle_generation;
     pthread_mutex_unlock(&diagnostic_lock);
@@ -543,7 +561,7 @@ bool dsh_lifecycle_mark_quiescent(uint64_t generation) {
     pthread_mutex_lock(&diagnostic_lock);
     bool clean = lifecycle_state == DSH_LIFECYCLE_QUIESCING &&
         generation == lifecycle_generation && active_operations == 0 &&
-        tracking_overflows == 0 && native_close_failures == 0;
+        tracking_overflows == 0 && native_close_failures == 0 && !session_drain_active;
     for (unsigned i = 0; clean && i < CONNECTION_CAPACITY; i++)
         if (connections[i].used && (connections[i].value.recovery_required || !connections[i].value.cached_autocommit ||
                     connections[i].value.mode != DSH_LIFECYCLE_TXN_DEFERRED)) clean = false;
@@ -563,6 +581,7 @@ void dsh_lifecycle_resume(void) {
         lifecycle_generation++;
         last_resume_monotonic_ns = monotonic_ns();
     }
+    session_drain_active = false;
     pthread_cond_broadcast(&admission_changed);
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
@@ -579,6 +598,7 @@ void dsh_lifecycle_begin_resume(void) {
     if (lifecycle_state != DSH_LIFECYCLE_RUNNING && lifecycle_state != DSH_LIFECYCLE_RESUMING) {
         lifecycle_state = DSH_LIFECYCLE_RESUMING;
         lifecycle_generation++;
+        session_drain_active = false;
     }
     pthread_mutex_unlock(&diagnostic_lock);
 }
@@ -607,7 +627,47 @@ void dsh_lifecycle_thread_exit(void) {
     operation_depth = 0;
     operation_guest_pid = -1;
     paused_tty_token = 0;
+    guest_context = (struct dsh_lifecycle_guest_context) {-1, -1};
     pthread_mutex_unlock(&diagnostic_lock);
+}
+
+struct dsh_lifecycle_guest_context dsh_lifecycle_exchange_guest_context(
+        struct dsh_lifecycle_guest_context context) {
+    struct dsh_lifecycle_guest_context previous = guest_context;
+    /* Treat partially populated/native identities conservatively. */
+    guest_context = context.guest_pid > 0 && context.guest_tgid > 0 ? context :
+        (struct dsh_lifecycle_guest_context) {-1, -1};
+    return previous;
+}
+
+bool dsh_lifecycle_grant_session_drain(int guest_tgid, uint64_t generation) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    bool accepted = false;
+    if (guest_tgid > 0 && generation != 0 && generation == lifecycle_generation &&
+            (lifecycle_state == DSH_LIFECYCLE_QUIESCING || lifecycle_state == DSH_LIFECYCLE_RESUMING)) {
+        if (session_drain_generation != generation) {
+            session_drain_guest_tgid = guest_tgid;
+            session_drain_generation = generation;
+            session_drain_active = true;
+            accepted = true;
+        } else accepted = session_drain_active && session_drain_guest_tgid == guest_tgid;
+        if (accepted) pthread_cond_broadcast(&admission_changed);
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+    return accepted;
+}
+
+bool dsh_lifecycle_revoke_session_drain(int guest_tgid, uint64_t generation) {
+    int saved_errno = errno;
+    pthread_mutex_lock(&diagnostic_lock);
+    bool matched = guest_tgid > 0 && generation == lifecycle_generation &&
+        generation == session_drain_generation && guest_tgid == session_drain_guest_tgid;
+    if (matched) session_drain_active = false;
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+    return matched;
 }
 
 void dsh_lifecycle_sqlite_recovery_required(uint64_t connection_id, int result) {

@@ -1,6 +1,7 @@
 #import "DSHLifecycleDiagnostics.h"
 #import "DSHHarness.h"
 #import "ISHShellExecutor.h"
+#import "DSHGuestSessionLifecycle.h"
 #include "../ish-arm64/fs/dsh-lifecycle.h"
 #include <unistd.h>
 
@@ -57,6 +58,10 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         @"suspend_count": @(ISHShellExecutor.lifecycleSuspendCount), @"resume_count": @(ISHShellExecutor.lifecycleResumeCount),
         @"filesystem_state": @(s.state), @"quiescing": @(s.state == DSH_LIFECYCLE_QUIESCING),
         @"quiesce_generation": @(s.generation), @"sampled_monotonic_ns": @(s.sampled_monotonic_ns),
+        @"session_drain_active": @(s.session_drain_active),
+        @"session_drain_guest_tgid": @(s.session_drain_guest_tgid),
+        @"session_drain_generation": @(s.session_drain_generation),
+        @"guest_session_lifecycle": DSHGuestSessionLifecycle.shared.diagnosticSnapshot,
         @"active_operations": @(s.active_operations), @"paused_tty_reads": @(s.paused_fileless_operations),
         @"active_fakefs_operations": @(s.active_fakefs_operations),
         @"active_fakefs_operations_complete": @(s.tracking_overflows == 0),

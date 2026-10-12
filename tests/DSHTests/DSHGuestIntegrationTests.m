@@ -128,10 +128,57 @@
     if (![self waitForReady]) return;
     DSHHarness *h = DSHHarness.shared;
     DSHLifecycleCoordinator *coordinator = DSHAppLifecycle.sharedCoordinator;
+    NSDictionary *originalEnvironment = h.extraEnvironment;
+    // A synthetic session belongs to the real supervised Node, not a separate
+    // guest that could not receive its drain grant. This preload is test-only;
+    // the production launcher never sets DSH_PROBE_LISTEN.
+    NSString *probePath = [@"/tmp/dsh-session-probe-" stringByAppendingFormat:@"%@.mjs", NSUUID.UUID.UUIDString];
+    NSString *probe = @"import {Context} from '/usr/local/lib/node_modules/@deepseek-ai/cordis/lib/index.js';\n"
+        @"import Sessions from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session/lib/index.js';\n"
+        @"import Persistence from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js';\n"
+        @"import {mkdtemp} from 'node:fs/promises';\n"
+        @"const root=await mkdtemp('/tmp/dsh-host-session-probe.');\n"
+        @"const ctx=new Context(); const sessions=new Sessions(ctx);\n"
+        @"const backend=new Persistence(ctx,{root:root+'/sessions',compression:'none'});\n"
+        @"const session=sessions.prepare('host-lifecycle-probe',{meta:{cwd:root}});\n"
+        @"const handle=await backend.create(session.header);\n"
+        @"await handle.append([session.append('session/title',{title:'lifecycle test'})]);\n"
+        @"await handle.flush(); globalThis.dshLifecycleTestSession={ctx,backend,session,handle};\n";
+    NSString *encoded = [[probe dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+    XCTestExpectation *installed = [self expectationWithDescription:@"session probe installed"];
+    __block BOOL installationSucceeded = NO;
+    [ISHShellExecutor executeCommand:[NSString stringWithFormat:@"printf '%%s' '%@' | base64 -d > '%@'", encoded, probePath]
+        lineCallback:nil completion:^(ISHShellExecutionResult *result) {
+            XCTAssertEqual(result.error, ISHShellExecutorErrorNone);
+            XCTAssertEqual(result.exitCode, 0);
+            installationSucceeded = result.error == ISHShellExecutorErrorNone && result.exitCode == 0;
+            [installed fulfill];
+        }];
+    [self waitForExpectations:@[installed] timeout:30];
+    if (!installationSucceeded) return;
+    NSMutableDictionary *probeEnvironment = [originalEnvironment mutableCopy];
+    probeEnvironment[@"DSH_PROBE_LISTEN"] = probePath;
+    h.extraEnvironment = probeEnvironment;
+    [h restart];
+    if (![self waitForReady]) {
+        h.extraEnvironment = originalEnvironment;
+        [h restart];
+        [self waitForReady];
+        return;
+    }
     int pid = h.guestPid;
     NSUInteger restarts = h.restartCount;
     NSUInteger authentication = h.authenticationGeneration;
     @try {
+        struct dsh_lifecycle_snapshot before;
+        dsh_lifecycle_get_snapshot(&before);
+        BOOL heldSessionLease = NO;
+        for (unsigned i = 0; i < before.native_flock_count; i++) {
+            struct dsh_lifecycle_flock_snapshot lock = before.native_flocks[i];
+            if (lock.guest_tgid == pid && lock.identity.file_kind == DSH_FLOCK_FILE_SESSION_LOCK)
+                heldSessionLease = YES;
+        }
+        XCTAssertTrue(heldSessionLease, @"This test must begin with the real native session lease held");
         for (NSUInteger cycle = 0; cycle < 3; cycle++) {
             [coordinator handleAppBackground];
             [coordinator handleAppBackground];
@@ -148,10 +195,24 @@
             XCTAssertEqual(snapshot.active_read_transactions + snapshot.active_write_transactions +
                            snapshot.active_deferred_transactions, 0u);
             XCTAssertEqual(snapshot.active_native_flocks, 0u);
+            XCTAssertFalse(snapshot.session_drain_active);
             XCTAssertEqual(snapshot.recovery_blocked_connections, 0u);
 
             [coordinator handleAppForeground];
             [coordinator handleAppForeground];
+            XCTestExpectation *resumed = [self expectationForPredicate:
+                [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+                    return coordinator.state == DSHLifecycleCoordinatorStateRunning;
+                }] evaluatedWithObject:coordinator handler:nil];
+            [self waitForExpectations:@[resumed] timeout:20];
+            dsh_lifecycle_get_snapshot(&snapshot);
+            BOOL reacquired = NO;
+            for (unsigned i = 0; i < snapshot.native_flock_count; i++) {
+                struct dsh_lifecycle_flock_snapshot lock = snapshot.native_flocks[i];
+                if (lock.guest_tgid == pid && lock.identity.file_kind == DSH_FLOCK_FILE_SESSION_LOCK)
+                    reacquired = YES;
+            }
+            XCTAssertTrue(reacquired, @"Same Node must reacquire its session lease before admission opens");
             XCTestExpectation *healthy = [self expectationWithDescription:@"same guest answers after restore"];
             [h verifyAliveWithCompletion:^(BOOL alive) {
                 XCTAssertTrue(alive);
@@ -166,6 +227,14 @@
         // A failed drain assertion must not leave later integration tests
         // parked behind a closed gate.
         [coordinator handleAppForeground];
+        XCTestExpectation *running = [self expectationForPredicate:
+            [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+                return coordinator.state == DSHLifecycleCoordinatorStateRunning;
+            }] evaluatedWithObject:coordinator handler:nil];
+        [self waitForExpectations:@[running] timeout:20];
+        h.extraEnvironment = originalEnvironment;
+        [h restart];
+        [self waitForReady];
     }
 }
 

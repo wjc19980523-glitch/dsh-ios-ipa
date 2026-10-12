@@ -8,3 +8,5 @@ ish-arm64/build/
 ish-arm64/e2e_out/
 ish-arm64/deps/build/
 .DS_Store
+__pycache__/
+*.pyc

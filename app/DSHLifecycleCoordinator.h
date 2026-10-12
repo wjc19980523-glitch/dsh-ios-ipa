@@ -29,6 +29,19 @@ typedef NS_ENUM(NSUInteger, DSHLifecycleCoordinatorState) {
 - (NSDictionary<NSString *, id> *)diagnosticSnapshot;
 /// details includes wait_ms, cycle, core_generation, and the cached snapshot.
 - (void)recordLifecycleEvent:(NSString *)event details:(NSDictionary<NSString *, id> *)details;
+@optional
+/// The managed guest stops new persistence writes and drains/ closes stable
+/// writer handles. Grant its exact group synchronously before returning, then
+/// complete only after an authenticated acknowledgement and permit revocation.
+/// Completion may arrive on any queue; the coordinator checks its cycle.
+- (void)prepareSessionsForGeneration:(uint64_t)generation completion:(void (^)(BOOL success))completion;
+/// Revoke the current transition permit and invalidate late guest responses.
+/// Never force-close a guest fd or remove/replace its lock file.
+- (void)cancelSessionTransition;
+/// Runs while Resuming admission remains closed, after socket restoration.
+/// Reacquire stable writer locks, revoke the new group permit, then complete.
+/// Failure leaves guest persistence fail-closed until its own recovery succeeds.
+- (void)resumeSessionsWithCompletion:(void (^)(BOOL success))completion;
 @end
 
 /// UIKit's background task is a finite opportunity to finish already admitted
@@ -56,8 +69,13 @@ typedef NSTimeInterval (^DSHLifecycleClock)(void);
 @property (nonatomic, readonly) uint64_t generation;
 @property (nonatomic, readonly) uint64_t coreGeneration;
 @property (nonatomic, readonly) NSTimeInterval lastQuiesceWaitDuration;
+/// A failed or timed-out session restore still needs attention even when the
+/// UI and HTTP service recover. Only a current successful restore clears it.
+@property (nonatomic, readonly) BOOL sessionRecoveryNeedsAttention;
 /// Default 0.05 seconds. A poll only reads cached state and attempts the atomic mark.
 @property (nonatomic) NSTimeInterval pollInterval;
+/// Default 15 seconds; bounds asynchronous foreground writer/lock restoration.
+@property (nonatomic) NSTimeInterval sessionResumeTimeout;
 
 /// Duplicate notifications in a background cycle have no effect.
 - (void)handleAppBackground;

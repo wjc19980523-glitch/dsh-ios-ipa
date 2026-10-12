@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "rootfs_sha256": "d3e055a6f98cc5d508a502aed88c3fca3c75f7b3217ee257d7e4773337d903a0",
+  "patches": [
+    {
+      "target": "/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+      "original_sha256": "0845707017acc2b4a8a75eab2244fa3fd88587b8094ab32014321dce7ca1e31b",
+      "patched_sha256": "a0318b82600e5392e25f6caac666a81b66f0ba7b3681e6de3222e028db24200f",
+      "replacements": [
+        {
+          "find": "import z from \"@deepseek-ai/schemastery\";",
+          "replace": "import { SessionLifecycleAdmission, registerSessionBackend, unregisterSessionBackend } from \"/usr/local/share/dsh/session-lifecycle.mjs\";\nimport z from \"@deepseek-ai/schemastery\";",
+          "count": 1
+        },
+        {
+          "find": "\tdraining;\n\tconstructor(storage",
+          "replace": "\tdraining;\n\tdshCheckpoint;\n\tdshPausedEvents = [];\n\tdshClosingAdmitted = false;\n\tconstructor(storage",
+          "count": 1
+        },
+        {
+          "find": "\t* unwinds first; a drain or lock-release failure still frees the in-process\n\t* claim, then rejects — both failures together reject as one\n\t* `AggregateError`.",
+          "replace": "\t* unwinds first. A failed drain or lock release retains the in-process\n\t* ownership claim and buffered events for a later close retry; lifecycle\n\t* suspension never treats that failure as a released writer.",
+          "count": 1
+        },
+        {
+          "find": "\tclose() {\n\t\treturn this.closing ??= (async () => {\n\t\t\tlet drainFailure;\n\t\t\tfor (;;) {\n\t\t\t\ttry {\n\t\t\t\t\tawait this.drainLive();\n\t\t\t\t} catch (error) {\n\t\t\t\t\tdrainFailure = error;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t\tawait this.chain;\n\t\t\t\tif (this.buffered.length === 0) break;\n\t\t\t}\n\t\t\tawait this.chain;\n\t\t\tconst failures = [];\n\t\t\tif (drainFailure !== void 0) failures.push(drainFailure instanceof Error ? drainFailure : new Error(errorChain(drainFailure)));\n\t\t\ttry {\n\t\t\t\tawait this.lease?.release();\n\t\t\t} catch (releaseFailure) {\n\t\t\t\t/* v8 ignore next -- lock releases reject with Error */\n\t\t\t\tfailures.push(releaseFailure instanceof Error ? releaseFailure : new Error(errorChain(releaseFailure)));\n\t\t\t}\n\t\t\tthis.storage.releaseHandle(this, this.state.materialized);\n\t\t\tif (failures.length > 1) throw new AggregateError(failures, `session \"${this.id}\": close failed to drain and to release its write lock`);\n\t\t\tif (failures[0] !== void 0) throw failures[0];\n\t\t})();\n\t}",
+          "replace": "\tclose() {\n\t\tif (this.closing !== void 0) return this.closing;\n\t\tconst closing = this.storage.dshLifecycleAdmission.run(async () => {\n\t\t\tthis.dshClosingAdmitted = true;\n\t\t\ttry {\n\t\t\tthis.buffered = this.buffered.concat(this.dshPausedEvents);\n\t\t\tthis.dshPausedEvents = [];\n\t\t\tfor (;;) {\n\t\t\t\tawait this.drainLive();\n\t\t\t\tawait this.chain;\n\t\t\t\tif (this.buffered.length === 0) break;\n\t\t\t}\n\t\t\t// Failed drains retain both the batch and its ownership claim.\n\t\t\tawait this.lease?.release();\n\t\t\tthis.lease = void 0;\n\t\t\tthis.storage.releaseHandle(this, this.state.materialized);\n\t\t\t} finally { this.dshClosingAdmitted = false; }\n\t\t});\n\t\tthis.closing = closing.catch(error => {\n\t\t\tthis.closing = void 0;\n\t\t\tthis.storage.dshLifecycleAdmission.fail();\n\t\t\tthrow error;\n\t\t});\n\t\treturn this.closing;\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\t\tthis.buffered.push(structuredClone(event));\n\t\tif (this.batchTimer",
+          "replace": "\t\t// A normally closing caller has already stopped its producer. Its\n\t\t// admitted final batch must still drain; a paused close has no ticket.\n\t\tif (this.storage.dshLifecycleAdmission.state !== \"running\" && !this.dshClosingAdmitted) {\n\t\t\tthis.dshPausedEvents.push(structuredClone(event));\n\t\t\treturn;\n\t\t}\n\t\tthis.buffered.push(structuredClone(event));\n\t\tif (this.storage.dshLifecycleAdmission.state !== \"running\") return;\n\t\tif (this.batchTimer",
+          "count": 1
+        },
+        {
+          "find": "\tdrainLive() {\n\t\treturn this.draining ??= this.drainBuffered().finally(() => {\n\t\t\tthis.draining = void 0;\n\t\t});\n\t}",
+          "replace": "\tdrainLive() {\n\t\treturn this.storage.dshLifecycleAdmission.run(() =>\n\t\t\tthis.draining ??= this.drainBuffered().finally(() => {\n\t\t\t\tthis.draining = void 0;\n\t\t\t}));\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\tasync ensureLease() {\n\t\tthis.lease ??= await this.storage.acquireWriteLease(this.header);\n\t}",
+          "replace": "\tasync ensureLease() {\n\t\treturn this.storage.dshLifecycleAdmission.run(async () => {\n\t\t\tif (this.lease?.dshUncertain) {\n\t\t\t\tthis.storage.dshLifecycleAdmission.fail();\n\t\t\t\tthrow Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t\t}\n\t\t\tthis.lease ??= await this.storage.acquireWriteLease(this.header);\n\t\t});\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\tasync run(operation, op) {\n\t\tthis.assertOpen(operation);\n\t\treturn this.enqueueChain(async () => {\n\t\t\tthis.assertOpen(operation);\n\t\t\treturn op();\n\t\t});\n\t}",
+          "replace": "\tasync run(operation, op) {\n\t\tthis.assertOpen(operation);\n\t\treturn this.storage.dshLifecycleAdmission.run(() => this.enqueueChain(async () => {\n\t\t\tthis.assertOpen(operation);\n\t\t\treturn op();\n\t\t}));\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\t\tif (this.released) return;\n\t\tthis.released = true;\n\t\t/* v8 ignore start -- native Windows coverage exercises this platform branch; Linux covers the POSIX peer */",
+          "replace": "\t\tif (this.released) return;\n\t\tif (this.dshUncertain) throw Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t// close may consume the descriptor even when it rejects. Never retry\n\t\t// an uncertain descriptor, or assume that it still owns the flock.\n\t\tthis.dshUncertain = true;\n\t\t/* v8 ignore start -- native Windows coverage exercises this platform branch; Linux covers the POSIX peer */",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tawait releaseLockHandleWin32(this.held.handle);\n\t\t\treturn;",
+          "replace": "\t\t\tawait releaseLockHandleWin32(this.held.handle);\n\t\t\tthis.released = true;\n\t\t\tthis.dshUncertain = false;\n\t\t\treturn;",
+          "count": 1
+        },
+        {
+          "find": "\t\tawait this.held.handle.close();\n\t}\n};",
+          "replace": "\t\tawait this.held.handle.close();\n\t\tthis.released = true;\n\t\tthis.dshUncertain = false;\n\t}\n};",
+          "count": 1
+        },
+        {
+          "find": "\ttracker = new JsonlBackendTracker(this.name);",
+          "replace": "\ttracker = new JsonlBackendTracker(this.name);\n\tdshLifecycleAdmission = new SessionLifecycleAdmission();",
+          "count": 1
+        },
+        {
+          "find": "\t\tthis.tracker.install(ctx);\n\t}",
+          "replace": "\t\tthis.tracker.install(ctx);\n\t\tthis.tracker.dshLifecycleBackend = this;\n\t\tregisterSessionBackend(this);\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tif (errors.length > 0) throw new AggregateError(errors, `${this.name} dispose failed`);",
+          "replace": "\t\t\tif (errors.length > 0) throw new AggregateError(errors, `${this.name} dispose failed`);\n\t\t\tunregisterSessionBackend(this.dshLifecycleBackend);",
+          "count": 1
+        },
+        {
+          "find": "\tasync create(header, options) {\n\t\toptions?.signal",
+          "replace": "\tasync create(header, options) {\n\t\treturn this.dshLifecycleAdmission.run(() => this.dshCreateAdmitted(header, options));\n\t}\n\tasync dshCreateAdmitted(header, options) {\n\t\toptions?.signal",
+          "count": 1
+        },
+        {
+          "find": "\tasync open(id, access, options) {\n\t\toptions?.signal",
+          "replace": "\tasync open(id, access, options) {\n\t\tif (access === \"read\") return this.dshOpenAdmitted(id, access, options);\n\t\treturn this.dshLifecycleAdmission.run(() => this.dshOpenAdmitted(id, access, options));\n\t}\n\tasync dshOpenAdmitted(id, access, options) {\n\t\toptions?.signal",
+          "count": 1
+        },
+        {
+          "find": "\tflush() {\n\t\treturn this.tracker.flushAll();\n\t}",
+          "replace": "\tflush() {\n\t\treturn this.dshLifecycleAdmission.run(() => this.tracker.flushAll());\n\t}\n\n\t// These hooks retain the exact logical handle owned by Agent teardown.\n\tdshLifecycleBeginQuiesce() {\n\t\tthis.dshLifecycleAdmission.close();\n\t\tfor (const handle of this.tracker.openHandles) {\n\t\t\tif (handle.batchTimer !== void 0) clearTimeout(handle.batchTimer);\n\t\t\thandle.batchTimer = void 0;\n\t\t}\n\t}\n\tdshLifecycleSnapshot() {\n\t\tlet writer_count = 0, released_count = 0, pending_events = 0;\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer === null) continue;\n\t\t\twriter_count += 1;\n\t\t\tif (writer.dshCheckpoint !== void 0 && writer.lease === void 0) released_count += 1;\n\t\t\tpending_events += writer.buffered.length + writer.dshPausedEvents.length;\n\t\t}\n\t\treturn { writer_count, released_count, pending_events };\n\t}\n\tdshLifecycleFail() { this.dshLifecycleAdmission.fail(); }\n\tdshLifecycleFingerprint(stored) {\n\t\treturn createHash(\"sha256\").update(JSON.stringify({\n\t\t\theader: stored.meta, events: stored.events,\n\t\t\tinheritedEventCount: stored.inheritedEventCount,\n\t\t\ttornTruncateTo: stored.tornTruncateTo,\n\t\t\trecoveredTail: stored.recoveredTail\n\t\t})).digest(\"hex\");\n\t}\n\tasync dshLifecycleSuspend() {\n\t\tthis.dshLifecycleBeginQuiesce();\n\t\ttry {\n\t\tawait this.dshLifecycleAdmission.drain(async () => {\n\t\t\tfor (const writer of [...this.tracker.writers.values()]) {\n\t\t\t\tif (writer === null) continue;\n\t\t\t\tif (writer.dshCheckpoint !== void 0) {\n\t\t\t\t\t// A failed/abandoned resume may already own a fresh lease.\n\t\t\t\t\t// Never append its retained events before checkpoint validation.\n\t\t\t\t\tawait writer.lease?.release();\n\t\t\t\t\twriter.lease = void 0;\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error(\"session storage has no verified checkpoint after failure\"), { code: \"DSH_SESSION_STORAGE_UNCERTAIN\" });\n\t\t\t\tawait writer.drainLive();\n\t\t\t\tawait writer.chain;\n\t\t\t\tif (!writer.state.materialized) {\n\t\t\t\t\tawait writer.ensureLease();\n\t\t\t\t\tawait this.persistHeader(writer.header, writer.state.inheritedEventCount);\n\t\t\t\t\twriter.state.materialized = true;\n\t\t\t\t}\n\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\tconst stored = await this.requireStoredLog(writer.id);\n\t\t\t\tif (stored.events.length !== writer.state.cursor) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\tconst checkpoint = this.dshLifecycleFingerprint(stored);\n\t\t\t\twriter.dshCheckpoint = checkpoint;\n\t\t\t\tawait writer.lease?.release();\n\t\t\t\twriter.lease = void 0;\n\t\t\t}\n\t\t});\n\t\tthis.dshLifecycleAdmission.markQuiesced();\n\t\treturn this.dshLifecycleSnapshot();\n\t\t} catch (error) { this.dshLifecycleFail(); throw error; }\n\t}\n\tasync dshLifecycleResume() {\n\t\tif (this.dshLifecycleAdmission.state === \"running\") return;\n\t\tthis.dshLifecycleAdmission.beginResume();\n\t\ttry {\n\t\tawait this.dshLifecycleAdmission.drain(async () => {\n\t\t\tfor (const writer of [...this.tracker.writers.values()]) {\n\t\t\t\tif (writer === null) continue;\n\t\t\t\tif (writer.lease?.dshUncertain) throw Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t\t\tif (writer.dshCheckpoint === void 0) {\n\t\t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error(\"session storage has no verified checkpoint after failure\"), { code: \"DSH_SESSION_STORAGE_UNCERTAIN\" });\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tawait writer.ensureLease();\n\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\tconst stored = await this.requireStoredLog(writer.id);\n\t\t\t\tif (this.dshLifecycleFingerprint(stored) !== writer.dshCheckpoint) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\t// Retained events are acknowledged as running only after their\n\t\t\t\t// ordered durability barrier succeeds under the reacquired lease.\n\t\t\t\t// New arrivals remain isolated, so this is a bounded snapshot.\n\t\t\t\twriter.buffered = writer.buffered.concat(writer.dshPausedEvents);\n\t\t\t\twriter.dshPausedEvents = [];\n\t\t\t\tawait writer.drainLive();\n\t\t\t\tawait writer.chain;\n\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\twriter.dshCheckpoint = this.dshLifecycleFingerprint(await this.requireStoredLog(writer.id));\n\t\t\t}\n\t\t});\n\t\t} catch (error) { this.dshLifecycleFail(); throw error; }\n\t}\n\tdshLifecycleOpen() {\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer?.lease?.dshUncertain) throw Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t}\n\t\tfor (const writer of this.tracker.writers.values()) if (writer !== null) {\n\t\t\twriter.dshCheckpoint = void 0;\n\t\t\twriter.buffered = writer.buffered.concat(writer.dshPausedEvents);\n\t\t\twriter.dshPausedEvents = [];\n\t\t}\n\t\tthis.dshLifecycleAdmission.open();\n\t\t// Retained events use their original handle/chain and original seq numbers.\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer !== null && writer.buffered.length > 0) writer.drainLive().catch(() => {\n\t\t\t\tthis.ctx.logger.warn(\"session-persistence: retained lifecycle batch drain failed; events preserved\");\n\t\t\t});\n\t\t}\n\t}\n",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "source": "session-lifecycle.mjs",
+      "target": "/usr/local/share/dsh/session-lifecycle.mjs",
+      "sha256": "70f27344fc561c4bfd2d4dfb79858db2f1f88ee2a52bbfa73e0c666012467205"
+    },
+    {
+      "source": "session-lifecycle-core.mjs",
+      "target": "/usr/local/share/dsh/session-lifecycle-core.mjs",
+      "sha256": "2bd6ca8154328b01d7e4c437413a85a3066a6dd6234b9a920e7287a330236ea6"
+    }
+  ]
+}

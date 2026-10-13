@@ -65,6 +65,9 @@ on:
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
       - "tests/session-*"
+      - "tests/web-fetch-*"
+      - "tests/check-web-fetch-guest*.py"
+      - "tests/fixtures/web-transport/**"
       - "tests/task-lifecycle-context-test.*"
       - ".gitattributes"
       - "tests/lifecycle-test.c"
@@ -465,6 +468,7 @@ jobs:
           python3 tests/session-lease-prepare.py --tarball build/root.tar.gz --extract-original build/session-lease-original.js
           node tests/session-lease-test.mjs build/session-lease-original.js 2>&1 | tee cilogs-verify/session-algorithm.log
           node tests/session-lease-controller-test.mjs 2>&1 | tee cilogs-verify/session-controller.log
+          node --jitless tests/session-lease-transport-test.mjs 2>&1 | tee cilogs-verify/session-control-tcp.log
 
       - name: Real guest session receipt and exit-evidence checker regressions
         run: |
@@ -475,6 +479,21 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/session-lease-guest-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/session-native-guest.log
+
+      - name: Web transport strict guest receipt checker regressions
+        run: |
+          set -euo pipefail
+          python3 tests/check-web-fetch-guest-test.py 2>&1 | tee cilogs-verify/web-native-checker.log
+
+      - name: Jitless web transport TCP TLS proxy and public-network policy regressions
+        run: |
+          set -euo pipefail
+          bash tests/web-fetch-host-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/web-host.log
+
+      - name: Real guest public web transport and parser compatibility regressions
+        run: |
+          set -euo pipefail
+          bash tests/web-fetch-guest-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/web-native-guest.log
 
       - name: Real SQLite and fakefs fault injection regressions
         run: bash tests/fakefs-db-failure-test.sh
@@ -568,5 +587,10 @@ jobs:
             build/session-lease-guest.*/session-native.log
             build/session-lease-guest.*/service-events.jsonl
             build/session-lease-guest.*/current-phase
+            build/web-fetch-guest.*/guest-diagnostics/
+            build/web-fetch-guest.*/web-native.log
+            build/web-fetch-guest.*/web-install.log
+            build/web-fetch-guest.*/service-events.jsonl
+            build/web-fetch-guest.*/current-phase
           if-no-files-found: warn
           retention-days: 30

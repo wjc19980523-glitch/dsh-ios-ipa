@@ -141,6 +141,17 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
         }
         [DSHHarness.shared.log append:@"[lifecycle] session patch verified"];
 
+        NSError *webInstallError = nil;
+        if (![DSHSessionLifecycleInstaller installBundledWebFetchPatchWithError:&webInstallError]) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:
+                @"[network] web transport patch install failed code=%ld operation=%@",
+                (long)webInstallError.code, webInstallError.userInfo[@"operation"] ?: @"unknown"]];
+            [DSHHarness.shared.log synchronizePersistentDiagnostics];
+            [self setPhase:DSHBootPhaseFailed message:@"The web access update could not be installed. Your data has been preserved." progress:-1];
+            return;
+        }
+        [DSHHarness.shared.log append:@"[network] web transport patch verified"];
+
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{
             [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{

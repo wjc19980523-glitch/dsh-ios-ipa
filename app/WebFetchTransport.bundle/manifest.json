@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "name": "jitless-public-web-fetch-transport-v1",
+  "rootfs_sha256": "d3e055a6f98cc5d508a502aed88c3fca3c75f7b3217ee257d7e4773337d903a0",
+  "patches": [
+    {
+      "target": "/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js",
+      "original_sha256": "489fef91b0c11c063029ea7aed27b312817570b9c3177aeaa44983b9a25aedcd",
+      "patched_sha256": "0f50e7e8fc6f388cf0852dc7676a64444149ed7c536600e1f509448aa1e4f95d",
+      "replacements": [
+        {
+          "find": "import z from \"@deepseek-ai/schemastery\";",
+          "replace": "import { requestPinned as dshRequestPinned, requestVia as dshRequestVia } from \"/usr/local/share/dsh/web-fetch-transport.mjs\";\nimport z from \"@deepseek-ai/schemastery\";",
+          "count": 1
+        },
+        {
+          "find": "async function requestPinned(url, addresses, headers, signal) {\n\tconst { Agent, fetch } = await import(\"undici\");\n\tconst dispatcher = new Agent({\n\t\tautoSelectFamily: true,\n\t\tconnect: { lookup: createPinnedLookup(addresses) }\n\t});\n\ttry {\n\t\treturn {\n\t\t\tresponse: await fetch(url, {\n\t\t\t\tmethod: \"GET\",\n\t\t\t\tredirect: \"manual\",\n\t\t\t\theaders,\n\t\t\t\tsignal,\n\t\t\t\tdispatcher\n\t\t\t}),\n\t\t\tclose: async () => {\n\t\t\t\tawait dispatcher.close();\n\t\t\t}\n\t\t};\n\t} catch (error) {\n\t\tawait dispatcher.close();\n\t\tthrow error;\n\t}\n}",
+          "replace": "async function requestPinned(url, addresses, headers, signal) {\n\treturn dshRequestPinned(url, addresses, headers, signal);\n}",
+          "count": 1
+        },
+        {
+          "find": "async function requestVia(dispatcher, url, headers, signal) {\n\tconst { fetch } = await import(\"undici\");\n\treturn {\n\t\tresponse: await fetch(url, {\n\t\t\tmethod: \"GET\",\n\t\t\tredirect: \"manual\",\n\t\t\theaders,\n\t\t\tsignal,\n\t\t\tdispatcher\n\t\t}),\n\t\tclose: () => Promise.resolve()\n\t};\n}",
+          "replace": "async function requestVia(proxy, url, headers, signal) {\n\treturn dshRequestVia(proxy, url, headers, signal);\n}",
+          "count": 1
+        },
+        {
+          "find": "* Fetch through the dispatcher the proxy policy already installed, letting the proxy resolve the\n* origin.\n*\n* No address set is pinned because none exists to pin: the proxy performs the lookup, and a\n* connection pinned to a locally resolved address would reach the origin directly and defeat the\n* proxy. The dispatcher is the process-wide one, so hops share its connection pool and no caller\n* closes it.\n*\n* @param dispatcher - the route's dispatcher, from `proxyRouteFor`.",
+          "replace": "* Fetch through the proxy URL selected by the existing installed policy, letting the proxy\n* resolve the origin. A request-scoped native HTTP CONNECT tunnel preserves that route on\n* jitless Node without invoking Undici's WebAssembly HTTP parser.\n*\n* No local origin address is pinned: the proxy owns origin resolution. The request disposer\n* closes this request's tunnel and agents, never the policy's shared dispatcher.\n*\n* @param proxy - the route's configured proxy URL, from `proxyRouteFor`.",
+          "count": 1
+        },
+        {
+          "find": "publicHttpNetwork.requestVia(route.dispatcher, url, headers, signal)",
+          "replace": "publicHttpNetwork.requestVia(route.proxy, url, headers, signal)",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "source": "web-fetch-transport.mjs",
+      "target": "/usr/local/share/dsh/web-fetch-transport.mjs",
+      "sha256": "613d7d94142f6df0868d66f1a43d30086aba8deba263c1a5ca3e65d8f59f17c2"
+    }
+  ]
+}

@@ -1,2 +1,4 @@
 app/SessionLifecycle.bundle/* text eol=lf
 tests/session-lease-* text eol=lf
+app/WebFetchTransport.bundle/* text eol=lf
+tests/web-fetch-* text eol=lf

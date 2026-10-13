@@ -142,7 +142,7 @@
         @"const backend=new Persistence(ctx,{root:root+'/sessions',compression:'none'});\n"
         @"const session=sessions.prepare('host-lifecycle-probe',{meta:{cwd:root}});\n"
         @"const handle=await backend.create(session.header);\n"
-        @"await handle.append([session.append('session/title',{title:'lifecycle test'})]);\n"
+        @"await handle.append([session.append('session/title',{title:'lifecycle test',messageSeqs:[],source:{kind:'user'}})]);\n"
         @"await handle.flush(); globalThis.dshLifecycleTestSession={ctx,backend,session,handle};\n";
     NSString *encoded = [[probe dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
     XCTestExpectation *installed = [self expectationWithDescription:@"session probe installed"];

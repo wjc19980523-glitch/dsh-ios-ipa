@@ -9,6 +9,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { Context } from '/usr/local/lib/node_modules/@deepseek-ai/cordis/lib/index.js';
 import SessionStore from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session/lib/index.js';
 import JsonlPersistence from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js';
+import { SessionPersistenceCorruptionError } from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence/lib/index.js';
 
 assert.equal(process.arch, 'arm64'); assert.equal(process.platform, 'linux');
 const root = await mkdtemp('/tmp/dsh-session-lease.');
@@ -16,15 +17,20 @@ let passed = 0;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 async function test(name, operation) { await operation(); passed += 1; console.log('PASS ' + name); }
-async function fixture() {
+async function fixture({ malformedTitle = false } = {}) {
   const ctx = new Context(); const sessions = new SessionStore(ctx);
   const backend = new JsonlPersistence(ctx, { root: root + '/sessions', compression: 'none' });
   const session = sessions.prepare('lease-test-' + randomBytes(6).toString('hex'), { meta: { cwd: root + '/workspace' } });
   const handle = await backend.create(session.header);
-  const event = session.append('session/title', { title: 'diagnostic baseline' });
+  // Use a valid current-format manual title. Keeping an explicitly malformed
+  // variant lets the real scanner prove that lifecycle validation stays strict.
+  const title = { title: 'diagnostic baseline', messageSeqs: [], source: { kind: 'user' } };
+  if (malformedTitle) delete title.messageSeqs;
+  const event = session.append('session/title', title);
   await handle.append([event]); await handle.flush();
   const log = backend.locate(handle.header).path;
   const lock = log.slice(0, log.lastIndexOf('/')) + '/session.lock';
+  if (!malformedTitle) assert.equal((await handle.read()).events.length, 1);
   return { backend, handle, session, log, lock };
 }
 async function resume(backend) { await backend.dshLifecycleResume(); backend.dshLifecycleOpen(); }
@@ -82,6 +88,15 @@ try {
     const { handle, lock } = await fixture(); const held = await contender(lock);
     assert.equal(held.exitCode, 23, JSON.stringify(held)); await handle.close();
     assert.equal((await contender(lock)).exitCode, 0);
+    // This test-owned corrupt fixture must fail before releasing its lease.
+    // Never weaken the production checkpoint validator to make test data pass.
+    const invalid = await fixture({ malformedTitle: true });
+    await assert.rejects(invalid.backend.dshLifecycleSuspend(), error =>
+      error instanceof SessionPersistenceCorruptionError &&
+      error.cause?.message === 'title messageSeqs requires an array');
+    assert.equal(invalid.handle.dshCheckpoint, undefined);
+    assert.equal((await contender(invalid.lock)).exitCode, 23);
+    await invalid.handle.lease.release(); // Only this test's temporary fixture.
   });
   await test('normal lease suspension releases native flock, preserves the inode and reclaims exclusion on resume', async () => {
     const { backend, handle, lock } = await fixture();
@@ -95,7 +110,7 @@ try {
   });
   await test('paused appends and live events perform no writes and remain contiguous after resume', async () => {
     const { backend, handle, session, log } = await fixture(); await backend.dshLifecycleSuspend();
-    const before = await readFile(log); const event = session.append('session/title', { title: 'retained after pause' });
+    const before = await readFile(log); const event = session.append('session/title', { title: 'retained after pause', messageSeqs: [], source: { kind: 'user' } });
     handle.enqueueLive(event, error => { throw error; });
     let flushed = false; const flush = backend.flush().then(() => { flushed = true; });
     await turn(); assert.equal(flushed, false); assert.equal(hash(await readFile(log)), hash(before));
@@ -105,12 +120,12 @@ try {
   });
   await test('a continuing live producer cannot extend the sealed native-lease drain', async () => {
     const { backend, handle, session } = await fixture();
-    handle.enqueueLive(session.append('session/title', { title: 'before seal' }), () => {});
+    handle.enqueueLive(session.append('session/title', { title: 'before seal', messageSeqs: [], source: { kind: 'user' } }), () => {});
     const persist = backend.persistBatch; let offered = 0;
     backend.persistBatch = async function (...arguments_) {
       if (offered < 100) {
         offered += 1;
-        handle.enqueueLive(session.append('session/title', { title: 'while sealed' }), () => {});
+        handle.enqueueLive(session.append('session/title', { title: 'while sealed', messageSeqs: [], source: { kind: 'user' } }), () => {});
       }
       return persist.apply(this, arguments_);
     };
@@ -118,7 +133,7 @@ try {
     assert.equal(offered, 1); assert.equal(handle.lease, undefined);
     assert.equal(handle.dshPausedEvents.length, 1); assert.equal((await handle.read()).events.length, 2);
     for (let index = 0; index < 29; index += 1)
-      handle.enqueueLive(session.append('session/title', { title: 'still paused' }), () => {});
+      handle.enqueueLive(session.append('session/title', { title: 'still paused', messageSeqs: [], source: { kind: 'user' } }), () => {});
     backend.persistBatch = persist; await resume(backend); await backend.flush();
     assert.deepEqual((await handle.read()).events.map(event => event.seq), Array.from({ length: 32 }, (_, index) => index));
     await handle.close();
@@ -147,7 +162,7 @@ try {
       } else if (mutation === 'foreign-truncate') {
         await writeFile(log, original.toString('utf8').split('\n')[0] + '\n');
       } else await writeFile(log, original.toString('utf8').replace('diagnostic baseline', 'diagnostic altered!'));
-      const retained = session.append('session/title', { title: 'retained pending' });
+      const retained = session.append('session/title', { title: 'retained pending', messageSeqs: [], source: { kind: 'user' } });
       handle.enqueueLive(retained, () => {}); const foreign = await readFile(log);
       await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_CHECKPOINT_CHANGED');
       assert.equal(hash(await readFile(log)), hash(foreign)); assert.equal(handle.dshPausedEvents.length, 1);
@@ -158,7 +173,7 @@ try {
   }
   await test('an uncheckpointed real-storage drain error retains its batch and native exclusion without replay', async () => {
     const { backend, handle, session, lock } = await fixture();
-    handle.enqueueLive(session.append('session/title', { title: 'retry retained batch' }), () => {});
+    handle.enqueueLive(session.append('session/title', { title: 'retry retained batch', messageSeqs: [], source: { kind: 'user' } }), () => {});
     const persist = backend.persistBatch;
     backend.persistBatch = async () => { throw Object.assign(new Error('injected storage fault'), { code: 'EIO' }); };
     await assert.rejects(backend.dshLifecycleSuspend(), error => error.code === 'EIO');
@@ -172,7 +187,7 @@ try {
   for (const fault of ['post-fsync-close', 'rollback-failure']) {
     await test(`real append ${fault} cannot replay retained rows after an uncheckpointed failure`, async () => {
       const { backend, handle, session, log } = await fixture();
-      handle.enqueueLive(session.append('session/title', { title: 'uncertain append' }), () => {});
+      handle.enqueueLive(session.append('session/title', { title: 'uncertain append', messageSeqs: [], source: { kind: 'user' } }), () => {});
       const injection = injectLogFault(log, fault);
       try { await assert.rejects(backend.dshLifecycleSuspend()); }
       finally { injection.restore(); }
@@ -192,7 +207,7 @@ try {
   await test('a verified checkpoint permits recovery after an append fault whose rollback completed', async () => {
     const { backend, handle, session, log } = await fixture(); await backend.dshLifecycleSuspend();
     const before = await readFile(log);
-    handle.enqueueLive(session.append('session/title', { title: 'verified retry' }), () => {});
+    handle.enqueueLive(session.append('session/title', { title: 'verified retry', messageSeqs: [], source: { kind: 'user' } }), () => {});
     const injection = injectLogFault(log, 'pre-write');
     try { await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'EIO'); }
     finally { injection.restore(); }
@@ -210,7 +225,7 @@ try {
     await assert.rejects(backend.dshLifecycleSuspend(), error => error.code === 'EIO');
     assert.equal((await contender(lock)).exitCode, 0);
     const bytes = await readFile(log);
-    handle.enqueueLive(session.append('session/title', { title: 'retained after uncertain close' }), () => {});
+    handle.enqueueLive(session.append('session/title', { title: 'retained after uncertain close', messageSeqs: [], source: { kind: 'user' } }), () => {});
     await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_LEASE_UNCERTAIN');
     assert.throws(() => backend.dshLifecycleOpen(), error => error.code === 'DSH_SESSION_LEASE_UNCERTAIN');
     await assert.rejects(backend.flush(), error => error.code === 'DSH_SESSION_LIFECYCLE_FAILED');

@@ -151,15 +151,15 @@
     NSString *host = DSHLogBuffer.hostLaunchID;
     NSDictionary *first = @{@"event":@"guestStarted", @"host_launch_id":host, @"guest_pid":@101};
     NSDictionary *second = @{@"event":@"guestStarted", @"host_launch_id":host, @"guest_pid":@102};
-    XCTAssertFalse([[self kinds:@[first, second]] containsObject:@"guest_restart"]);
-    XCTAssertTrue([[self kinds:@[first, @{@"event":@"guestExited", @"host_launch_id":host, @"exit_code":@9}, second]] containsObject:@"guest_restart"]);
+    XCTAssertFalse(([[self kinds:@[first, second]] containsObject:@"guest_restart"]));
+    XCTAssertTrue(([[self kinds:@[first, @{@"event":@"guestExited", @"host_launch_id":host, @"exit_code":@9}, second]] containsObject:@"guest_restart"]));
 }
 - (void)testSamePIDRequiresTwoKnownDifferentGuestIdentities {
     NSString *host = DSHLogBuffer.hostLaunchID;
     NSDictionary *(^event)(NSNumber *) = ^NSDictionary *(NSNumber *identity) { return @{@"event":@"guestStarted", @"host_launch_id":host, @"guest_pid":@101, @"guest_session_lifecycle":@{@"guest_identity":identity}}; };
     NSDictionary *restart = @{@"event":@"harnessRestartRequested", @"host_launch_id":host};
-    XCTAssertTrue([[self kinds:@[event(@1), restart, event(@2)]] containsObject:@"guest_restart"]);
-    XCTAssertFalse([[self kinds:@[event(@0), restart, event(@2)]] containsObject:@"guest_restart"]);
+    XCTAssertTrue(([[self kinds:@[event(@1), restart, event(@2)]] containsObject:@"guest_restart"]));
+    XCTAssertFalse(([[self kinds:@[event(@0), restart, event(@2)]] containsObject:@"guest_restart"]));
 }
 - (void)testWebContentTerminationIsSeparateFromHostAndGuestRestart {
     DSHLogBuffer *log = self.persistentLog;
@@ -172,27 +172,27 @@
 - (void)testLockClassificationNeedsCompleteCountersAndMatchingGeneration {
     NSString *host = DSHLogBuffer.hostLaunchID;
     NSDictionary *snapshot = [self lockSnapshotForHost:host generation:7];
-    XCTAssertTrue([[self kinds:@[@{@"event":@"quiesceWaiting", @"core_generation":@7, @"snapshot":snapshot}]] containsObject:@"file_lock_wait"]);
-    XCTAssertFalse([[self kinds:@[@{@"event":@"quiesceWaiting", @"core_generation":@8, @"snapshot":snapshot}]] containsObject:@"file_lock_wait"]);
+    XCTAssertTrue(([[self kinds:@[@{@"event":@"quiesceWaiting", @"core_generation":@7, @"snapshot":snapshot}]] containsObject:@"file_lock_wait"]));
+    XCTAssertFalse(([[self kinds:@[@{@"event":@"quiesceWaiting", @"core_generation":@8, @"snapshot":snapshot}]] containsObject:@"file_lock_wait"]));
     NSMutableDictionary *incomplete = [snapshot mutableCopy]; incomplete[@"tracking_overflows"] = @1;
-    XCTAssertFalse([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]);
+    XCTAssertFalse(([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]));
     incomplete = [snapshot mutableCopy]; [incomplete removeObjectForKey:@"active_operations"];
-    XCTAssertFalse([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]);
+    XCTAssertFalse(([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]));
     incomplete = [snapshot mutableCopy]; incomplete[@"native_flock_count"] = @-1;
-    XCTAssertFalse([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]);
+    XCTAssertFalse(([[self kinds:@[@{@"event":@"quiesceWaiting", @"snapshot":incomplete}]] containsObject:@"file_lock_wait"]));
 }
 - (void)testFailedACKRequiresCurrentGenerationAndGuestIdentity {
     NSString *host = DSHLogBuffer.hostLaunchID;
     NSDictionary *guest = @{@"generation":@7, @"ack_generation":@7, @"ack_state":@"failed", @"registered":@YES, @"managed_guest_pid":@101, @"guest_identity":@3, @"error_code":@"ownership_conflict"};
     NSDictionary *current = @{@"event":@"sessionResumeFailed", @"host_launch_id":host, @"guest_pid":@101, @"guest_session_lifecycle":guest};
-    XCTAssertTrue([[self kinds:@[current]] containsObject:@"session_ack_failed"]);
+    XCTAssertTrue(([[self kinds:@[current]] containsObject:@"session_ack_failed"]));
     NSMutableDictionary *staleGuest = [guest mutableCopy]; staleGuest[@"ack_generation"] = @6;
     NSMutableDictionary *stale = [current mutableCopy]; stale[@"guest_session_lifecycle"] = staleGuest;
-    XCTAssertFalse([[self kinds:@[stale]] containsObject:@"session_ack_failed"]);
-    XCTAssertTrue([[self kinds:@[stale]] containsObject:@"historical_ack"]);
+    XCTAssertFalse(([[self kinds:@[stale]] containsObject:@"session_ack_failed"]));
+    XCTAssertTrue(([[self kinds:@[stale]] containsObject:@"historical_ack"]));
     NSMutableDictionary *newGuest = [guest mutableCopy]; newGuest[@"generation"] = @8; newGuest[@"ack_generation"] = @8; newGuest[@"ack_state"] = @"running";
     NSMutableDictionary *newer = [current mutableCopy]; newer[@"guest_session_lifecycle"] = newGuest;
-    XCTAssertFalse([[self kinds:@[current, newer]] containsObject:@"session_ack_failed"]);
+    XCTAssertFalse(([[self kinds:@[current, newer]] containsObject:@"session_ack_failed"]));
 }
 - (void)testPreviousUnfinishedBackgroundAndResumeTimeoutAreVisibleWithoutClaimingSystemKill {
     NSString *oldHost = NSUUID.UUID.UUIDString;
@@ -222,7 +222,7 @@
     XCTAssertNil([DSHLifecycleDiagnostics safeEventFromLogLine:@"user quoted [lifecycle] {\"event\":\"quiesceExpired\"}"]);
     XCTAssertNil([DSHLifecycleDiagnostics safeEventFromLogLine:@"[lifecycle] {\"event\":\"secret-event-name\",\"body\":\"secret-body\"}"]);
     XCTAssertNil([DSHLifecycleDiagnostics safeEventFromLogLine:@"[lifecycle] malformed"]);
-    XCTAssertTrue([[self kinds:@[@{@"event":@"sceneDidBecomeActive"}]] containsObject:@"insufficient_evidence"]);
+    XCTAssertTrue(([[self kinds:@[@{@"event":@"sceneDidBecomeActive"}]] containsObject:@"insufficient_evidence"]));
 }
 - (void)testNativeOperationAndSQLPhaseLabelsUseFixedWhitelists {
     NSDictionary *event = [DSHLifecycleDiagnostics sanitizedEvent:@{@"event":@"quiesceWaiting", @"operations":@[@{@"entry":@"fakefs_open"}, @{@"entry":@"guest_syscall_93"}, @{@"entry":@"/root/private-name"}], @"transactions":@[@{@"phase":@"step_timeout"}, @{@"phase":@"user-secret-phase"}]}];
@@ -253,7 +253,7 @@
     NSDictionary *guest = @{@"generation":@9, @"ack_generation":@8, @"ack_state":@"running", @"guest_identity":@3, @"managed_guest_pid":@101,
         @"diagnostics":@{@"drain_ms":@999}, @"progress_generation":@9, @"progress_diagnostics":@{@"checkpoint_read_ms":@20, @"checkpoint_hash_ms":@30, @"checkpoint_serialized_bytes":@1000, @"host_pid":@123, @"session_id":@"private-session"}};
     NSDictionary *event = @{@"event":@"quiesceWaiting", @"host_launch_id":DSHLogBuffer.hostLaunchID, @"guest_pid":@101, @"guest_session_lifecycle":guest};
-    XCTAssertTrue([[self kinds:@[event]] containsObject:@"session_transition_progress"]);
+    XCTAssertTrue(([[self kinds:@[event]] containsObject:@"session_transition_progress"]));
     NSString *summary = [[DSHLifecycleDiagnostics findingsForEvents:@[event] currentHostLaunchID:DSHLogBuffer.hostLaunchID] description];
     XCTAssertFalse([summary containsString:@"999ms"]);
     NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:event];
@@ -261,7 +261,7 @@
     XCTAssertNil(safe[@"guest_session_lifecycle"][@"progress_diagnostics"][@"session_id"]);
     NSMutableDictionary *old = [guest mutableCopy]; old[@"progress_generation"] = @8;
     NSMutableDictionary *staleEvent = [event mutableCopy]; staleEvent[@"guest_session_lifecycle"] = old;
-    XCTAssertFalse([[self kinds:@[staleEvent]] containsObject:@"session_transition_progress"]);
+    XCTAssertFalse(([[self kinds:@[staleEvent]] containsObject:@"session_transition_progress"]));
 }
 - (void)testTransientLiveViewRedactsQuotedCredentialsAndFilesystemPaths {
     DSHLogBuffer *log = [[DSHLogBuffer alloc] initWithCapacity:8];

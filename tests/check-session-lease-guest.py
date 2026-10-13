@@ -10,7 +10,8 @@ from pathlib import Path
 import re
 import sys
 
-RECEIPT = 'SESSION_LEASE_GUEST_TESTS 14/14; native_flock_executed=true; cycles=100'
+EXPECTED_TESTS = 18
+RECEIPT = f'SESSION_LEASE_GUEST_TESTS {EXPECTED_TESTS}/{EXPECTED_TESTS}; native_flock_executed=true; cycles=100'
 
 
 def zero(value):
@@ -41,7 +42,7 @@ def verify(result, text):
     names = [line.removeprefix('PASS ').strip() for line in passes]
     receipts = [line for line in lines if 'SESSION_LEASE_GUEST_TESTS' in line]
     output_ok = (
-        len(passes) == 14 and len(set(names)) == 14
+        len(passes) == EXPECTED_TESTS and len(set(names)) == EXPECTED_TESTS
         and all(name and line == 'PASS ' + name for line, name in zip(passes, names))
         and receipts == [RECEIPT]
         and all(lines.index(line) < lines.index(RECEIPT) for line in passes)
@@ -66,7 +67,7 @@ def main():
     if not verify(result, text):
         print('error: real guest session assertions or execution evidence incomplete', file=sys.stderr)
         return 1
-    print('SESSION_LEASE_GUEST_ASSERTIONS_VERIFIED=14')
+    print(f'SESSION_LEASE_GUEST_ASSERTIONS_VERIFIED={EXPECTED_TESTS}')
     return 0
 
 

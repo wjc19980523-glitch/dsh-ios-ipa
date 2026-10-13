@@ -23,7 +23,7 @@ def build(source):
         replacements.append({'find': find, 'replace': replacement, 'count': count})
 
     replace('import z from "@deepseek-ai/schemastery";',
-            'import { SessionLifecycleAdmission, registerSessionBackend, unregisterSessionBackend } from "/usr/local/share/dsh/session-lifecycle.mjs";\n'
+            'import { SessionLifecycleAdmission, settleLifecycleWriters, registerSessionBackend, unregisterSessionBackend } from "/usr/local/share/dsh/session-lifecycle.mjs";\n'
             'import z from "@deepseek-ai/schemastery";')
     replace('\tdraining;\n\tconstructor(storage', '\tdraining;\n\tdshCheckpoint;\n\tdshPausedEvents = [];\n\tdshClosingAdmitted = false;\n\tconstructor(storage')
     replace('''\t* unwinds first; a drain or lock-release failure still frees the in-process
@@ -187,40 +187,71 @@ def build(source):
 \t\t\tif (writer.dshCheckpoint !== void 0 && writer.lease === void 0) released_count += 1;
 \t\t\tpending_events += writer.buffered.length + writer.dshPausedEvents.length;
 \t\t}
-\t\treturn { writer_count, released_count, pending_events };
+\t\treturn { writer_count, released_count, pending_events, diagnostics: { ...this.dshLifecycleDiagnostics } };
 \t}
 \tdshLifecycleFail() { this.dshLifecycleAdmission.fail(); }
+\tdshLifecycleResetDiagnostics() {
+\t\tthis.dshLifecycleDiagnostics = {
+\t\t\tcheckpoint_read_ms: 0, checkpoint_hash_ms: 0, checkpoint_serialized_bytes: 0,
+\t\t\tdrain_ms: 0, close_ms: 0, acquire_ms: 0, active_writer_transitions: 0,
+\t\t\tpeak_writer_transitions: 0, transition_ms: 0
+\t\t};
+\t}
+\tasync dshLifecycleTimed(field, operation) {
+\t\tconst started = Date.now();
+\t\ttry { return await operation(); }
+\t\tfinally { this.dshLifecycleDiagnostics[field] += Math.max(0, Date.now() - started); }
+\t}
+\tasync dshLifecycleForEachWriter(operation) {
+\t\tawait settleLifecycleWriters(this.tracker.writers.values(), async writer => {
+\t\t\tconst diagnostics = this.dshLifecycleDiagnostics;
+\t\t\tdiagnostics.active_writer_transitions += 1;
+\t\t\tdiagnostics.peak_writer_transitions = Math.max(diagnostics.peak_writer_transitions, diagnostics.active_writer_transitions);
+\t\t\ttry { await operation(writer); }
+\t\t\tfinally { diagnostics.active_writer_transitions -= 1; }
+\t\t});
+\t}
 \tdshLifecycleFingerprint(stored) {
-\t\treturn createHash("sha256").update(JSON.stringify({
+\t\tconst started = Date.now();
+\t\tconst serialized = JSON.stringify({
 \t\t\theader: stored.meta, events: stored.events,
 \t\t\tinheritedEventCount: stored.inheritedEventCount,
 \t\t\ttornTruncateTo: stored.tornTruncateTo,
 \t\t\trecoveredTail: stored.recoveredTail
-\t\t})).digest("hex");
+\t\t});
+\t\tconst fingerprint = createHash("sha256").update(serialized).digest("hex");
+\t\tif (this.dshLifecycleDiagnostics !== void 0) {
+\t\t\tthis.dshLifecycleDiagnostics.checkpoint_hash_ms += Math.max(0, Date.now() - started);
+\t\t\tthis.dshLifecycleDiagnostics.checkpoint_serialized_bytes += Buffer.byteLength(serialized);
+\t\t}
+\t\treturn fingerprint;
 \t}
 \tasync dshLifecycleSuspend() {
+\t\tthis.dshLifecycleResetDiagnostics();
+\t\tconst started = Date.now();
 \t\tthis.dshLifecycleBeginQuiesce();
 \t\ttry {
 \t\tawait this.dshLifecycleAdmission.drain(async () => {
-\t\t\tfor (const writer of [...this.tracker.writers.values()]) {
-\t\t\t\tif (writer === null) continue;
+\t\t\tawait this.dshLifecycleForEachWriter(async writer => {
 \t\t\t\tif (writer.dshCheckpoint !== void 0) {
 \t\t\t\t\t// A failed/abandoned resume may already own a fresh lease.
 \t\t\t\t\t// Never append its retained events before checkpoint validation.
-\t\t\t\t\tawait writer.lease?.release();
+\t\t\t\t\tawait this.dshLifecycleTimed("close_ms", () => writer.lease?.release());
 \t\t\t\t\twriter.lease = void 0;
-\t\t\t\t\tcontinue;
+\t\t\t\t\treturn;
 \t\t\t\t}
 \t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error("session storage has no verified checkpoint after failure"), { code: "DSH_SESSION_STORAGE_UNCERTAIN" });
-\t\t\t\tawait writer.drainLive();
-\t\t\t\tawait writer.chain;
+\t\t\t\tawait this.dshLifecycleTimed("drain_ms", async () => {
+\t\t\t\t\tawait writer.drainLive();
+\t\t\t\t\tawait writer.chain;
+\t\t\t\t});
 \t\t\t\tif (!writer.state.materialized) {
 \t\t\t\t\tawait writer.ensureLease();
 \t\t\t\t\tawait this.persistHeader(writer.header, writer.state.inheritedEventCount);
 \t\t\t\t\twriter.state.materialized = true;
 \t\t\t\t}
 \t\t\t\tthis.coldLogMemo.delete(writer.id);
-\t\t\t\tconst stored = await this.requireStoredLog(writer.id);
+\t\t\t\tconst stored = await this.dshLifecycleTimed("checkpoint_read_ms", () => this.requireStoredLog(writer.id));
 \t\t\t\tif (stored.events.length !== writer.state.cursor) {
 \t\t\t\t\tconst error = new Error("session checkpoint changed");
 \t\t\t\t\terror.code = "DSH_SESSION_CHECKPOINT_CHANGED";
@@ -228,29 +259,31 @@ def build(source):
 \t\t\t\t}
 \t\t\t\tconst checkpoint = this.dshLifecycleFingerprint(stored);
 \t\t\t\twriter.dshCheckpoint = checkpoint;
-\t\t\t\tawait writer.lease?.release();
+\t\t\t\tawait this.dshLifecycleTimed("close_ms", () => writer.lease?.release());
 \t\t\t\twriter.lease = void 0;
-\t\t\t}
+\t\t\t});
 \t\t});
 \t\tthis.dshLifecycleAdmission.markQuiesced();
-\t\treturn this.dshLifecycleSnapshot();
 \t\t} catch (error) { this.dshLifecycleFail(); throw error; }
+\t\tfinally { this.dshLifecycleDiagnostics.transition_ms = Math.max(0, Date.now() - started); }
+\t\treturn this.dshLifecycleSnapshot();
 \t}
 \tasync dshLifecycleResume() {
 \t\tif (this.dshLifecycleAdmission.state === "running") return;
+\t\tthis.dshLifecycleResetDiagnostics();
+\t\tconst started = Date.now();
 \t\tthis.dshLifecycleAdmission.beginResume();
 \t\ttry {
 \t\tawait this.dshLifecycleAdmission.drain(async () => {
-\t\t\tfor (const writer of [...this.tracker.writers.values()]) {
-\t\t\t\tif (writer === null) continue;
+\t\t\tawait this.dshLifecycleForEachWriter(async writer => {
 \t\t\t\tif (writer.lease?.dshUncertain) throw Object.assign(new Error("session lease close state is uncertain"), { code: "DSH_SESSION_LEASE_UNCERTAIN" });
 \t\t\t\tif (writer.dshCheckpoint === void 0) {
 \t\t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error("session storage has no verified checkpoint after failure"), { code: "DSH_SESSION_STORAGE_UNCERTAIN" });
-\t\t\t\t\tcontinue;
+\t\t\t\t\treturn;
 \t\t\t\t}
-\t\t\t\tawait writer.ensureLease();
+\t\t\t\tawait this.dshLifecycleTimed("acquire_ms", () => writer.ensureLease());
 \t\t\t\tthis.coldLogMemo.delete(writer.id);
-\t\t\t\tconst stored = await this.requireStoredLog(writer.id);
+\t\t\t\tconst stored = await this.dshLifecycleTimed("checkpoint_read_ms", () => this.requireStoredLog(writer.id));
 \t\t\t\tif (this.dshLifecycleFingerprint(stored) !== writer.dshCheckpoint) {
 \t\t\t\t\tconst error = new Error("session checkpoint changed");
 \t\t\t\t\terror.code = "DSH_SESSION_CHECKPOINT_CHANGED";
@@ -261,13 +294,21 @@ def build(source):
 \t\t\t\t// New arrivals remain isolated, so this is a bounded snapshot.
 \t\t\t\twriter.buffered = writer.buffered.concat(writer.dshPausedEvents);
 \t\t\t\twriter.dshPausedEvents = [];
-\t\t\t\tawait writer.drainLive();
-\t\t\t\tawait writer.chain;
-\t\t\t\tthis.coldLogMemo.delete(writer.id);
-\t\t\t\twriter.dshCheckpoint = this.dshLifecycleFingerprint(await this.requireStoredLog(writer.id));
-\t\t\t}
+\t\t\t\tconst hasRetainedEvents = writer.buffered.length > 0;
+\t\t\t\tawait this.dshLifecycleTimed("drain_ms", async () => {
+\t\t\t\t\tawait writer.drainLive();
+\t\t\t\t\tawait writer.chain;
+\t\t\t\t});
+\t\t\t\tif (hasRetainedEvents) {
+\t\t\t\t\tthis.coldLogMemo.delete(writer.id);
+\t\t\t\t\twriter.dshCheckpoint = this.dshLifecycleFingerprint(await this.dshLifecycleTimed("checkpoint_read_ms", () => this.requireStoredLog(writer.id)));
+\t\t\t\t}
+\t\t\t\t// With no retained events the first full validation remains the
+\t\t\t\t// checkpoint; the held lease and sealed writer admit no new append.
+\t\t\t});
 \t\t});
 \t\t} catch (error) { this.dshLifecycleFail(); throw error; }
+\t\tfinally { this.dshLifecycleDiagnostics.transition_ms = Math.max(0, Date.now() - started); }
 \t}
 \tdshLifecycleOpen() {
 \t\tfor (const writer of this.tracker.writers.values()) {
@@ -294,11 +335,15 @@ def build(source):
     for name in ('session-lifecycle.mjs', 'session-lifecycle-core.mjs'):
         data = (BUNDLE / name).read_bytes().replace(b'\r\n', b'\n')
         (BUNDLE / name).write_bytes(data)
+        prior = {'session-lifecycle.mjs': '70f27344fc561c4bfd2d4dfb79858db2f1f88ee2a52bbfa73e0c666012467205',
+                 'session-lifecycle-core.mjs': '2bd6ca8154328b01d7e4c437413a85a3066a6dd6234b9a920e7287a330236ea6'}
         files.append({'source': name, 'target': '/usr/local/share/dsh/' + name,
-                      'sha256': hashlib.sha256(data).hexdigest()})
+                      'sha256': hashlib.sha256(data).hexdigest(), 'previous_sha256': [prior[name]]})
     manifest = {'schema': 1, 'rootfs_sha256': ROOTFS_SHA,
                 'patches': [{'target': TARGET, 'original_sha256': ORIGINAL_SHA,
-                  'patched_sha256': hashlib.sha256(output).hexdigest(), 'replacements': replacements}],
+                  'patched_sha256': hashlib.sha256(output).hexdigest(), 'replacements': replacements,
+                  'previous_sha256': ['a0318b82600e5392e25f6caac666a81b66f0ba7b3681e6de3222e028db24200f'],
+                  'original_source': {'source': 'session-backend-original.js', 'sha256': ORIGINAL_SHA}}],
                 'files': files}
     (BUNDLE / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     return manifest, output

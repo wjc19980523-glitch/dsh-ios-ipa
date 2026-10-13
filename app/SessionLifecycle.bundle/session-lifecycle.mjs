@@ -1,5 +1,5 @@
-import { SessionLifecycleAdmission, lifecycleErrorCode } from './session-lifecycle-core.mjs';
-export { SessionLifecycleAdmission };
+import { SessionLifecycleAdmission, settleLifecycleWriters, lifecycleErrorCode } from './session-lifecycle-core.mjs';
+export { SessionLifecycleAdmission, settleLifecycleWriters };
 
 const BASE = process.env.DSH_HOST_BRIDGE_URL;
 const TOKEN = process.env.DSH_HOST_BRIDGE_TOKEN;
@@ -20,11 +20,13 @@ async function request(path, body, desired) {
   const controller = new AbortController();
   activeRequests.add(controller);
   if (desired) activeAcknowledgement = { desired, controller };
-  const timer = setTimeout(() => controller.abort(), 25000);
+  // A TCP connection predating a long iOS suspension can remain blackholed.
+  // Keep this private control request below the host's 15-second resume window.
+  const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const response = await fetch(`${BASE}${path}`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', connection: 'close' },
       body: JSON.stringify(body), signal: controller.signal,
     });
     if (!response.ok) throw new Error('lifecycle transport failed');
@@ -37,11 +39,20 @@ async function request(path, body, desired) {
 
 function snapshot() {
   const result = { writer_count: 0, released_count: 0, pending_events: 0 };
+  const diagnostics = {};
+  const fields = ['checkpoint_read_ms', 'checkpoint_hash_ms', 'checkpoint_serialized_bytes',
+    'drain_ms', 'close_ms', 'acquire_ms', 'active_writer_transitions',
+    'peak_writer_transitions', 'transition_ms'];
   for (const backend of backends) {
     const current = backend.dshLifecycleSnapshot();
     for (const key of Object.keys(result)) result[key] += current[key];
+    for (const key of fields) {
+      const value = current.diagnostics?.[key];
+      if (Number.isSafeInteger(value) && value >= 0)
+        diagnostics[key] = (diagnostics[key] ?? 0) + value;
+    }
   }
-  return result;
+  return Object.keys(diagnostics).length === 0 ? result : { ...result, diagnostics };
 }
 
 async function applyLatest() {
@@ -103,8 +114,13 @@ async function applyLatest() {
 async function poll(epoch) {
   while (started && epoch === pollEpoch && backends.size > 0) {
     try {
+      // Reuse the ordinary control poll for metadata-only progress. A stale
+      // generation cannot complete a transition; the host keeps this separate
+      // from immutable terminal ACKs and safety admission decisions.
+      const diagnostics = snapshot().diagnostics;
       const desired = await request('/v1/lifecycle/poll', {
-        pid: process.pid, after_generation: latest?.generation ?? -1,
+        pid: process.pid, after_generation: latest?.generation ?? -1, wait_ms: 3000,
+        ...(latest && diagnostics ? { progress_generation: latest.generation, diagnostics } : {}),
       });
       if (desired.protocol !== 1 || !Number.isSafeInteger(desired.generation)
           || desired.generation < 0 || !['running', 'quiescing'].includes(desired.state)

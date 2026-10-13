@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { SessionLifecycleAdmission } from '../app/SessionLifecycle.bundle/session-lifecycle-core.mjs';
+import { SessionLifecycleAdmission, settleLifecycleWriters, lifecycleErrorCode } from '../app/SessionLifecycle.bundle/session-lifecycle-core.mjs';
 
 const manifest = JSON.parse(await readFile(new URL('../app/SessionLifecycle.bundle/manifest.json', import.meta.url)));
 const sourceFile = process.argv[2];
@@ -38,7 +38,7 @@ const { Handle, Backend, Lease } = vm.runInNewContext(
   classBody('JsonlSessionHandle') + '\n' + classBody('JsonlSessionPersistence')
     + '\n' + classBody('SessionWriteLease')
     + '\n({ Handle: JsonlSessionHandle, Backend: JsonlSessionPersistence, Lease: SessionWriteLease });', {
-    SessionPersistence: class {}, SessionHandleClosedError, SessionLifecycleAdmission,
+    SessionPersistence: class {}, SessionHandleClosedError, SessionLifecycleAdmission, settleLifecycleWriters, Buffer,
     JsonlCompressionSchema: {}, z: { object: () => ({}), string: () => ({ required: () => ({}) }) },
     createHash, structuredClone, clearTimeout, setTimeout, process: { platform: 'linux' },
     materializeAppendBatch: events => structuredClone(events),
@@ -86,6 +86,24 @@ function fixture() {
   backend.tracker.writers.set(handle.id, handle);
   backend.tracker.openHandles.add(handle);
   return { backend, handle, state };
+}
+function multiFixture(count = 4) {
+  const fixtures = Array.from({ length: count }, () => fixture());
+  const backend = fixtures[0].backend;
+  const adapters = fixtures.map(item => ({ acquire: item.backend.acquireWriteLease,
+    persist: item.backend.persistBatch, read: item.backend.requireStoredLog, header: item.backend.persistHeader }));
+  backend.tracker.writers.clear(); backend.tracker.openHandles.clear();
+  fixtures.forEach((item, index) => {
+    item.handle.id = 'multi-' + index; item.handle.header.id = item.handle.id;
+    item.state.header.id = item.handle.id; item.handle.storage = backend;
+    backend.tracker.writers.set(item.handle.id, item.handle); backend.tracker.openHandles.add(item.handle);
+  });
+  const indexOf = header => Number((typeof header === 'string' ? header : header.id).slice(6));
+  backend.acquireWriteLease = header => adapters[indexOf(header)].acquire(header);
+  backend.persistBatch = (header, events) => adapters[indexOf(header)].persist(header, events);
+  backend.persistHeader = header => adapters[indexOf(header)].header(header);
+  backend.requireStoredLog = id => adapters[indexOf(id)].read(id);
+  return { backend, fixtures, adapters };
 }
 async function resume(backend) { await backend.dshLifecycleResume(); backend.dshLifecycleOpen(); }
 let passed = 0;
@@ -320,5 +338,87 @@ await test('100 suspend/resume cycles leave no accumulating leases or writer cla
     assert.equal(backend.tracker.writers.size, 1); assert.equal(backend.tracker.openHandles.size, 1);
   }
   await handle.close(); assert.equal(state.held, 0); assert.equal(state.acquired, state.released);
+});
+await test('four writers use two bounded workers and retain each original handle and sequence', async () => {
+  const { backend, fixtures } = multiFixture();
+  await Promise.all(fixtures.map(item => item.handle.append([event(0)])));
+  const read = backend.requireStoredLog, barriers = fixtures.map(() => deferred());
+  let active = 0, peak = 0; const entered = [];
+  backend.requireStoredLog = async id => {
+    active += 1; peak = Math.max(peak, active); const index = Number(id.slice(6)); entered.push(index);
+    try { await barriers[index].promise; return await read(id); }
+    finally { active -= 1; }
+  };
+  let finished = false; const suspend = backend.dshLifecycleSuspend().then(() => { finished = true; });
+  await turn(); assert.deepEqual(entered, [0, 1]); assert.equal(peak, 2); assert.equal(finished, false);
+  fixtures.forEach(item => item.handle.enqueueLive(event(1), () => {}));
+  barriers[0].resolve(); barriers[1].resolve(); await turn(); assert.deepEqual(entered, [0, 1, 2, 3]);
+  assert.equal(finished, false); barriers[2].resolve(); barriers[3].resolve(); await suspend;
+  assert.equal(peak, 2); assert.equal(backend.dshLifecycleSnapshot().diagnostics.peak_writer_transitions, 2);
+  assert.equal(backend.dshLifecycleSnapshot().diagnostics.active_writer_transitions, 0);
+  assert.equal(backend.dshLifecycleSnapshot().released_count, 4);
+  for (const item of fixtures) { assert.equal(item.state.held, 0); assert.equal(item.handle.dshPausedEvents.length, 1); }
+  backend.requireStoredLog = read; await resume(backend);
+  for (const item of fixtures) {
+    assert.equal(backend.tracker.writers.get(item.handle.id), item.handle);
+    assert.deepEqual(item.state.events.map(e => e.seq), [0, 1]); await item.handle.close();
+  }
+});
+await test('one writer failure waits for all four writers before rejecting and keeps uncertain ownership', async () => {
+  const { backend, fixtures } = multiFixture();
+  await Promise.all(fixtures.map(item => item.handle.append([event(0)])));
+  const read = backend.requireStoredLog, barrier = deferred(); const entered = [];
+  backend.requireStoredLog = async id => {
+    entered.push(id);
+    if (id === 'multi-0') throw Object.assign(new Error('injected checkpoint fault'), { code: 'EIO' });
+    if (id === 'multi-3') await barrier.promise;
+    return read(id);
+  };
+  let settled = false;
+  const suspend = backend.dshLifecycleSuspend();
+  const rejected = assert.rejects(suspend, error => error.code === 'EIO').then(() => { settled = true; });
+  await turn(); assert.equal(entered.length, 4); assert.equal(settled, false);
+  assert.equal(fixtures[0].state.held, 1); assert.equal(fixtures[3].state.held, 1);
+  barrier.resolve(); await rejected;
+  assert.equal(backend.dshLifecycleSnapshot().diagnostics.active_writer_transitions, 0);
+  assert.equal(backend.dshLifecycleSnapshot().released_count, 3);
+  assert.equal(backend.dshLifecycleAdmission.state, 'failed');
+  await assert.rejects(fixtures[0].handle.append([event(1)]), error => error.code === 'DSH_SESSION_LIFECYCLE_FAILED');
+  assert.equal(fixtures[0].handle.dshCheckpoint, undefined); assert.equal(fixtures[0].state.held, 1);
+  // This failed writer has no verified checkpoint: restoring the test adapter
+  // must not authorize a replay or an ownership drop.
+  backend.requireStoredLog = read;
+  await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_STORAGE_UNCERTAIN');
+  assert.equal(fixtures[0].state.held, 1);
+});
+await test('multiple writer failures settle every writer and preserve each error', async () => {
+  const items = [0, 1, 2, 3], barrier = deferred(); const visited = [];
+  let settled = false;
+  const task = settleLifecycleWriters(items, async index => {
+    visited.push(index); if (index === 3) await barrier.promise;
+    if (index === 0 || index === 2) throw Object.assign(new Error('injected storage fault'), { code: 'EIO' });
+  });
+  const rejected = assert.rejects(task, error => error instanceof AggregateError && error.errors.length === 2
+      && lifecycleErrorCode(error) === 'storage_failure')
+    .then(() => { settled = true; });
+  await turn(); assert.equal(visited.length, 4); assert.equal(settled, false);
+  barrier.resolve(); await rejected;
+});
+await test('an idle resume performs one full checkpoint read; retained writes require a new full read', async () => {
+  const { backend, handle } = fixture(); await handle.append([event(0)]); await backend.dshLifecycleSuspend();
+  const read = backend.requireStoredLog; let reads = 0;
+  backend.requireStoredLog = id => { reads += 1; return read(id); };
+  await resume(backend); assert.equal(reads, 1);
+  await backend.dshLifecycleSuspend(); reads = 0; handle.enqueueLive(event(1), () => {});
+  await resume(backend); assert.equal(reads, 2); await handle.close();
+});
+await test('writer diagnostics contain only fixed nonnegative integer counters', async () => {
+  const { backend, handle } = fixture(); await handle.append([event(0)]); await backend.dshLifecycleSuspend();
+  const diagnostics = backend.dshLifecycleSnapshot().diagnostics;
+  assert.equal(Object.keys(diagnostics).length, 9);
+  assert(Object.values(diagnostics).every(value => Number.isSafeInteger(value) && value >= 0));
+  assert(diagnostics.checkpoint_serialized_bytes > 0);
+  assert.equal(JSON.stringify(diagnostics).includes('test-session'), false);
+  await resume(backend); await handle.close();
 });
 console.log(`SESSION_LEASE_ALGORITHM_TESTS ${passed}/${passed}; native_flock_executed=false`);

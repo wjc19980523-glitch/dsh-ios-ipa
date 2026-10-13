@@ -139,11 +139,14 @@
         @"import {mkdtemp} from 'node:fs/promises';\n"
         @"const root=await mkdtemp('/tmp/dsh-host-session-probe.');\n"
         @"const ctx=new Context(); const sessions=new Sessions(ctx);\n"
-        @"const backend=new Persistence(ctx,{root:root+'/sessions',compression:'none'});\n"
-        @"const session=sessions.prepare('host-lifecycle-probe',{meta:{cwd:root}});\n"
-        @"const handle=await backend.create(session.header);\n"
-        @"await handle.append([session.append('session/title',{title:'lifecycle test',messageSeqs:[],source:{kind:'user'}})]);\n"
-        @"await handle.flush(); globalThis.dshLifecycleTestSession={ctx,backend,session,handle};\n";
+        @"const backend=new Persistence(ctx,{root:root+'/sessions'});\n"
+        @"const writers=[];\n"
+        @"for(let index=0;index<4;index++){\n"
+        @" const session=sessions.prepare('host-lifecycle-probe-'+index,{meta:{cwd:root}});\n"
+        @" const handle=await backend.create(session.header);\n"
+        @" await handle.append([session.append('session/title',{title:'lifecycle test '+index,messageSeqs:[],source:{kind:'user'}})]);\n"
+        @" await handle.flush(); writers.push({session,handle});\n"
+        @"} globalThis.dshLifecycleTestSession={ctx,backend,writers};\n";
     NSString *encoded = [[probe dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
     XCTestExpectation *installed = [self expectationWithDescription:@"session probe installed"];
     __block BOOL installationSucceeded = NO;
@@ -172,13 +175,13 @@
     @try {
         struct dsh_lifecycle_snapshot before;
         dsh_lifecycle_get_snapshot(&before);
-        BOOL heldSessionLease = NO;
+        NSUInteger heldSessionLeases = 0;
         for (unsigned i = 0; i < before.native_flock_count; i++) {
             struct dsh_lifecycle_flock_snapshot lock = before.native_flocks[i];
             if (lock.guest_tgid == pid && lock.identity.file_kind == DSH_FLOCK_FILE_SESSION_LOCK)
-                heldSessionLease = YES;
+                heldSessionLeases++;
         }
-        XCTAssertTrue(heldSessionLease, @"This test must begin with the real native session lease held");
+        XCTAssertGreaterThanOrEqual(heldSessionLeases, 4u, @"This test must begin with four real native session leases held");
         for (NSUInteger cycle = 0; cycle < 3; cycle++) {
             [coordinator handleAppBackground];
             [coordinator handleAppBackground];
@@ -206,13 +209,13 @@
                 }] evaluatedWithObject:coordinator handler:nil];
             [self waitForExpectations:@[resumed] timeout:20];
             dsh_lifecycle_get_snapshot(&snapshot);
-            BOOL reacquired = NO;
+            NSUInteger reacquired = 0;
             for (unsigned i = 0; i < snapshot.native_flock_count; i++) {
                 struct dsh_lifecycle_flock_snapshot lock = snapshot.native_flocks[i];
                 if (lock.guest_tgid == pid && lock.identity.file_kind == DSH_FLOCK_FILE_SESSION_LOCK)
-                    reacquired = YES;
+                    reacquired++;
             }
-            XCTAssertTrue(reacquired, @"Same Node must reacquire its session lease before admission opens");
+            XCTAssertGreaterThanOrEqual(reacquired, 4u, @"Same Node must reacquire all four session leases before admission opens");
             XCTestExpectation *healthy = [self expectationWithDescription:@"same guest answers after restore"];
             [h verifyAliveWithCompletion:^(BOOL alive) {
                 XCTAssertTrue(alive);

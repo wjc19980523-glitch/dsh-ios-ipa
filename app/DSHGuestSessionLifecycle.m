@@ -11,6 +11,20 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     return YES;
 }
 
+static NSDictionary *phaseDiagnostics(id presented) {
+    if (!presented) return @{};
+    NSArray *allowed = @[@"checkpoint_read_ms", @"checkpoint_hash_ms", @"checkpoint_serialized_bytes",
+        @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms"];
+    if (![presented isKindOfClass:NSDictionary.class] || [presented count] > allowed.count) return nil;
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    for (id key in presented) {
+        int64_t value;
+        if (![allowed containsObject:key] || !integerValue(presented[key], 0, INT64_C(9007199254740991), &value)) return nil;
+        values[key] = @(value);
+    }
+    return values;
+}
+
 @interface DSHGuestSessionTransition : NSObject
 @property (nonatomic) uint64_t generation;
 @property (nonatomic) uint64_t guestIdentity;
@@ -40,6 +54,9 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
 @property (nonatomic) uint64_t ackGeneration;
 @property (nonatomic, copy) NSString *ackState;
 @property (nonatomic, copy) NSDictionary *ackCounts;
+@property (nonatomic, copy) NSDictionary *ackDiagnostics;
+@property (nonatomic) uint64_t progressGeneration;
+@property (nonatomic, copy) NSDictionary *progressDiagnostics;
 @property (nonatomic, copy, nullable) NSString *errorCode;
 @end
 
@@ -62,6 +79,8 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
         _desiredState = @"running";
         _ackState = @"none";
         _ackCounts = @{};
+        _ackDiagnostics = @{};
+        _progressDiagnostics = @{};
     }
     return self;
 }
@@ -105,6 +124,9 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     self.ackGeneration = 0;
     self.ackState = @"none";
     self.ackCounts = @{};
+    self.ackDiagnostics = @{};
+    self.progressGeneration = 0;
+    self.progressDiagnostics = @{};
     self.errorCode = nil;
     uint64_t identity = self.guestIdentity;
     [self.condition broadcast];
@@ -157,7 +179,9 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
         @"registered": @(self.guestRegistered), @"generation": @(self.commandGeneration),
         @"desired_state": self.desiredState, @"ack_generation": @(self.ackGeneration), @"ack_state": self.ackState,
         @"transition_pending": @(self.transition != nil), @"poll_pending": @(self.activePoll != nil),
-        @"counts": self.ackCounts, @"error_code": self.errorCode ?: @"none"};
+        @"counts": self.ackCounts, @"diagnostics": self.ackDiagnostics,
+        @"progress_generation": @(self.progressGeneration), @"progress_diagnostics": self.progressDiagnostics,
+        @"error_code": self.errorCode ?: @"none"};
     [self.condition unlock];
     return value;
 }
@@ -166,6 +190,8 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     [self.condition lock];
     self.commandGeneration++;
     self.desiredState = state;
+    self.progressGeneration = 0;
+    self.progressDiagnostics = @{};
     DSHGuestSessionTransition *transition = [DSHGuestSessionTransition new];
     transition.generation = self.commandGeneration;
     transition.guestIdentity = self.guestIdentity;
@@ -200,6 +226,11 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     if (!integerValue(body[@"pid"], 1, INT_MAX, &pid) ||
         (body[@"after_generation"] && !integerValue(body[@"after_generation"], -1, INT64_C(9007199254740991), &after)) ||
         (body[@"wait_ms"] && !integerValue(body[@"wait_ms"], 0, 15000, &wait))) return self.invalid;
+    BOOL hasProgress = body[@"progress_generation"] != nil || body[@"diagnostics"] != nil;
+    int64_t progress = 0;
+    NSDictionary *diagnostics = hasProgress ? phaseDiagnostics(body[@"diagnostics"]) : nil;
+    if (hasProgress && (!body[@"diagnostics"] || !diagnostics ||
+        !integerValue(body[@"progress_generation"], 0, INT64_C(9007199254740991), &progress))) return self.invalid;
     [self.condition lock];
     if (pid != self.managedPID || after > (int64_t)self.commandGeneration) { [self.condition unlock]; return self.stale; }
     if (self.activePoll) {
@@ -211,6 +242,10 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     self.activePoll = poll;
     BOOL first = !self.guestRegistered;
     self.guestRegistered = YES;
+    if (hasProgress && progress == (int64_t)self.commandGeneration && !first) {
+        self.progressGeneration = (uint64_t)progress;
+        self.progressDiagnostics = diagnostics;
+    }
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:wait / 1000.0];
     while (!first && after == (int64_t)self.commandGeneration && pid == self.managedPID &&
            poll.guestIdentity == self.guestIdentity && self.activePoll == poll && wait > 0)
@@ -237,6 +272,8 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     }
     if ([counts[@"released_count"] longLongValue] > [counts[@"writer_count"] longLongValue] ||
         ([state isEqual:@"quiesced"] && ![counts[@"released_count"] isEqual:counts[@"writer_count"]])) return self.invalid;
+    NSDictionary *diagnostics = phaseDiagnostics(body[@"diagnostics"]);
+    if (!diagnostics) return self.invalid;
     NSString *presentedCode = body[@"error_code"];
     NSString *code = [state isEqual:@"failed"] ?
         ([presentedCode isKindOfClass:NSString.class] &&
@@ -252,7 +289,7 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     }
     BOOL duplicate = generation == self.ackGeneration && ![self.ackState isEqual:@"none"];
     if (duplicate) {
-        BOOL identical = [state isEqual:self.ackState] && [counts isEqual:self.ackCounts] &&
+        BOOL identical = [state isEqual:self.ackState] && [counts isEqual:self.ackCounts] && [diagnostics isEqual:self.ackDiagnostics] &&
             (code == self.errorCode || [code isEqual:self.errorCode]);
         [self.condition unlock];
         return identical ? [DSHHostBridgeResponse ok:@{@"generation": @(generation), @"accepted": @YES}] : self.stale;
@@ -260,6 +297,7 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
     self.ackGeneration = generation;
     self.ackState = state;
     self.ackCounts = [counts copy];
+    self.ackDiagnostics = [diagnostics copy];
     self.errorCode = code;
     if (self.transition && !self.transition.resolved) {
         delivery = self.transition;

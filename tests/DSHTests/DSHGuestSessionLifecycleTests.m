@@ -3,6 +3,7 @@
 #import "DSHHostBridge.h"
 #import "DSHHarness.h"
 #import "DSHLogBuffer.h"
+#include <math.h>
 
 // Protocol tests call the actual route handlers. Authentication is tested
 // separately through a real, private loopback bridge below.
@@ -455,5 +456,96 @@
     XCTAssertFalse([json containsString:secret]);
     XCTAssertFalse([DSHHarness.shared.log.diagnosticReport containsString:secret]);
     [self.mainQueue drain];
+}
+- (void)testACKStoresOnlyFiniteWhitelistedPhaseCounters {
+    [self registerPID:101];
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) { XCTAssertTrue(success); }];
+    NSMutableDictionary *ack = [self ackPID:101 generation:self.generation state:@"quiesced"];
+    NSDictionary *diagnostics = @{@"checkpoint_read_ms": @123, @"checkpoint_hash_ms": @2,
+        @"checkpoint_serialized_bytes": @456, @"drain_ms": @3, @"close_ms": @4, @"acquire_ms": @5,
+        @"active_writer_transitions": @0, @"peak_writer_transitions": @2, @"transition_ms": @140};
+    ack[@"diagnostics"] = diagnostics;
+    XCTAssertEqual([self sendACK:ack].status, 200);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], diagnostics);
+    [self.mainQueue drain];
+}
+- (void)testMalformedOrSensitiveDiagnosticsCannotCompleteTransition {
+    [self registerPID:101];
+    __block NSUInteger callbacks = 0;
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) { callbacks++; }];
+    for (id diagnostics in @[@"not a dictionary", @{@"path": @"sensitive"}, @{@"drain_ms": @YES},
+                               @{@"drain_ms": @(-1)}, @{@"drain_ms": @1.5}, @{@"drain_ms": @(INFINITY)},
+                               @{@"drain_ms": @9007199254740992LL}]) {
+        NSMutableDictionary *ack = [self ackPID:101 generation:self.generation state:@"quiesced"];
+        ack[@"diagnostics"] = diagnostics;
+        XCTAssertEqual([self sendACK:ack].status, 400);
+        XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], (@{}));
+        XCTAssertTrue(self.manager.transitionPending);
+    }
+    [self.mainQueue drain]; XCTAssertEqual(callbacks, 0u);
+}
+- (void)testDuplicateACKMustPreserveItsExactDiagnostics {
+    [self registerPID:101];
+    __block NSUInteger callbacks = 0;
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) { callbacks++; }];
+    NSMutableDictionary *ack = [self ackPID:101 generation:self.generation state:@"quiesced"];
+    ack[@"diagnostics"] = @{@"transition_ms": @12};
+    XCTAssertEqual([self sendACK:ack].status, 200);
+    XCTAssertEqual([self sendACK:ack].status, 200);
+    ack[@"diagnostics"] = @{@"transition_ms": @13};
+    XCTAssertEqual([self sendACK:ack].status, 409);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], (@{@"transition_ms": @12}));
+    [self.mainQueue drain]; XCTAssertEqual(callbacks, 1u);
+}
+- (void)testOldDiagnosticsCannotOverwriteCurrentGeneration {
+    [self registerPID:101];
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) {}];
+    NSMutableDictionary *old = [self ackPID:101 generation:self.generation state:@"quiesced"];
+    old[@"diagnostics"] = @{@"transition_ms": @999};
+    [self.manager resumeWithCompletion:^(BOOL success) {}];
+    NSMutableDictionary *current = [self ackPID:101 generation:self.generation state:@"running"];
+    current[@"diagnostics"] = @{@"transition_ms": @8};
+    XCTAssertEqual([self sendACK:current].status, 200);
+    XCTAssertEqual([self sendACK:old].status, 409);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], (@{@"transition_ms": @8}));
+}
+- (void)testNewGuestClearsPreviousGuestPhaseCounters {
+    [self registerPID:101];
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) {}];
+    NSMutableDictionary *ack = [self ackPID:101 generation:self.generation state:@"quiesced"];
+    ack[@"diagnostics"] = @{@"transition_ms": @12};
+    XCTAssertEqual([self sendACK:ack].status, 200);
+    [self.manager managedGuestDidLaunch:102];
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], (@{}));
+}
+- (void)testProgressIsCurrentGenerationMetadataAndCannotAcknowledgeTransition {
+    [self registerPID:101];
+    __block NSUInteger callbacks = 0;
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) { callbacks++; }];
+    uint64_t current = self.generation;
+    NSDictionary *progress = @{@"pid": @101, @"after_generation": @(current), @"wait_ms": @0,
+        @"progress_generation": @(current), @"diagnostics": @{@"drain_ms": @20, @"active_writer_transitions": @2}};
+    XCTAssertEqual([self.manager poll:[self request:progress]].status, 200);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"progress_generation"], @(current));
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"progress_diagnostics"], progress[@"diagnostics"]);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"ack_state"], @"none");
+    XCTAssertTrue(self.manager.transitionPending);
+    [self.mainQueue drain]; XCTAssertEqual(callbacks, 0u);
+    [self.manager resumeWithCompletion:^(BOOL success) {}];
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"progress_diagnostics"], (@{}));
+    XCTAssertEqual([self.manager poll:[self request:progress]].status, 200);
+    XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"progress_diagnostics"], (@{}));
+}
+- (void)testProgressRejectsMissingPairAndSensitiveOrInvalidCounters {
+    [self registerPID:101];
+    for (NSDictionary *extra in @[@{@"progress_generation": @(self.generation)},
+        @{@"diagnostics": @{@"drain_ms": @1}},
+        @{@"progress_generation": @(self.generation), @"diagnostics": @{@"api_key": @"private"}},
+        @{@"progress_generation": @(self.generation), @"diagnostics": @{@"drain_ms": @YES}}]) {
+        NSMutableDictionary *body = [@{@"pid": @101, @"after_generation": @(-1), @"wait_ms": @0} mutableCopy];
+        [body addEntriesFromDictionary:extra];
+        XCTAssertEqual([self.manager poll:[self request:body]].status, 400);
+        XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"progress_diagnostics"], (@{}));
+    }
 }
 @end

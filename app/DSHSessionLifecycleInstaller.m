@@ -9,6 +9,7 @@
 
 __attribute__((visibility("default"))) NSErrorDomain const DSHSessionLifecycleInstallerErrorDomain = @"DSHSessionLifecycleInstaller";
 static NSString *const DSHSessionPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
+static NSString *const DSHWebFetchPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
 static NSUInteger const DSHSessionMaximumFileSize = 4 * 1024 * 1024;
 
 @implementation DSHSessionLifecycleFileInfo
@@ -44,6 +45,17 @@ static BOOL DSHSessionIsHash(id value) {
     if (![value isKindOfClass:NSString.class] || [value length] != 64) return NO;
     return [value rangeOfCharacterFromSet:
         [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location == NSNotFound;
+}
+
+static BOOL DSHPreviousHashesAreValid(id value) {
+    if (!value) return YES;
+    if (![value isKindOfClass:NSArray.class] || [value count] > 8) return NO;
+    NSMutableSet *seen = [NSMutableSet set];
+    for (id hash in value) {
+        if (!DSHSessionIsHash(hash) || [seen containsObject:hash]) return NO;
+        [seen addObject:hash];
+    }
+    return YES;
 }
 
 @interface DSHSessionGuestFile : NSObject <DSHSessionLifecycleFile> {
@@ -129,15 +141,24 @@ static BOOL DSHSessionIsHash(id value) {
 @end
 
 @interface DSHSessionLifecycleInstaller ()
++ (BOOL)installBundledPackage:(DSHVerifiedSystemPackage)package error:(NSError **)error;
 @property (nonatomic, copy) NSDictionary *manifest;
 @property (nonatomic, copy) NSDictionary<NSString *, NSData *> *resources;
 @property (nonatomic) id<DSHSessionLifecycleFilesystem> filesystem;
+@property (nonatomic) DSHVerifiedSystemPackage package;
 @end
 
 @implementation DSHSessionLifecycleInstaller
 + (id<DSHSessionLifecycleFilesystem>)guestFilesystem { return [DSHSessionGuestFilesystem new]; }
 + (BOOL)installBundledPatchWithError:(NSError **)error {
-    NSURL *bundle = [NSBundle.mainBundle URLForResource:@"SessionLifecycle" withExtension:@"bundle"];
+    return [self installBundledPackage:DSHVerifiedSystemPackageSession error:error];
+}
++ (BOOL)installBundledWebFetchPatchWithError:(NSError **)error {
+    return [self installBundledPackage:DSHVerifiedSystemPackageWebFetch error:error];
+}
++ (BOOL)installBundledPackage:(DSHVerifiedSystemPackage)package error:(NSError **)error {
+    BOOL session = package == DSHVerifiedSystemPackageSession;
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : @"WebFetchTransport" withExtension:@"bundle"];
     NSError *underlying = nil;
     NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]
         options:0 error:&underlying] : nil;
@@ -147,15 +168,20 @@ static BOOL DSHSessionIsHash(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    for (NSString *source in @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs"]) {
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-backend-original.js"] : @[@"web-fetch-transport.mjs"];
+    for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
     }
-    return [[[self alloc] initWithManifest:manifest resources:resources filesystem:self.guestFilesystem] installWithError:error];
+    return [[[self alloc] initWithManifest:manifest resources:resources filesystem:self.guestFilesystem package:package] installWithError:error];
 }
 - (instancetype)initWithManifest:(NSDictionary *)manifest resources:(NSDictionary<NSString *,NSData *> *)resources
                       filesystem:(id<DSHSessionLifecycleFilesystem>)filesystem {
-    if ((self = [super init])) { _manifest = [manifest copy]; _resources = [resources copy]; _filesystem = filesystem; }
+    return [self initWithManifest:manifest resources:resources filesystem:filesystem package:DSHVerifiedSystemPackageSession];
+}
+- (instancetype)initWithManifest:(NSDictionary *)manifest resources:(NSDictionary<NSString *,NSData *> *)resources
+                      filesystem:(id<DSHSessionLifecycleFilesystem>)filesystem package:(DSHVerifiedSystemPackage)package {
+    if ((self = [super init])) { _manifest = [manifest copy]; _resources = [resources copy]; _filesystem = filesystem; _package = package; }
     return self;
 }
 
@@ -255,14 +281,18 @@ static BOOL DSHSessionIsHash(id value) {
     if (error) *error = nil;
     if (![self.manifest isKindOfClass:NSDictionary.class] || ![self.resources isKindOfClass:NSDictionary.class] || !self.filesystem)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"installer inputs", nil, nil);
+    if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch)
+        return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package kind", nil, nil);
+    BOOL session = self.package == DSHVerifiedSystemPackageSession;
+    NSString *packagePath = session ? DSHSessionPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
-        ![files isKindOfClass:NSArray.class] || [files count] != 2)
+        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 2 : 1))
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"schema", nil, nil);
-    NSDictionary *allowed = @{
+    NSDictionary *allowed = session ? @{
         @"session-lifecycle.mjs": @"/usr/local/share/dsh/session-lifecycle.mjs",
         @"session-lifecycle-core.mjs": @"/usr/local/share/dsh/session-lifecycle-core.mjs",
-    };
+    } : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *resourcePlans = [NSMutableArray array];
     // Complete all bundle, target and original-source validation before writes.
@@ -271,7 +301,8 @@ static BOOL DSHSessionIsHash(id value) {
             return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"file entry", nil, nil);
         id source = record[@"source"], target = record[@"target"], hash = record[@"sha256"];
         if (![source isKindOfClass:NSString.class] || ![target isKindOfClass:NSString.class] ||
-            ![allowed[source] isEqual:target] || [seen containsObject:source] || !DSHSessionIsHash(hash))
+            ![allowed[source] isEqual:target] || [seen containsObject:source] || !DSHSessionIsHash(hash) ||
+            !DSHPreviousHashesAreValid(record[@"previous_sha256"]))
             return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"file whitelist", nil, nil);
         [seen addObject:source];
         id data = self.resources[source];
@@ -282,25 +313,46 @@ static BOOL DSHSessionIsHash(id value) {
         if (info) {
             NSData *existing = [self readPath:target error:error];
             if (!existing) return NO;
-            if (![DSHSessionSHA256(existing) isEqual:hash])
+            NSString *existingHash = DSHSessionSHA256(existing);
+            if ([existingHash isEqual:hash]) continue;
+            if (![record[@"previous_sha256"] containsObject:existingHash])
                 return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"unrecognized existing controller", target, nil);
-        } else [resourcePlans addObject:@{ @"target": target, @"data": data }];
+            [resourcePlans addObject:@{ @"target": target, @"data": data, @"expected": existingHash,
+                                       @"permissions": @(info.permissions) }];
+        } else [resourcePlans addObject:@{ @"target": target, @"data": data, @"permissions": @0644 }];
     }
     id patch = [patches firstObject];
-    if (![patch isKindOfClass:NSDictionary.class] || ![patch[@"target"] isEqual:DSHSessionPackagePath] ||
+    if (![patch isKindOfClass:NSDictionary.class] || ![patch[@"target"] isEqual:packagePath] ||
         !DSHSessionIsHash(patch[@"original_sha256"]) || !DSHSessionIsHash(patch[@"patched_sha256"]) ||
+        !DSHPreviousHashesAreValid(patch[@"previous_sha256"]) ||
         ![patch[@"replacements"] isKindOfClass:NSArray.class] || ![patch[@"replacements"] count])
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package whitelist", nil, nil);
     DSHSessionLifecycleFileInfo *packageInfo = nil;
-    if (![self validatePath:DSHSessionPackagePath allowMissing:NO info:&packageInfo error:error]) return NO;
-    NSData *original = [self readPath:DSHSessionPackagePath error:error];
+    if (![self validatePath:packagePath allowMissing:NO info:&packageInfo error:error]) return NO;
+    NSData *original = [self readPath:packagePath error:error];
     if (!original) return NO;
     NSString *currentHash = DSHSessionSHA256(original);
     BOOL alreadyPatched = [currentHash isEqual:patch[@"patched_sha256"]];
-    if (!alreadyPatched && ![currentHash isEqual:patch[@"original_sha256"]])
-        return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"unrecognized package hash", DSHSessionPackagePath, nil);
-    NSString *text = [[NSString alloc] initWithData:original encoding:NSUTF8StringEncoding];
-    if (!text) return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"package UTF-8", DSHSessionPackagePath, nil);
+    BOOL recognizedPrevious = [patch[@"previous_sha256"] containsObject:currentHash];
+    if (!alreadyPatched && ![currentHash isEqual:patch[@"original_sha256"]] && !recognizedPrevious)
+        return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"unrecognized package hash", packagePath, nil);
+    NSData *base = original;
+    id baseRecord = patch[@"original_source"];
+    // An upgrade starts from a pinned copy of the original system module;
+    // never try to reverse arbitrary source or trust an unknown installed hash.
+    if (baseRecord || [patch[@"previous_sha256"] count]) {
+        if (!session || ![baseRecord isKindOfClass:NSDictionary.class] ||
+            ![baseRecord[@"source"] isEqual:@"session-backend-original.js"] ||
+            ![baseRecord[@"sha256"] isEqual:patch[@"original_sha256"]])
+            return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"upgrade base whitelist", nil, nil);
+        NSData *canonical = self.resources[@"session-backend-original.js"];
+        if (![canonical isKindOfClass:NSData.class] || canonical.length > DSHSessionMaximumFileSize ||
+            ![DSHSessionSHA256(canonical) isEqual:patch[@"original_sha256"]])
+            return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"upgrade base hash", nil, nil);
+        if (!alreadyPatched) base = canonical;
+    }
+    NSString *text = [[NSString alloc] initWithData:base encoding:NSUTF8StringEncoding];
+    if (!text) return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"package UTF-8", packagePath, nil);
     // Validate every replacement even on the idempotent path.
     for (id replacement in patch[@"replacements"]) {
         if (![replacement isKindOfClass:NSDictionary.class] || ![replacement[@"find"] isKindOfClass:NSString.class] ||
@@ -313,7 +365,7 @@ static BOOL DSHSessionIsHash(id value) {
         NSString *find = replacement[@"find"];
         NSUInteger count = [text componentsSeparatedByString:find].count - 1;
         if (count != [replacement[@"count"] unsignedIntegerValue])
-            return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"replacement count", DSHSessionPackagePath, nil);
+            return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"replacement count", packagePath, nil);
         NSUInteger replacementLength = [replacement[@"replace"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
         NSUInteger findLength = [find lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
         NSUInteger textLength = [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
@@ -324,12 +376,17 @@ static BOOL DSHSessionIsHash(id value) {
     }
     NSData *patched = alreadyPatched ? original : [text dataUsingEncoding:NSUTF8StringEncoding];
     if (patched.length > DSHSessionMaximumFileSize || ![DSHSessionSHA256(patched) isEqual:patch[@"patched_sha256"]])
-        return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"patched package hash", DSHSessionPackagePath, nil);
+        return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"patched package hash", packagePath, nil);
     for (NSDictionary *plan in resourcePlans)
-        if (![self atomicInstall:plan[@"data"] atPath:plan[@"target"] expectedHash:nil permissions:0644 error:error]) return NO;
+        if (![self atomicInstall:plan[@"data"] atPath:plan[@"target"] expectedHash:plan[@"expected"]
+                    permissions:[plan[@"permissions"] unsignedIntegerValue] error:error]) return NO;
+    // Recheck even resources that were already current at preflight. Installing
+    // a peer must not commit a package whose import changed in the meantime.
+    for (NSDictionary *record in files)
+        if (![self validateExpectedHash:record[@"sha256"] atPath:record[@"target"] error:error]) return NO;
     // The package rename is the final commit point: its new import can only
     // become visible after both controller files were verified and fsynced.
-    if (!alreadyPatched && ![self atomicInstall:patched atPath:DSHSessionPackagePath expectedHash:currentHash
+    if (!alreadyPatched && ![self atomicInstall:patched atPath:packagePath expectedHash:currentHash
                                   permissions:packageInfo.permissions error:error]) return NO;
     return YES;
 }

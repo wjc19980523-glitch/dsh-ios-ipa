@@ -11,6 +11,13 @@ typedef NS_ENUM(NSInteger, DSHSessionLifecycleInstallerError) {
     DSHSessionLifecycleInstallerIntegrityFailure,
 };
 
+/// Each kind has a compiled-in package and resource whitelist. A manifest
+/// cannot turn this installer into an arbitrary guest-file writer.
+typedef NS_ENUM(NSUInteger, DSHVerifiedSystemPackage) {
+    DSHVerifiedSystemPackageSession,
+    DSHVerifiedSystemPackageWebFetch,
+};
+
 typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
     DSHSessionLifecycleFileRegular,
     DSHSessionLifecycleFileDirectory,
@@ -51,6 +58,7 @@ typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
 /// current set to the guest root task and before launching any Harness process.
 /// NO is a boot failure; callers must not start Harness after an install error.
 + (BOOL)installBundledPatchWithError:(NSError **)error;
++ (BOOL)installBundledWebFetchPatchWithError:(NSError **)error;
 
 /// Exposed for real-fakefs integration tests as well as fault adapters. This
 /// returns an adapter, not a mounted filesystem or an admission permit.
@@ -58,6 +66,10 @@ typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
 - (instancetype)initWithManifest:(NSDictionary *)manifest
                        resources:(NSDictionary<NSString *, NSData *> *)resources
                       filesystem:(id<DSHSessionLifecycleFilesystem>)filesystem;
+- (instancetype)initWithManifest:(NSDictionary *)manifest
+                       resources:(NSDictionary<NSString *, NSData *> *)resources
+                      filesystem:(id<DSHSessionLifecycleFilesystem>)filesystem
+                         package:(DSHVerifiedSystemPackage)package;
 - (BOOL)installWithError:(NSError **)error;
 @end
 

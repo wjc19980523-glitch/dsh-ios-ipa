@@ -24,7 +24,7 @@ def normal_result():
                 residual_processes=[], pipe_eof=True, signal_errors=[])
 
 
-PASSES = ['PASS case-' + str(index) for index in range(1, 15)]
+PASSES = ['PASS case-' + str(index) for index in range(1, checker.EXPECTED_TESTS + 1)]
 OUTPUT = '\n'.join(PASSES + [checker.RECEIPT]) + '\n'
 
 
@@ -44,10 +44,10 @@ class SessionGuestCheckerTests(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertNotIn('ASSERTIONS_VERIFIED', done.stdout)
 
-    def test_normal_fourteen_unique_passes_and_one_native_receipt_pass(self):
+    def test_normal_eighteen_unique_passes_and_one_native_receipt_pass(self):
         done = self.cli(normal_result(), OUTPUT)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(), 'SESSION_LEASE_GUEST_ASSERTIONS_VERIFIED=14')
+        self.assertEqual(done.stdout.strip(), 'SESSION_LEASE_GUEST_ASSERTIONS_VERIFIED=18')
 
     def test_crlf_output_from_a_complete_guest_passes(self):
         self.assertTrue(checker.verify(normal_result(), OUTPUT.replace('\n', '\r\n')))
@@ -68,8 +68,9 @@ class SessionGuestCheckerTests(unittest.TestCase):
                 self.assertRejected(dict(normal_result(), **changes), OUTPUT)
 
     def test_partial_suite_and_malformed_receipts_fail(self):
-        for output in ['\n'.join(PASSES[:13] + [checker.RECEIPT]) + '\n',
-                       OUTPUT.replace('14/14', '13/14'),
+        for output in ['\n'.join(PASSES[:-1] + [checker.RECEIPT]) + '\n',
+                       OUTPUT.replace('18/18', '17/18'),
+                       '\n'.join(PASSES[:14] + [checker.RECEIPT.replace('18/18', '14/14')]) + '\n',
                        OUTPUT.replace('native_flock_executed=true', 'native_flock_executed=false'),
                        OUTPUT.replace('cycles=100', 'cycles=99'),
                        OUTPUT.replace(checker.RECEIPT, checker.RECEIPT + ' trailing')]:
@@ -77,7 +78,7 @@ class SessionGuestCheckerTests(unittest.TestCase):
                 self.assertRejected(normal_result(), output)
 
     def test_duplicate_or_extra_receipts_fail_even_if_one_is_correct(self):
-        for duplicate in [checker.RECEIPT, checker.RECEIPT.replace('14/14', '13/14'),
+        for duplicate in [checker.RECEIPT, checker.RECEIPT.replace('18/18', '17/18'),
                           ' ' + checker.RECEIPT]:
             with self.subTest(duplicate=duplicate):
                 self.assertRejected(normal_result(), OUTPUT + duplicate + '\n')

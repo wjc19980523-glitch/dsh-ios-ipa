@@ -8,8 +8,9 @@ const source = original.replace(/^import .*;\n/gm, '').replace(/^export \{.*\};\
   .replaceAll('export function ', 'function ');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { resolve, promise }; };
-function setup(configured = true, managed = true) {
+function setup(configured = true, managed = true, manualTime = false) {
   const requests = [], timers = new Set(); let actions = [], inTransition = 0, maxTransition = 0;
+  let now = 0;
   const backend = {
     closed: false, released: false, suspendBarrier: undefined, resumeFailure: undefined,
     dshLifecycleBeginQuiesce() { this.closed = true; actions.push('seal'); },
@@ -30,11 +31,15 @@ function setup(configured = true, managed = true) {
   const context = vm.createContext({
     process: { pid: 22, env: configured ? { ...(managed ? { DSH_SESSION_LIFECYCLE: '1' } : {}), DSH_HOST_BRIDGE_URL: 'http://127.0.0.1:7777', DSH_HOST_BRIDGE_TOKEN: 'test-secret-not-logged' } : {} },
     backend, AbortController, queueMicrotask, lifecycleErrorCode,
-    setTimeout(callback, delay) { const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay); timers.add(timer); return timer; },
-    clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
+    setTimeout(callback, delay) {
+      const timer = manualTime ? { callback, at: now + delay }
+        : setTimeout(() => { timers.delete(timer); callback(); }, delay);
+      timers.add(timer); return timer;
+    },
+    clearTimeout(timer) { timers.delete(timer); if (!manualTime) clearTimeout(timer); },
     fetch(url, options) {
       const result = deferred();
-      requests.push({ path: new URL(url).pathname, body: JSON.parse(options.body), options, result, answered: false });
+      requests.push({ path: new URL(url).pathname, body: JSON.parse(options.body), options, result, answered: false, at: now });
       options.signal.addEventListener('abort', () => result.resolve({ ok: false, status: 499, json: async () => ({}) }), { once: true });
       return result.promise;
     },
@@ -44,7 +49,7 @@ function setup(configured = true, managed = true) {
   function unregister() { vm.runInContext('unregisterSessionBackend(backend)', context); }
   async function next(path, predicate = () => true) {
     for (let index = 0; index < 100; index += 1) {
-      const found = requests.find(item => !item.answered && item.path === path && predicate(item.body));
+      const found = requests.find(item => !item.answered && !item.options.signal.aborted && item.path === path && predicate(item.body));
       if (found) return found;
       await turn();
     }
@@ -62,9 +67,18 @@ function setup(configured = true, managed = true) {
     register(); await desired(0, 'running'); const ack = await next('/v1/lifecycle/ack');
     assert.equal(ack.body.state, 'running'); answer(ack, {}); await turn(); actions = [];
   }
+  async function advance(milliseconds) {
+    assert(manualTime); const target = now + milliseconds;
+    for (let remaining = 1000; remaining > 0; remaining -= 1) {
+      const timer = [...timers].filter(item => item.at <= target).sort((a, b) => a.at - b.at)[0];
+      if (!timer) { now = target; await turn(); return; }
+      now = timer.at; timers.delete(timer); timer.callback(); await turn();
+    }
+    assert.fail('controlled timer loop did not settle');
+  }
   return { backend, requests, register, unregister, next, answer, desired, bootstrap,
-    actions: () => actions, maxTransition: () => maxTransition,
-    cleanup() { for (const timer of timers) clearTimeout(timer); timers.clear(); } };
+    actions: () => actions, maxTransition: () => maxTransition, advance, now: () => now,
+    cleanup() { if (!manualTime) for (const timer of timers) clearTimeout(timer); timers.clear(); } };
 }
 let passed = 0;
 async function test(name, operation) { await operation(); passed += 1; console.log('PASS ' + name); }
@@ -85,6 +99,7 @@ await test('first registration and every control request use the supervised pid 
     test.register(); const poll = await test.next('/v1/lifecycle/poll');
     assert.equal(poll.body.pid, 22); assert.equal(poll.body.after_generation, -1);
     assert.equal(poll.options.method, 'POST'); assert.equal(poll.options.headers.authorization, 'Bearer test-secret-not-logged');
+    assert.equal(poll.options.headers.connection, 'close'); assert.equal(poll.body.wait_ms, 3000);
     test.answer(poll, { protocol: 1, generation: 0, state: 'running' });
     const ack = await test.next('/v1/lifecycle/ack'); assert.equal(ack.body.pid, 22); assert.equal(ack.body.generation, 0);
     assert.equal(ack.body.state, 'running'); assert.equal(ack.options.headers.authorization, 'Bearer test-secret-not-logged');
@@ -214,6 +229,95 @@ await test('last backend disposal aborts pending control requests and ends that 
     test.register(); await turn();
     const fresh = test.requests.find((item, index) => index >= count && item.path.endsWith('/poll'));
     assert(fresh); assert.equal(fresh.body.after_generation, -1);
+  } finally { test.cleanup(); }
+});
+await test('a blackholed pre-suspend poll expires in five seconds and a fresh generation resumes within fifteen', async () => {
+  const test = setup(true, true, true);
+  try {
+    await test.bootstrap(); await test.desired(1, 'quiescing');
+    test.answer(await test.next('/v1/lifecycle/ack', body => body.generation === 1), {}); await turn();
+    const blackholed = await test.next('/v1/lifecycle/poll');
+    await test.advance(4999); assert.equal(blackholed.options.signal.aborted, false);
+    assert.equal(test.backend.closed, true); assert.equal(test.backend.released, true);
+    await test.advance(1); assert.equal(blackholed.options.signal.aborted, true);
+    // Model the old TCP stream delivering a late response after cancellation.
+    blackholed.answered = true;
+    await test.advance(1000);
+    const fresh = await test.next('/v1/lifecycle/poll');
+    assert.equal(fresh.at, 6000); assert.equal(fresh.options.headers.connection, 'close');
+    test.answer(fresh, { protocol: 1, generation: 2, state: 'running' }); await turn();
+    const resumed = await test.next('/v1/lifecycle/ack', body => body.generation === 2);
+    assert.equal(resumed.body.state, 'running'); assert(test.now() < 15000);
+    test.answer(resumed, {}); test.answer(blackholed, { protocol: 1, generation: 1, state: 'quiescing' }); await turn();
+    assert.equal(test.backend.closed, false); assert.equal(test.backend.released, false);
+    assert.equal(test.actions().filter(item => item === 'resume').length, 1); assert.equal(test.maxTransition(), 1);
+  } finally { test.cleanup(); }
+});
+await test('a permanently unavailable control bridge cannot release paused write admission or invent an ACK', async () => {
+  const test = setup(true, true, true);
+  try {
+    await test.bootstrap(); await test.desired(1, 'quiescing');
+    test.answer(await test.next('/v1/lifecycle/ack', body => body.generation === 1), {}); await turn();
+    const pending = await test.next('/v1/lifecycle/poll');
+    await test.advance(15000);
+    assert.equal(pending.options.signal.aborted, true);
+    assert.equal(test.backend.closed, true); assert.equal(test.backend.released, true);
+    assert.equal(test.requests.filter(item => item.path.endsWith('/ack') && item.body.generation > 1).length, 0);
+    assert.equal(test.actions().filter(item => item === 'resume').length, 0); assert.equal(test.maxTransition(), 1);
+  } finally { test.cleanup(); }
+});
+await test('a blackholed ACK retries the exact terminal payload without repeating storage', async () => {
+  const test = setup(true, true, true);
+  try {
+    await test.bootstrap(); await test.desired(1, 'quiescing');
+    const blackholed = await test.next('/v1/lifecycle/ack', body => body.generation === 1);
+    const body = JSON.stringify(blackholed.body);
+    await test.advance(5000); assert.equal(blackholed.options.signal.aborted, true);
+    await test.advance(1000);
+    await test.desired(1, 'quiescing');
+    blackholed.answered = true;
+    const retry = await test.next('/v1/lifecycle/ack', item => item.generation === 1);
+    assert.equal(JSON.stringify(retry.body), body);
+    assert.equal(test.actions().filter(item => item === 'suspend').length, 1);
+  } finally { test.cleanup(); }
+});
+await test('diagnostic ACKs whitelist integer timings and omit arbitrary backend fields', async () => {
+  const test = setup();
+  try {
+    await test.bootstrap();
+    test.backend.dshLifecycleSnapshot = () => ({ writer_count: 1, released_count: 1, pending_events: 0,
+      diagnostics: { checkpoint_read_ms: 17, checkpoint_hash_ms: 2, checkpoint_serialized_bytes: 4096,
+        transition_ms: 23, active_writer_transitions: 0, peak_writer_transitions: 2,
+        secret_token: 'never copy', acquire_ms: -1, close_ms: 0.5 } });
+    await test.desired(1, 'quiescing');
+    const ack = await test.next('/v1/lifecycle/ack', item => item.generation === 1);
+    assert.equal(ack.body.diagnostics.checkpoint_read_ms, 17);
+    assert.equal(ack.body.diagnostics.checkpoint_serialized_bytes, 4096);
+    assert.equal(ack.body.diagnostics.secret_token, undefined); assert.equal(ack.body.diagnostics.acquire_ms, undefined);
+    assert.equal(ack.body.diagnostics.close_ms, undefined); assert.equal(JSON.stringify(ack.body).includes('never copy'), false);
+  } finally { test.cleanup(); }
+});
+await test('progress polls carry a detached current-generation counter snapshot and leave terminal ACK immutable', async () => {
+  const test = setup();
+  try {
+    const metrics = { checkpoint_read_ms: 3, active_writer_transitions: 2, peak_writer_transitions: 2,
+      private_path: '/must-never-be-copied' };
+    test.backend.dshLifecycleSnapshot = () => ({ writer_count: 1, released_count: Number(test.backend.released),
+      pending_events: 0, diagnostics: metrics });
+    await test.bootstrap();
+    const previous = await test.next('/v1/lifecycle/poll');
+    assert.equal(previous.body.progress_generation, 0);
+    assert.equal(previous.body.diagnostics.checkpoint_read_ms, 3);
+    assert.equal(previous.body.diagnostics.private_path, undefined);
+    await test.desired(1, 'quiescing');
+    const terminal = await test.next('/v1/lifecycle/ack', body => body.generation === 1);
+    const original = JSON.stringify(terminal.body);
+    metrics.checkpoint_read_ms = 9;
+    const current = await test.next('/v1/lifecycle/poll');
+    assert.equal(current.body.progress_generation, 1);
+    assert.equal(previous.body.progress_generation, 0); assert.equal(previous.body.diagnostics.checkpoint_read_ms, 3);
+    assert.equal(JSON.stringify(terminal.body), original);
+    assert.equal(JSON.stringify(current.body).includes('must-never'), false);
   } finally { test.cleanup(); }
 });
 console.log(`SESSION_LEASE_CONTROLLER_TESTS ${passed}/${passed}; transport=controlled`);

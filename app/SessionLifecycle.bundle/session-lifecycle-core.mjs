@@ -58,7 +58,29 @@ export class SessionLifecycleAdmission {
   }
 }
 
+// Independent writers retain their own storage chain and lease. A terminal
+// result waits for every started writer, including after another writer fails;
+// first-rejection Promise.all would acknowledge while native locks still move.
+// Two concurrent writers bound memory/CPU pressure on the translated guest.
+export async function settleLifecycleWriters(writers, operation) {
+  const queue = [...writers].filter(writer => writer !== null);
+  const failures = [];
+  let next = 0;
+  async function worker() {
+    while (next < queue.length) {
+      const writer = queue[next++];
+      try { await operation(writer); }
+      catch (error) { failures.push(error); }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(2, queue.length) }, () => worker()));
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'session lifecycle writer transitions failed');
+}
+
 export function lifecycleErrorCode(error) {
+  if (error instanceof AggregateError && error.errors.length > 0)
+    return lifecycleErrorCode(error.errors[0]);
   if (error?.code === 'DSH_SESSION_CHECKPOINT_CHANGED') return 'checkpoint_changed';
   if (error?.code === 'DSH_SESSION_NOT_MATERIALIZED') return 'not_materialized';
   if (error?.name === 'SessionAlreadyOwnedError') return 'ownership_conflict';

@@ -382,4 +382,185 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], customized);
     XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestPackage]);
 }
+
+- (void)prepareKnownPreviousRelease {
+    NSData *previousPackage = DSHInstallerTestData(@"export const state = 'previous release';\n");
+    NSData *previousController = DSHInstallerTestData(@"previous controller\n");
+    NSData *previousCore = DSHInstallerTestData(@"previous core\n");
+    self.filesystem.files[DSHInstallerTestPackage] = previousPackage;
+    self.filesystem.files[DSHInstallerTestController] = previousController;
+    self.filesystem.files[DSHInstallerTestCore] = previousCore;
+    NSMutableDictionary *manifest = [self.manifest mutableCopy];
+    NSMutableDictionary *patch = [manifest[@"patches"][0] mutableCopy];
+    patch[@"previous_sha256"] = @[DSHInstallerTestHash(previousPackage)];
+    patch[@"original_source"] = @{@"source": @"session-backend-original.js", @"sha256": DSHInstallerTestHash(self.original)};
+    manifest[@"patches"] = @[patch];
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSDictionary *file in manifest[@"files"]) {
+        NSMutableDictionary *entry = [file mutableCopy];
+        entry[@"previous_sha256"] = @[DSHInstallerTestHash(self.filesystem.files[file[@"target"]])];
+        [files addObject:entry];
+    }
+    manifest[@"files"] = files;
+    self.manifest = manifest;
+    NSMutableDictionary *resources = [self.resources mutableCopy];
+    resources[@"session-backend-original.js"] = self.original;
+    self.resources = resources;
+}
+- (void)testKnownPreviousReleaseUpgradesFromPinnedOriginalAndIsIdempotent {
+    [self prepareKnownPreviousRelease];
+    NSError *error = nil;
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestPackage]));
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+}
+- (void)testInterruptedKnownUpgradeResumesWithoutTouchingUserFiles {
+    [self prepareKnownPreviousRelease];
+    NSData *previousPackage = self.filesystem.files[DSHInstallerTestPackage];
+    [self setFailure:@"rename" target:DSHInstallerTestCore];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], previousPackage);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestController], self.resources[@"session-lifecycle.mjs"]);
+    XCTAssertTrue([self install:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
+}
+- (void)testUpgradeRejectsCorruptCanonicalBaseBeforeAnyWrite {
+    [self prepareKnownPreviousRelease];
+    NSMutableDictionary *resources = [self.resources mutableCopy];
+    resources[@"session-backend-original.js"] = DSHInstallerTestData(@"not the pinned source");
+    self.resources = resources;
+    NSDictionary *before = [self.filesystem.files copy];
+    NSError *error = nil;
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIntegrityFailure);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testPreviousReleaseRequiresCanonicalBaseAndRejectsUnknownPackage {
+    [self prepareKnownPreviousRelease];
+    NSMutableDictionary *manifest = [self.manifest mutableCopy];
+    NSMutableDictionary *patch = [manifest[@"patches"][0] mutableCopy];
+    [patch removeObjectForKey:@"original_source"];
+    manifest[@"patches"] = @[patch];
+    NSDictionary *valid = self.manifest;
+    self.manifest = manifest;
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    self.manifest = valid;
+    self.filesystem.files[DSHInstallerTestPackage] = DSHInstallerTestData(@"unrecognized release");
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testUpgradeDoesNotOverwriteControllerChangedAfterPreflight {
+    [self prepareKnownPreviousRelease];
+    NSData *changed = DSHInstallerTestData(@"externally changed controller");
+    __weak DSHInstallerMemoryFilesystem *filesystem = self.filesystem;
+    self.filesystem.onCreate = ^{ filesystem.files[DSHInstallerTestController] = changed; };
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestController], changed);
+    XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestPackage]);
+}
+- (void)testUpgradeRejectsMalformedPreviousHashLists {
+    [self prepareKnownPreviousRelease];
+    NSDictionary *valid = self.manifest;
+    for (id hashes in @[@"not an array", @[@"invalid"], @[DSHInstallerTestHash(self.original), DSHInstallerTestHash(self.original)]]) {
+        NSMutableDictionary *manifest = [valid mutableCopy];
+        NSMutableDictionary *patch = [manifest[@"patches"][0] mutableCopy];
+        patch[@"previous_sha256"] = hashes;
+        manifest[@"patches"] = @[patch]; self.manifest = manifest;
+        XCTAssertFalse([self install:nil]);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    }
+}
+- (void)prepareWebTransportFixture {
+    NSString *package = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
+    NSString *resource = @"/usr/local/share/dsh/web-fetch-transport.mjs";
+    NSString *parent = package.stringByDeletingLastPathComponent;
+    while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+    self.filesystem.files[package] = self.original;
+    NSData *module = DSHInstallerTestData(@"export const webTransport = 1;\n");
+    self.resources = @{@"web-fetch-transport.mjs": module};
+    NSMutableDictionary *patch = [self.manifest[@"patches"][0] mutableCopy];
+    patch[@"target"] = package;
+    self.manifest = @{@"schema": @1, @"patches": @[patch], @"files": @[
+        @{@"source": @"web-fetch-transport.mjs", @"target": resource, @"sha256": DSHInstallerTestHash(module)}]};
+}
+- (BOOL)installWeb:(NSError **)error {
+    return [[[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest resources:self.resources
+        filesystem:self.filesystem package:DSHVerifiedSystemPackageWebFetch] installWithError:error];
+}
+- (void)testWebTransportHasItsOwnFixedWhitelistAndCommitOrder {
+    [self prepareWebTransportFixture];
+    NSError *error = nil;
+    XCTAssertTrue([self installWeb:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[@"/usr/local/share/dsh/web-fetch-transport.mjs",
+        @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js"]));
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([self installWeb:&error]);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+}
+- (void)testSessionAndWebManifestsCannotCrossPackageWhitelists {
+    XCTAssertFalse([self installWeb:nil]);
+    [self prepareWebTransportFixture];
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testWebFailurePreservesOriginalPackageAndRetryCompletes {
+    [self prepareWebTransportFixture];
+    NSString *package = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
+    NSString *resource = @"/usr/local/share/dsh/web-fetch-transport.mjs";
+    [self setFailure:@"rename" target:resource];
+    XCTAssertFalse([self installWeb:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[package], self.original);
+    XCTAssertTrue([self installWeb:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[package], self.patched);
+}
+- (void)testUnknownPackageKindNeverWrites {
+    DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest
+        resources:self.resources filesystem:self.filesystem package:(DSHVerifiedSystemPackage)99];
+    XCTAssertFalse([installer installWithError:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testActualBundledManifestInstallsItsPinnedCanonicalPackage {
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:@"SessionLifecycle" withExtension:@"bundle"];
+    XCTAssertNotNil(bundle);
+    NSData *manifestData = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]];
+    XCTAssertNotNil(manifestData);
+    if (!manifestData) return;
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+    NSDictionary *patch = [manifest[@"patches"] firstObject];
+    NSDictionary *base = patch[@"original_source"];
+    XCTAssertEqualObjects(base[@"source"], @"session-backend-original.js");
+    NSMutableDictionary *resources = [NSMutableDictionary dictionary];
+    for (NSString *name in @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-backend-original.js"]) {
+        NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:name]];
+        XCTAssertNotNil(data, @"missing actual bundle resource %@", name);
+        if (!data) return;
+        resources[name] = data;
+    }
+    XCTAssertEqualObjects(DSHInstallerTestHash(resources[@"session-backend-original.js"]), patch[@"original_sha256"]);
+    self.manifest = manifest; self.resources = resources;
+    self.filesystem.files[DSHInstallerTestPackage] = resources[@"session-backend-original.js"];
+    NSError *error = nil;
+    XCTAssertTrue([self install:&error], @"actual bundled manifest failed: %@", error);
+    XCTAssertEqualObjects(DSHInstallerTestHash(self.filesystem.files[DSHInstallerTestPackage]), patch[@"patched_sha256"]);
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([self install:&error], @"actual bundled idempotence failed: %@", error);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+}
+- (void)testAlreadyCurrentPeerChangedDuringInstallPreventsPackageCommit {
+    [self primeControllers];
+    [self.filesystem.files removeObjectForKey:DSHInstallerTestCore];
+    NSData *changed = DSHInstallerTestData(@"changed current peer during core install");
+    __weak DSHInstallerMemoryFilesystem *filesystem = self.filesystem;
+    self.filesystem.onCreate = ^{ filesystem.files[DSHInstallerTestController] = changed; };
+    XCTAssertFalse([self install:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.original);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestController], changed);
+    XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestPackage]);
+}
 @end

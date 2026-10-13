@@ -6,10 +6,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { createServer } from 'node:http';
 import { Context } from '/usr/local/lib/node_modules/@deepseek-ai/cordis/lib/index.js';
 import SessionStore from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session/lib/index.js';
 import JsonlPersistence from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js';
 import { SessionPersistenceCorruptionError } from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence/lib/index.js';
+import { tryLockExclusive } from '/usr/local/lib/node_modules/@deepseek-ai/node-addon-system/lib/flock.js';
 
 assert.equal(process.arch, 'arm64'); assert.equal(process.platform, 'linux');
 const root = await mkdtemp('/tmp/dsh-session-lease.');
@@ -34,6 +36,40 @@ async function fixture({ malformedTitle = false } = {}) {
   return { backend, handle, session, log, lock };
 }
 async function resume(backend) { await backend.dshLifecycleResume(); backend.dshLifecycleOpen(); }
+async function fourWriterFixture(compression = 'none') {
+  const ctx = new Context(); const sessions = new SessionStore(ctx);
+  const configuration = { root: root + '/four-writers-' + compression };
+  // Exercise the actual default by omitting the option for the zstd branch.
+  if (compression === 'none') configuration.compression = 'none';
+  const backend = new JsonlPersistence(ctx, configuration); assert.equal(backend.compression, compression);
+  const writers = [];
+  for (const bytes of [4096, 16384, 65536, 131072]) {
+    const session = sessions.prepare('four-writer-' + randomBytes(6).toString('hex'), { meta: { cwd: root + '/workspace' } });
+    const handle = await backend.create(session.header); const events = [];
+    for (let row = 0; row < 16; row += 1)
+      events.push(session.append('session/title', { title: randomBytes(bytes / 16).toString('hex'), messageSeqs: [], source: { kind: 'user' } }));
+    await handle.append(events); await handle.flush();
+    const log = backend.locate(handle.header).path;
+    assert.equal((await handle.read()).events.length, 16);
+    writers.push({ session, handle, log, lock: log.slice(0, log.lastIndexOf('/')) + '/session.lock',
+      bytes: (await readFile(log)).length });
+  }
+  return { backend, writers };
+}
+async function nativeLockIsHeld(lock) {
+  const file = await open(lock, 'r+');
+  try { await tryLockExclusive(file.fd); return false; }
+  catch (error) { if (error.code === 'EAGAIN' || error.code === 'EWOULDBLOCK') return true; throw error; }
+  finally { await file.close(); }
+}
+async function waitAtMost(promise, milliseconds) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('test-owned control recovery exceeded its deadline')), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
 async function contender(lock) {
   const code = `import {open} from 'node:fs/promises';
     import {tryLockExclusive} from '/usr/local/lib/node_modules/@deepseek-ai/node-addon-system/lib/flock.js';
@@ -231,6 +267,123 @@ try {
     await assert.rejects(backend.flush(), error => error.code === 'DSH_SESSION_LIFECYCLE_FAILED');
     assert.equal(hash(await readFile(log)), hash(bytes)); assert.equal(handle.dshPausedEvents.length, 1);
     assert.equal(backend.tracker.writers.get(handle.id), handle); assert.equal(backend.dshLifecycleAdmission.state, 'failed');
+  });
+  for (const compression of ['none', 'zstd']) {
+  await test(`four real ${compression} writers validate complete differently sized logs and regain native exclusion`, async () => {
+    const { backend, writers } = await fourWriterFixture(compression);
+    assert(writers.every(item => item.bytes > 0));
+    const original = await Promise.all(writers.map(item => readFile(item.log).then(hash)));
+    for (const item of writers) assert.equal(await nativeLockIsHeld(item.lock), true);
+    const parallel = backend.dshLifecycleForEachWriter;
+    // Baseline uses the same production validation and native storage, with
+    // only independent-writer scheduling changed to the preceding serial form.
+    backend.dshLifecycleForEachWriter = async function (operation) {
+      for (const writer of this.tracker.writers.values()) if (writer !== null) await operation(writer);
+    };
+    await backend.dshLifecycleSuspend(); const serial = { ...backend.dshLifecycleSnapshot().diagnostics };
+    await resume(backend); backend.dshLifecycleForEachWriter = parallel;
+    await backend.dshLifecycleSuspend(); const bounded = { ...backend.dshLifecycleSnapshot().diagnostics };
+    assert.equal(bounded.peak_writer_transitions, 2); assert.equal(bounded.active_writer_transitions, 0);
+    assert.equal(backend.dshLifecycleSnapshot().released_count, 4);
+    for (const item of writers) {
+      assert.equal(await nativeLockIsHeld(item.lock), false);
+      item.handle.enqueueLive(item.session.append('session/title', { title: 'paused ordered event', messageSeqs: [], source: { kind: 'user' } }), () => {});
+    }
+    assert.deepEqual(await Promise.all(writers.map(item => readFile(item.log).then(hash))), original);
+    await resume(backend);
+    for (const item of writers) {
+      assert.equal(await nativeLockIsHeld(item.lock), true);
+      assert.equal(backend.tracker.writers.get(item.handle.id), item.handle);
+      assert.deepEqual((await item.handle.read()).events.map(event => event.seq), Array.from({ length: 17 }, (_, seq) => seq));
+      await item.handle.close();
+    }
+    // Metadata only. The receipt does not make a timing guarantee for unknown
+    // real-device histories; CI preserves the measured scheduling comparison.
+    console.log('SESSION_LEASE_FOUR_WRITER_TIMINGS ' + JSON.stringify({
+      encoding: compression, physical_log_bytes: writers.map(item => item.bytes), serial, bounded,
+    }));
+  });
+  }
+  await test('one real writer checkpoint failure waits for all others and preserves the failed native lock', async () => {
+    const { backend, writers } = await fourWriterFixture();
+    const read = backend.requireStoredLog; let releaseLast; const last = new Promise(resolve => { releaseLast = resolve; });
+    let entered = 0, settled = false;
+    backend.requireStoredLog = async function (id, ...arguments_) {
+      entered += 1;
+      if (id === writers[0].handle.id) throw Object.assign(new Error('injected checkpoint read fault'), { code: 'EIO' });
+      if (id === writers[3].handle.id) await last;
+      return read.call(this, id, ...arguments_);
+    };
+    const pause = backend.dshLifecycleSuspend();
+    const failure = assert.rejects(pause, error => error.code === 'EIO').then(() => { settled = true; });
+    while (entered < 4) await turn();
+    assert.equal(settled, false); assert.equal(await nativeLockIsHeld(writers[0].lock), true);
+    assert.equal(await nativeLockIsHeld(writers[3].lock), true); releaseLast(); await failure;
+    assert.equal(backend.dshLifecycleSnapshot().diagnostics.active_writer_transitions, 0);
+    assert.equal(backend.dshLifecycleSnapshot().released_count, 3);
+    for (const item of writers.slice(1)) assert.equal(await nativeLockIsHeld(item.lock), false);
+    assert.equal(backend.dshLifecycleAdmission.state, 'failed'); assert.equal(writers[0].handle.dshCheckpoint, undefined);
+    backend.requireStoredLog = read;
+    await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_STORAGE_UNCERTAIN');
+    assert.equal(await nativeLockIsHeld(writers[0].lock), true);
+    // Only these test-owned temporary descriptors are closed, with no replay.
+    for (const item of writers) await item.handle.lease?.release();
+  });
+  await test('real loopback control TCP blackhole aborts and restores the same writer within fifteen seconds', async () => {
+    const { backend, handle, lock } = await fixture();
+    const saved = { url: process.env.DSH_HOST_BRIDGE_URL, token: process.env.DSH_HOST_BRIDGE_TOKEN,
+      enabled: process.env.DSH_SESSION_LIFECYCLE };
+    const token = 'temporary-loopback-test-token'; const requests = []; let polls = 0, blackholedAt = 0;
+    let resolvePaused, resolveRunning, rejectRunning;
+    const paused = new Promise(resolve => { resolvePaused = resolve; });
+    const running = new Promise((resolve, reject) => { resolveRunning = resolve; rejectRunning = reject; });
+    let blackholeClosed = false, controller;
+    const server = createServer((request, response) => {
+      if (request.headers.authorization !== 'Bearer ' + token) { response.writeHead(401); response.end(); return; }
+      let bytes = '';
+      request.on('data', chunk => { bytes += chunk; });
+      request.on('end', () => {
+        try {
+          const body = JSON.parse(bytes);
+          requests.push({ path: request.url, generation: body.generation, wait_ms: body.wait_ms, connection: request.headers.connection });
+          const answer = payload => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(payload)); };
+          if (request.url === '/v1/lifecycle/poll') {
+            polls += 1;
+            if (polls === 1) answer({ protocol: 1, generation: 1, state: 'quiescing' });
+            else if (polls === 2) {
+              blackholedAt = Date.now(); response.on('close', () => { blackholeClosed = true; });
+              // The accepted TCP request receives no headers or response body.
+            } else if (polls === 3) answer({ protocol: 1, generation: 2, state: 'running' });
+            else { /* left pending for disposal to abort */ }
+          } else if (request.url === '/v1/lifecycle/ack') {
+            if (body.generation === 1) { assert.equal(body.state, 'quiesced'); assert.equal(body.released_count, 1); resolvePaused(); }
+            else if (body.generation === 2) { assert.equal(body.state, 'running'); assert.equal(body.released_count, 0); resolveRunning(Date.now()); }
+            else assert.fail('unexpected control acknowledgement');
+            answer({ accepted: true });
+          } else { response.writeHead(404); response.end(); }
+        } catch (error) { rejectRunning(error); response.writeHead(500); response.end(); }
+      });
+    });
+    try {
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+      process.env.DSH_HOST_BRIDGE_URL = 'http://127.0.0.1:' + server.address().port;
+      process.env.DSH_HOST_BRIDGE_TOKEN = token; process.env.DSH_SESSION_LIFECYCLE = '1';
+      controller = await import('file:///usr/local/share/dsh/session-lifecycle.mjs?native-blackhole-control');
+      controller.registerSessionBackend(backend); await waitAtMost(paused, 15000);
+      assert.equal(await nativeLockIsHeld(lock), false);
+      const resumedAt = await waitAtMost(running, 15000);
+      assert(blackholedAt > 0); assert(blackholeClosed); assert(resumedAt - blackholedAt < 15000);
+      assert.equal(backend.tracker.writers.get(handle.id), handle); assert.equal(await nativeLockIsHeld(lock), true);
+      assert(requests.every(item => item.connection === 'close'));
+      assert(requests.filter(item => item.path.endsWith('/poll')).every(item => item.wait_ms === 3000));
+      console.log('SESSION_LEASE_REAL_CONTROL_RECOVERY_MS ' + (resumedAt - blackholedAt));
+    } finally {
+      controller?.unregisterSessionBackend(backend); server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+      for (const [name, value] of [['DSH_HOST_BRIDGE_URL', saved.url], ['DSH_HOST_BRIDGE_TOKEN', saved.token], ['DSH_SESSION_LIFECYCLE', saved.enabled]])
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await handle.close();
   });
   await test('configuration, credential, workspace and prior-session sentinels remain byte-identical', async () => {
     const final = await Promise.all(sentinels.map(async name => hash(await readFile(root + '/' + name)))); assert.deepEqual(final, initial);

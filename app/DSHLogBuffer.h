@@ -43,6 +43,17 @@ extern DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification;
 /// Persistent buffers retain at most the ten most recent launches. Ordinary
 /// in-memory buffers return their current lines only.
 @property (nonatomic, readonly, copy) NSString *diagnosticReport;
+@property (nonatomic, readonly, copy) NSString *diagnosticSummary;
+@property (nonatomic, readonly) NSUInteger retainedIncidentCount;
+/// A real, metadata-only UTF-8 attachment. No automatic upload. The caller
+/// removes this URL after the share sheet finishes; stale attachments are
+/// also pruned on the next export. Returns nil on an actual write failure.
+- (nullable NSURL *)writeDiagnosticAttachmentWithError:(NSError * _Nullable * _Nullable)error;
+/// Injectable owned temporary destination for isolated export tests.
+- (nullable NSURL *)writeDiagnosticAttachmentInDirectory:(NSURL *)directory error:(NSError * _Nullable * _Nullable)error;
+/// Explicitly clears this buffer's local launch reports and pinned incidents;
+/// never touches guest files, preferences, credentials or workspaces.
+- (void)clearRetainedDiagnostics;
 
 /// Process identity is shared by every buffer in this process and never reused
 /// after a system termination. It contains no guest credentials.

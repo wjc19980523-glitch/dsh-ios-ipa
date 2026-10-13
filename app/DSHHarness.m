@@ -10,6 +10,7 @@
 #import "DSHGuestLauncher.h"
 #import "DSHStartupMetrics.h"
 #import "DSHGuestSessionLifecycle.h"
+#import "DSHLifecycleDiagnostics.h"
 
 // Both exported to match DSHHarness.h: DSHTests reads the state name and
 // observes the notification through the app's own symbol, not a copy.
@@ -399,6 +400,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     self.guestPid = pid;
     if (sessionManaged)
         sessionGuestIdentity = [DSHGuestSessionLifecycle.shared managedGuestDidLaunch:pid];
+    [DSHLifecycleDiagnostics recordEvent:@"guestStarted" harness:self];
     [self.log append:[NSString stringWithFormat:@"[dsh-ios] guest pid %d", pid]];
 
     // One supervisor for the whole boot. It only reports success once the
@@ -546,6 +548,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
 - (void)processExitedWithCode:(int)exitCode generation:(NSUInteger)generation {
     if (generation != self.launchGeneration)
         return; // an older incarnation; already superseded
+    [DSHLifecycleDiagnostics recordEvent:@"guestExited" harness:self];
     self.guestPid = 0;
     // Retire this launch before cancelling its probe so the probe's handler
     // does not count the same death as a startup timeout too.
@@ -570,6 +573,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     self.consecutiveCrashes++;
     [self recordPersistentFailure];
     if (self.consecutiveCrashes > self.maxConsecutiveCrashes) {
+        [DSHLifecycleDiagnostics recordEvent:@"healthRestartLimit" harness:self];
         [self.log append:@"[dsh-ios] giving up after repeated failures"];
         self.state = DSHHarnessStateFailed;
         return;
@@ -720,6 +724,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
         if (operation.recoveringFromResume) limit = MAX((NSUInteger)2, limit);
         BOOL conclusive = result.indicatesDeadServer && !operation.recoveringFromResume;
         if (conclusive || operation.failures >= limit) {
+            [DSHLifecycleDiagnostics recordEvent:@"healthRestartLimit" harness:self];
             [self.log append:[NSString stringWithFormat:@"[dsh-ios] health check failed %lu time(s) (%@); restarting server",
                               (unsigned long)operation.failures, result.summary]];
             NSUInteger launch = self.launchGeneration;

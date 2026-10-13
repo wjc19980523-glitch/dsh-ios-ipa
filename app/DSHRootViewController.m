@@ -4,6 +4,7 @@
 //
 
 #import "DSHRootViewController.h"
+#import "DSHLifecycleDiagnostics.h"
 #import "DSHHarness.h"
 #import "DSHBootCoordinator.h"
 #import "DSHLogViewController.h"
@@ -680,6 +681,7 @@ static const NSTimeInterval kActivityIndicatorVisible = 6;
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    [DSHLifecycleDiagnostics recordEvent:@"webContentProcessTerminated" harness:DSHHarness.shared];
     [DSHHarness.shared.log append:@"[dsh-ios] web content process terminated; reloading"];
     self.pageLoaded = NO;
     if (DSHHarness.shared.state == DSHHarnessStateReady)

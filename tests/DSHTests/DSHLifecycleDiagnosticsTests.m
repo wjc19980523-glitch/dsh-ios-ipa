@@ -42,17 +42,19 @@
     NSFileManager *fm = NSFileManager.defaultManager;
     XCTAssertTrue([fm createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:nil]);
     NSURL *prior = [directory URLByAppendingPathComponent:@"launch-20000101-prior.log"];
-    XCTAssertTrue([@"host_launch_id: prior-launch\n[lifecycle] sceneDidEnterBackground\n" writeToURL:prior atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    NSString *priorIdentity = NSUUID.UUID.UUIDString;
+    NSString *previous = [NSString stringWithFormat:@"host_launch_id: %@\n[lifecycle] {\"event\":\"sceneDidEnterBackground\",\"host_launch_id\":\"%@\"}\n", priorIdentity, priorIdentity];
+    XCTAssertTrue([previous writeToURL:prior atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     @autoreleasepool {
         DSHLogBuffer *log = [[DSHLogBuffer alloc] initPersistentWithCapacity:8 directory:directory];
-        [log append:@"[lifecycle] new-launch-boundary"];
+        [log append:@"[lifecycle] {\"event\":\"quiesceRequested\",\"cycle\":1}"];
         [log synchronizePersistentDiagnostics];
-        XCTAssertTrue([log.diagnosticReport containsString:@"prior-launch"]);
-        XCTAssertTrue([log.diagnosticReport containsString:@"new-launch-boundary"]);
+        XCTAssertTrue([log.diagnosticReport containsString:priorIdentity]);
+        XCTAssertTrue([log.diagnosticReport containsString:@"quiesceRequested"]);
     }
     DSHLogBuffer *nextReader = [[DSHLogBuffer alloc] initPersistentWithCapacity:8 directory:directory];
     XCTAssertTrue([nextReader.diagnosticReport containsString:@"sceneDidEnterBackground"]);
-    XCTAssertTrue([nextReader.diagnosticReport containsString:@"new-launch-boundary"]);
+    XCTAssertTrue([nextReader.diagnosticReport containsString:@"quiesceRequested"]);
     // Only this test's UUID directory is removed.
     XCTAssertTrue([fm removeItemAtURL:directory error:nil]);
 }

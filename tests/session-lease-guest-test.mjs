@@ -12,6 +12,7 @@ import SessionStore from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session/l
 import JsonlPersistence from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js';
 import { SessionPersistenceCorruptionError } from '/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence/lib/index.js';
 import { tryLockExclusive } from '/usr/local/lib/node_modules/@deepseek-ai/node-addon-system/lib/flock.js';
+import { invalidatePreparedCheckpoint, hasPreparedCheckpoint } from '/usr/local/share/dsh/session-checkpoint-core.mjs';
 
 assert.equal(process.arch, 'arm64'); assert.equal(process.platform, 'linux');
 const root = await mkdtemp('/tmp/dsh-session-lease.');
@@ -309,6 +310,14 @@ try {
   }
   await test('one real writer checkpoint failure waits for all others and preserves the failed native lock', async () => {
     const { backend, writers } = await fourWriterFixture();
+    // This case injects the full-decoder failure path. The four fixture reads
+    // now prepare clean proofs, so explicitly invalidate that optimization
+    // before installing the existing requireStoredLog fault/barrier hooks.
+    for (const item of writers) {
+      assert.equal(hasPreparedCheckpoint(item.handle), true);
+      invalidatePreparedCheckpoint(backend, item.handle.id);
+      assert.equal(hasPreparedCheckpoint(item.handle), false);
+    }
     const read = backend.requireStoredLog; let releaseLast; const last = new Promise(resolve => { releaseLast = resolve; });
     let entered = 0, settled = false;
     backend.requireStoredLog = async function (id, ...arguments_) {

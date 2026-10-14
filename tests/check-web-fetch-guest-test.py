@@ -34,7 +34,11 @@ for key, value in [
     except AssertionError: count += 1
     else: raise AssertionError(f'gate accepted invalid execution evidence: {key}')
 for text in [output + 'AssertionError: failed\n', output.replace('PASS fixture 1\n', ''),
-             output.replace('WEB_FETCH_ARM_GUEST_COMPLETED=1', ''), output + 'PASS fixture 0\n']:
+             output.replace('WEB_FETCH_ARM_GUEST_COMPLETED=1', ''), output + 'PASS fixture 0\n',
+             output + 'Error [ERR_FIXTURE]: fatal cleanup after printed completion\n',
+             output + 'TypeError: fatal cleanup after printed completion\n',
+             output + 'RangeError[ERR_FIXTURE]: fatal cleanup after printed completion\n',
+             output + '[UnhandledPromiseRejection: cleanup failed after printed completion]\n']:
     try: module.check(result, text)
     except AssertionError: count += 1
     else: raise AssertionError('gate accepted incomplete or failing output')

@@ -36,6 +36,8 @@ def check(result, output):
     assert text.count(f'web fetch transport: {EXPECTED}/{EXPECTED} passed; real sockets/TLS; policy dependency adapters; 100 close cycles') == 1
     assert len(re.findall(r'^WEB_FETCH_ARM_GUEST_COMPLETED=1$', text, re.M)) == 1, 'missing unique normal-completion receipt'
     assert not re.search(r'AssertionError|SyntaxError|uncaughtException|^FAIL ', text, re.M), 'guest contains failed assertion'
+    assert not re.search(r'^\[?(?:[\w$]*Error|DOMException|UnhandledPromiseRejection)(?:\s*\[[^\r\n\]]+\])?:',
+        text, re.M), 'guest contains an uncaught error, including after completion'
     return passed
 
 

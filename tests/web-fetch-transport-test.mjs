@@ -447,9 +447,12 @@ try {
       assert.equal(diagnostic(lines[0]).web_result, 'success'); assert(diagnostic(lines[0]).web_duration_ms >= 10);
     });
   });
-  console.log(`web fetch transport: ${passes}/${passes} passed; real sockets/TLS; policy dependency adapters; 100 close cycles`);
-  if (process.env.DSH_WEB_GUEST === '1') console.log('WEB_FETCH_ARM_GUEST_COMPLETED=1');
 } finally {
   for (const socket of active) socket.destroy();
-  await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
+  await Promise.all(servers.map(server => new Promise((resolve, reject) =>
+    server.close(error => error ? reject(error) : resolve()))));
 }
+// Completion means every assertion and the normal resource cleanup settled.
+// A cleanup exception or timeout must never leave a premature success receipt.
+console.log(`web fetch transport: ${passes}/${passes} passed; real sockets/TLS; policy dependency adapters; 100 close cycles`);
+if (process.env.DSH_WEB_GUEST === '1') console.log('WEB_FETCH_ARM_GUEST_COMPLETED=1');

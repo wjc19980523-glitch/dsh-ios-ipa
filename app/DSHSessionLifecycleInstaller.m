@@ -168,7 +168,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-backend-original.js"] : @[@"web-fetch-transport.mjs"];
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : @[@"web-fetch-transport.mjs"];
     for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
@@ -287,11 +287,12 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     NSString *packagePath = session ? DSHSessionPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
-        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 2 : 1))
+        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : 1))
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"schema", nil, nil);
     NSDictionary *allowed = session ? @{
         @"session-lifecycle.mjs": @"/usr/local/share/dsh/session-lifecycle.mjs",
         @"session-lifecycle-core.mjs": @"/usr/local/share/dsh/session-lifecycle-core.mjs",
+        @"session-checkpoint-core.mjs": @"/usr/local/share/dsh/session-checkpoint-core.mjs",
     } : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *resourcePlans = [NSMutableArray array];

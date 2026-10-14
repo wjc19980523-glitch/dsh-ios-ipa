@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / 'app/SessionLifecycle.bundle'
@@ -330,15 +331,19 @@ def build(source):
 '''
     replace('\tflush() {\n\t\treturn this.tracker.flushAll();\n\t}',
             '\tflush() {\n\t\treturn this.dshLifecycleAdmission.run(() => this.tracker.flushAll());\n\t}\n' + methods)
+    prepared_spec = importlib.util.spec_from_file_location('session_prepared_patches', ROOT / 'tests/session-lease-prepared-patches.py')
+    prepared_module = importlib.util.module_from_spec(prepared_spec)
+    prepared_spec.loader.exec_module(prepared_module)
+    prepared_module.append_prepared_patches(replace)
     output = patched.encode('utf-8')
     files = []
-    for name in ('session-lifecycle.mjs', 'session-lifecycle-core.mjs'):
+    for name in ('session-lifecycle.mjs', 'session-lifecycle-core.mjs', 'session-checkpoint-core.mjs'):
         data = (BUNDLE / name).read_bytes().replace(b'\r\n', b'\n')
         (BUNDLE / name).write_bytes(data)
         prior = {'session-lifecycle.mjs': '70f27344fc561c4bfd2d4dfb79858db2f1f88ee2a52bbfa73e0c666012467205',
                  'session-lifecycle-core.mjs': '2bd6ca8154328b01d7e4c437413a85a3066a6dd6234b9a920e7287a330236ea6'}
         files.append({'source': name, 'target': '/usr/local/share/dsh/' + name,
-                      'sha256': hashlib.sha256(data).hexdigest(), 'previous_sha256': [prior[name]]})
+                      'sha256': hashlib.sha256(data).hexdigest(), 'previous_sha256': [prior[name]] if name in prior else []})
     manifest = {'schema': 1, 'rootfs_sha256': ROOTFS_SHA,
                 'patches': [{'target': TARGET, 'original_sha256': ORIGINAL_SHA,
                   'patched_sha256': hashlib.sha256(output).hexdigest(), 'replacements': replacements,

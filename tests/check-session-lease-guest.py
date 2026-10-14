@@ -18,8 +18,8 @@ def zero(value):
     return type(value) is int and value == 0
 
 
-def verify(result, text):
-    if not isinstance(result, dict) or not isinstance(text, str):
+def execution_ok(result, phase):
+    if not isinstance(result, dict):
         return False
     required = {'phase', 'host_pid', 'wait_status', 'exit_kind', 'exit_code', 'signal',
                 'timed_out', 'completed_before_deadline', 'helper_exit_status',
@@ -27,8 +27,8 @@ def verify(result, text):
                 'residual_processes', 'pipe_eof', 'signal_errors'}
     if not required.issubset(result):
         return False
-    execution_ok = (
-        result['phase'] == 'session-lease-native'
+    return (
+        result['phase'] == phase
         and type(result['host_pid']) is int and result['host_pid'] > 0
         and zero(result['wait_status']) and result['exit_kind'] == 'exited'
         and zero(result['exit_code']) and result['signal'] is None
@@ -37,6 +37,11 @@ def verify(result, text):
         and result['runner_error'] is None and result['signal_errors'] == []
         and result['descendants_at_exit'] == [] and result['residual_processes'] == []
         and result['pipe_eof'] is True)
+
+
+def verify(result, text):
+    if not isinstance(text, str) or not execution_ok(result, 'session-lease-native'):
+        return False
     lines = text.splitlines()
     passes = [line for line in lines if re.match(r'^\s*PASS\b', line)]
     names = [line.removeprefix('PASS ').strip() for line in passes]
@@ -50,7 +55,7 @@ def verify(result, text):
             r'AssertionError|uncaughtException|unhandledRejection|'
             r'^\s*FAIL\b|^\s*(?:[A-Za-z][A-Za-z0-9_.]*Error|Error)(?:\s*\[[^\]\n]+\])?:',
             text, re.M))
-    return execution_ok and output_ok
+    return output_ok
 
 
 def main():

@@ -187,7 +187,7 @@ try {
   });
   for (const mutation of ['foreign-append', 'foreign-truncate', 'foreign-replace']) {
     await test(`resume rejects ${mutation} without overwriting the changed log or dropping retained events`, async () => {
-      const { backend, handle, session, log } = await fixture(); const original = await readFile(log);
+      const { backend, handle, session, log, lock } = await fixture(); const original = await readFile(log);
       await backend.dshLifecycleSuspend();
       if (mutation === 'foreign-append') {
         const other = new JsonlPersistence(new Context(), { root: root + '/sessions', compression: 'none' });
@@ -202,9 +202,12 @@ try {
       handle.enqueueLive(retained, () => {}); const foreign = await readFile(log);
       await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_CHECKPOINT_CHANGED');
       assert.equal(hash(await readFile(log)), hash(foreign)); assert.equal(handle.dshPausedEvents.length, 1);
-      await backend.dshLifecycleSuspend(); assert.equal(hash(await readFile(log)), hash(foreign));
-      // Restore only this test-owned temporary artifact for orderly cleanup.
-      await writeFile(log, original); await resume(backend); await backend.flush(); await handle.close();
+      await assert.rejects(backend.dshLifecycleSuspend(), error => error.code === 'DSH_SESSION_CHECKPOINT_CHANGED');
+      assert.equal(hash(await readFile(log)), hash(foreign)); assert.equal(handle.dshPausedEvents.length, 1);
+      assert.equal((await contender(lock)).exitCode, 23);
+      // Explicit normal close of the test-owned native descriptor only. Never
+      // restore foreign data or authorize production writes after a mismatch.
+      await handle.lease.release(); assert.equal((await contender(lock)).exitCode, 0);
     });
   }
   await test('an uncheckpointed real-storage drain error retains its batch and native exclusion without replay', async () => {

@@ -49,6 +49,8 @@ on:
       - "tests/guest_snapshot.py"
       - "tests/check-bridge-refusal.py"
       - "tests/check-session-lease-guest*.py"
+      - "tests/session-lease-*"
+      - "tests/check-session-lease-prepared-guest*.py"
       - "tests/service-events.mjs"
       - "tests/stub-bridge.mjs"
       - "tests/mock-deepseek.mjs"
@@ -469,16 +471,23 @@ jobs:
           node tests/session-lease-test.mjs build/session-lease-original.js 2>&1 | tee cilogs-verify/session-algorithm.log
           node tests/session-lease-controller-test.mjs 2>&1 | tee cilogs-verify/session-controller.log
           node --jitless tests/session-lease-transport-test.mjs 2>&1 | tee cilogs-verify/session-control-tcp.log
+          python3 tests/session-lease-prepared-host-test.py 2>&1 | tee cilogs-verify/session-prepared-host.log
 
       - name: Real guest session receipt and exit-evidence checker regressions
         run: |
           set -euo pipefail
           python3 tests/check-session-lease-guest-test.py 2>&1 | tee cilogs-verify/session-native-checker.log
+          python3 tests/check-session-lease-prepared-guest-test.py 2>&1 | tee cilogs-verify/session-prepared-checker.log
 
       - name: Real guest session leases and 100 suspend/resume cycles
         run: |
           set -euo pipefail
           bash tests/session-lease-guest-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/session-native-guest.log
+
+      - name: Prepared checkpoints real safety and large none/default-zstd histories (four independent 90-second commands)
+        run: |
+          set -euo pipefail
+          bash tests/session-lease-prepared-guest-test.sh build/root.tar.gz 2>&1 | tee cilogs-verify/session-prepared-guest.log
 
       - name: Web transport strict guest receipt checker regressions
         run: |
@@ -587,6 +596,10 @@ jobs:
             build/session-lease-guest.*/session-native.log
             build/session-lease-guest.*/service-events.jsonl
             build/session-lease-guest.*/current-phase
+            build/session-lease-prepared.*/guest-diagnostics/
+            build/session-lease-prepared.*/prepared-*.log
+            build/session-lease-prepared.*/service-events.jsonl
+            build/session-lease-prepared.*/current-phase
             build/web-fetch-guest.*/guest-diagnostics/
             build/web-fetch-guest.*/web-native.log
             build/web-fetch-guest.*/web-install.log

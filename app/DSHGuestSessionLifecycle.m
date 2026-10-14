@@ -14,7 +14,8 @@ static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *re
 static NSDictionary *phaseDiagnostics(id presented) {
     if (!presented) return @{};
     NSArray *allowed = @[@"checkpoint_read_ms", @"checkpoint_hash_ms", @"checkpoint_serialized_bytes",
-        @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms"];
+        @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms",
+        @"prepared_verified_count", @"background_full_decode_count", @"raw_verified_bytes"];
     if (![presented isKindOfClass:NSDictionary.class] || [presented count] > allowed.count) return nil;
     NSMutableDictionary *values = [NSMutableDictionary dictionary];
     for (id key in presented) {

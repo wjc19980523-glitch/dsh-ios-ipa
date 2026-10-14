@@ -42,7 +42,8 @@ function snapshot() {
   const diagnostics = {};
   const fields = ['checkpoint_read_ms', 'checkpoint_hash_ms', 'checkpoint_serialized_bytes',
     'drain_ms', 'close_ms', 'acquire_ms', 'active_writer_transitions',
-    'peak_writer_transitions', 'transition_ms'];
+    'peak_writer_transitions', 'transition_ms', 'prepared_verified_count',
+    'background_full_decode_count', 'raw_verified_bytes'];
   for (const backend of backends) {
     const current = backend.dshLifecycleSnapshot();
     for (const key of Object.keys(result)) result[key] += current[key];

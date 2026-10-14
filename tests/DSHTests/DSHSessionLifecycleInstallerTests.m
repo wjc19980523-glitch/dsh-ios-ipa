@@ -6,6 +6,7 @@
 static NSString *const DSHInstallerTestPackage = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
 static NSString *const DSHInstallerTestController = @"/usr/local/share/dsh/session-lifecycle.mjs";
 static NSString *const DSHInstallerTestCore = @"/usr/local/share/dsh/session-lifecycle-core.mjs";
+static NSString *const DSHInstallerTestCheckpoint = @"/usr/local/share/dsh/session-checkpoint-core.mjs";
 
 static NSData *DSHInstallerTestData(NSString *text) { return [text dataUsingEncoding:NSUTF8StringEncoding]; }
 static NSString *DSHInstallerTestHash(NSData *data) {
@@ -83,7 +84,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
         _createdPaths = [NSMutableArray array];
         _renamedTargets = [NSMutableArray array];
         _removedPaths = [NSMutableArray array];
-        for (NSString *path in @[DSHInstallerTestPackage, DSHInstallerTestController, DSHInstallerTestCore]) {
+        for (NSString *path in @[DSHInstallerTestPackage, DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestCheckpoint]) {
             NSString *parent = path.stringByDeletingLastPathComponent;
             while (parent.length > 1) { [_directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
         }
@@ -170,6 +171,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     self.resources = @{
         @"session-lifecycle.mjs": DSHInstallerTestData(@"import './session-lifecycle-core.mjs';\n"),
         @"session-lifecycle-core.mjs": DSHInstallerTestData(@"export const core = 1;\n"),
+        @"session-checkpoint-core.mjs": DSHInstallerTestData(@"export const checkpoint = 1;\n"),
     };
     self.manifest = @{
         @"schema": @1,
@@ -184,6 +186,8 @@ static NSString *DSHInstallerTestHash(NSData *data) {
                @"sha256": DSHInstallerTestHash(self.resources[@"session-lifecycle.mjs"]) },
             @{ @"source": @"session-lifecycle-core.mjs", @"target": DSHInstallerTestCore,
                @"sha256": DSHInstallerTestHash(self.resources[@"session-lifecycle-core.mjs"]) },
+            @{ @"source": @"session-checkpoint-core.mjs", @"target": DSHInstallerTestCheckpoint,
+               @"sha256": DSHInstallerTestHash(self.resources[@"session-checkpoint-core.mjs"]) },
         ],
     };
     // These are synthetic bytes, never a real API key or a user's filesystem.
@@ -211,6 +215,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
 - (void)primeControllers {
     self.filesystem.files[DSHInstallerTestController] = self.resources[@"session-lifecycle.mjs"];
     self.filesystem.files[DSHInstallerTestCore] = self.resources[@"session-lifecycle-core.mjs"];
+    self.filesystem.files[DSHInstallerTestCheckpoint] = self.resources[@"session-checkpoint-core.mjs"];
 }
 - (void)setFailure:(NSString *)operation target:(NSString *)target {
     self.filesystem.failureOperation = operation;
@@ -222,12 +227,12 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertTrue([self install:&error], @"%@", error);
     XCTAssertNil(error);
     XCTAssertEqualObjects(self.filesystem.renamedTargets,
-        (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestPackage]));
+        (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestCheckpoint, DSHInstallerTestPackage]));
     XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
     NSUInteger writes = self.filesystem.writeCalls;
     XCTAssertTrue([self install:&error], @"%@", error);
     XCTAssertEqual(self.filesystem.writeCalls, writes);
-    XCTAssertEqual(self.filesystem.createdPaths.count, 3u);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 4u);
 }
 - (void)testUnknownPackageDoesNotWriteAnyFile {
     self.filesystem.files[DSHInstallerTestPackage] = DSHInstallerTestData(@"user customized or newer package");
@@ -259,7 +264,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     self.filesystem.files[DSHInstallerTestPackage] = self.patched;
     NSError *error = nil;
     XCTAssertTrue([self install:&error], @"%@", error);
-    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore]));
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestCheckpoint]));
     self.resources = @{};
     XCTAssertFalse([self install:&error]);
     XCTAssertEqual(error.code, DSHSessionLifecycleInstallerIntegrityFailure);
@@ -283,7 +288,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSMutableDictionary *schema = [self.manifest mutableCopy];
     schema[@"schema"] = @2;
     NSMutableDictionary *duplicate = [self.manifest mutableCopy];
-    duplicate[@"files"] = @[self.manifest[@"files"][0], self.manifest[@"files"][0]];
+    duplicate[@"files"] = @[self.manifest[@"files"][0], self.manifest[@"files"][0], self.manifest[@"files"][2]];
     NSMutableDictionary *malformed = [self.manifest mutableCopy];
     NSMutableDictionary *patch = [malformed[@"patches"][0] mutableCopy];
     patch[@"replacements"] = @[@{ @"find": @"", @"replace": @"x", @"count": @1 }];
@@ -398,7 +403,8 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSMutableArray *files = [NSMutableArray array];
     for (NSDictionary *file in manifest[@"files"]) {
         NSMutableDictionary *entry = [file mutableCopy];
-        entry[@"previous_sha256"] = @[DSHInstallerTestHash(self.filesystem.files[file[@"target"]])];
+        NSData *previous = self.filesystem.files[file[@"target"]];
+        if (previous) entry[@"previous_sha256"] = @[DSHInstallerTestHash(previous)];
         [files addObject:entry];
     }
     manifest[@"files"] = files;
@@ -412,7 +418,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSError *error = nil;
     XCTAssertTrue([self install:&error], @"%@", error);
     XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestPackage], self.patched);
-    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestPackage]));
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[DSHInstallerTestController, DSHInstallerTestCore, DSHInstallerTestCheckpoint, DSHInstallerTestPackage]));
     NSUInteger writes = self.filesystem.writeCalls;
     XCTAssertTrue([self install:&error], @"%@", error);
     XCTAssertEqual(self.filesystem.writeCalls, writes);
@@ -536,7 +542,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSDictionary *base = patch[@"original_source"];
     XCTAssertEqualObjects(base[@"source"], @"session-backend-original.js");
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
-    for (NSString *name in @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-backend-original.js"]) {
+    for (NSString *name in @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"]) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:name]];
         XCTAssertNotNil(data, @"missing actual bundle resource %@", name);
         if (!data) return;

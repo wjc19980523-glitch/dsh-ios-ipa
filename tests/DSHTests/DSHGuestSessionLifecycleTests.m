@@ -463,7 +463,8 @@
     NSMutableDictionary *ack = [self ackPID:101 generation:self.generation state:@"quiesced"];
     NSDictionary *diagnostics = @{@"checkpoint_read_ms": @123, @"checkpoint_hash_ms": @2,
         @"checkpoint_serialized_bytes": @456, @"drain_ms": @3, @"close_ms": @4, @"acquire_ms": @5,
-        @"active_writer_transitions": @0, @"peak_writer_transitions": @2, @"transition_ms": @140};
+        @"active_writer_transitions": @0, @"peak_writer_transitions": @2, @"transition_ms": @140,
+        @"prepared_verified_count": @4, @"background_full_decode_count": @0, @"raw_verified_bytes": @12000};
     ack[@"diagnostics"] = diagnostics;
     XCTAssertEqual([self sendACK:ack].status, 200);
     XCTAssertEqualObjects(self.manager.diagnosticSnapshot[@"diagnostics"], diagnostics);

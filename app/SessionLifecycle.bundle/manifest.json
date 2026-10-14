@@ -5,7 +5,7 @@
     {
       "target": "/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
       "original_sha256": "0845707017acc2b4a8a75eab2244fa3fd88587b8094ab32014321dce7ca1e31b",
-      "patched_sha256": "29361395a83ef323fcb5fc9355c8b293508fda94c253d78f17fd9d72e89fe536",
+      "patched_sha256": "857c962c14847b3b1dbb9e3abc85ed9c12b8ee829ec808a7b3774ed7ee33c386",
       "replacements": [
         {
           "find": "import z from \"@deepseek-ai/schemastery\";",
@@ -91,6 +91,151 @@
           "find": "\tflush() {\n\t\treturn this.tracker.flushAll();\n\t}",
           "replace": "\tflush() {\n\t\treturn this.dshLifecycleAdmission.run(() => this.tracker.flushAll());\n\t}\n\n\t// These hooks retain the exact logical handle owned by Agent teardown.\n\tdshLifecycleBeginQuiesce() {\n\t\tthis.dshLifecycleAdmission.close();\n\t\tfor (const handle of this.tracker.openHandles) {\n\t\t\tif (handle.batchTimer !== void 0) clearTimeout(handle.batchTimer);\n\t\t\thandle.batchTimer = void 0;\n\t\t}\n\t}\n\tdshLifecycleSnapshot() {\n\t\tlet writer_count = 0, released_count = 0, pending_events = 0;\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer === null) continue;\n\t\t\twriter_count += 1;\n\t\t\tif (writer.dshCheckpoint !== void 0 && writer.lease === void 0) released_count += 1;\n\t\t\tpending_events += writer.buffered.length + writer.dshPausedEvents.length;\n\t\t}\n\t\treturn { writer_count, released_count, pending_events, diagnostics: { ...this.dshLifecycleDiagnostics } };\n\t}\n\tdshLifecycleFail() { this.dshLifecycleAdmission.fail(); }\n\tdshLifecycleResetDiagnostics() {\n\t\tthis.dshLifecycleDiagnostics = {\n\t\t\tcheckpoint_read_ms: 0, checkpoint_hash_ms: 0, checkpoint_serialized_bytes: 0,\n\t\t\tdrain_ms: 0, close_ms: 0, acquire_ms: 0, active_writer_transitions: 0,\n\t\t\tpeak_writer_transitions: 0, transition_ms: 0\n\t\t};\n\t}\n\tasync dshLifecycleTimed(field, operation) {\n\t\tconst started = Date.now();\n\t\ttry { return await operation(); }\n\t\tfinally { this.dshLifecycleDiagnostics[field] += Math.max(0, Date.now() - started); }\n\t}\n\tasync dshLifecycleForEachWriter(operation) {\n\t\tawait settleLifecycleWriters(this.tracker.writers.values(), async writer => {\n\t\t\tconst diagnostics = this.dshLifecycleDiagnostics;\n\t\t\tdiagnostics.active_writer_transitions += 1;\n\t\t\tdiagnostics.peak_writer_transitions = Math.max(diagnostics.peak_writer_transitions, diagnostics.active_writer_transitions);\n\t\t\ttry { await operation(writer); }\n\t\t\tfinally { diagnostics.active_writer_transitions -= 1; }\n\t\t});\n\t}\n\tdshLifecycleFingerprint(stored) {\n\t\tconst started = Date.now();\n\t\tconst serialized = JSON.stringify({\n\t\t\theader: stored.meta, events: stored.events,\n\t\t\tinheritedEventCount: stored.inheritedEventCount,\n\t\t\ttornTruncateTo: stored.tornTruncateTo,\n\t\t\trecoveredTail: stored.recoveredTail\n\t\t});\n\t\tconst fingerprint = createHash(\"sha256\").update(serialized).digest(\"hex\");\n\t\tif (this.dshLifecycleDiagnostics !== void 0) {\n\t\t\tthis.dshLifecycleDiagnostics.checkpoint_hash_ms += Math.max(0, Date.now() - started);\n\t\t\tthis.dshLifecycleDiagnostics.checkpoint_serialized_bytes += Buffer.byteLength(serialized);\n\t\t}\n\t\treturn fingerprint;\n\t}\n\tasync dshLifecycleSuspend() {\n\t\tthis.dshLifecycleResetDiagnostics();\n\t\tconst started = Date.now();\n\t\tthis.dshLifecycleBeginQuiesce();\n\t\ttry {\n\t\tawait this.dshLifecycleAdmission.drain(async () => {\n\t\t\tawait this.dshLifecycleForEachWriter(async writer => {\n\t\t\t\tif (writer.dshCheckpoint !== void 0) {\n\t\t\t\t\t// A failed/abandoned resume may already own a fresh lease.\n\t\t\t\t\t// Never append its retained events before checkpoint validation.\n\t\t\t\t\tawait this.dshLifecycleTimed(\"close_ms\", () => writer.lease?.release());\n\t\t\t\t\twriter.lease = void 0;\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error(\"session storage has no verified checkpoint after failure\"), { code: \"DSH_SESSION_STORAGE_UNCERTAIN\" });\n\t\t\t\tawait this.dshLifecycleTimed(\"drain_ms\", async () => {\n\t\t\t\t\tawait writer.drainLive();\n\t\t\t\t\tawait writer.chain;\n\t\t\t\t});\n\t\t\t\tif (!writer.state.materialized) {\n\t\t\t\t\tawait writer.ensureLease();\n\t\t\t\t\tawait this.persistHeader(writer.header, writer.state.inheritedEventCount);\n\t\t\t\t\twriter.state.materialized = true;\n\t\t\t\t}\n\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\tconst stored = await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id));\n\t\t\t\tif (stored.events.length !== writer.state.cursor) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\tconst checkpoint = this.dshLifecycleFingerprint(stored);\n\t\t\t\twriter.dshCheckpoint = checkpoint;\n\t\t\t\tawait this.dshLifecycleTimed(\"close_ms\", () => writer.lease?.release());\n\t\t\t\twriter.lease = void 0;\n\t\t\t});\n\t\t});\n\t\tthis.dshLifecycleAdmission.markQuiesced();\n\t\t} catch (error) { this.dshLifecycleFail(); throw error; }\n\t\tfinally { this.dshLifecycleDiagnostics.transition_ms = Math.max(0, Date.now() - started); }\n\t\treturn this.dshLifecycleSnapshot();\n\t}\n\tasync dshLifecycleResume() {\n\t\tif (this.dshLifecycleAdmission.state === \"running\") return;\n\t\tthis.dshLifecycleResetDiagnostics();\n\t\tconst started = Date.now();\n\t\tthis.dshLifecycleAdmission.beginResume();\n\t\ttry {\n\t\tawait this.dshLifecycleAdmission.drain(async () => {\n\t\t\tawait this.dshLifecycleForEachWriter(async writer => {\n\t\t\t\tif (writer.lease?.dshUncertain) throw Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t\t\tif (writer.dshCheckpoint === void 0) {\n\t\t\t\t\tif (this.dshLifecycleAdmission.failure) throw Object.assign(new Error(\"session storage has no verified checkpoint after failure\"), { code: \"DSH_SESSION_STORAGE_UNCERTAIN\" });\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tawait this.dshLifecycleTimed(\"acquire_ms\", () => writer.ensureLease());\n\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\tconst stored = await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id));\n\t\t\t\tif (this.dshLifecycleFingerprint(stored) !== writer.dshCheckpoint) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\t// Retained events are acknowledged as running only after their\n\t\t\t\t// ordered durability barrier succeeds under the reacquired lease.\n\t\t\t\t// New arrivals remain isolated, so this is a bounded snapshot.\n\t\t\t\twriter.buffered = writer.buffered.concat(writer.dshPausedEvents);\n\t\t\t\twriter.dshPausedEvents = [];\n\t\t\t\tconst hasRetainedEvents = writer.buffered.length > 0;\n\t\t\t\tawait this.dshLifecycleTimed(\"drain_ms\", async () => {\n\t\t\t\t\tawait writer.drainLive();\n\t\t\t\t\tawait writer.chain;\n\t\t\t\t});\n\t\t\t\tif (hasRetainedEvents) {\n\t\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\t\twriter.dshCheckpoint = this.dshLifecycleFingerprint(await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id)));\n\t\t\t\t}\n\t\t\t\t// With no retained events the first full validation remains the\n\t\t\t\t// checkpoint; the held lease and sealed writer admit no new append.\n\t\t\t});\n\t\t});\n\t\t} catch (error) { this.dshLifecycleFail(); throw error; }\n\t\tfinally { this.dshLifecycleDiagnostics.transition_ms = Math.max(0, Date.now() - started); }\n\t}\n\tdshLifecycleOpen() {\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer?.lease?.dshUncertain) throw Object.assign(new Error(\"session lease close state is uncertain\"), { code: \"DSH_SESSION_LEASE_UNCERTAIN\" });\n\t\t}\n\t\tfor (const writer of this.tracker.writers.values()) if (writer !== null) {\n\t\t\twriter.dshCheckpoint = void 0;\n\t\t\twriter.buffered = writer.buffered.concat(writer.dshPausedEvents);\n\t\t\twriter.dshPausedEvents = [];\n\t\t}\n\t\tthis.dshLifecycleAdmission.open();\n\t\t// Retained events use their original handle/chain and original seq numbers.\n\t\tfor (const writer of this.tracker.writers.values()) {\n\t\t\tif (writer !== null && writer.buffered.length > 0) writer.drainLive().catch(() => {\n\t\t\t\tthis.ctx.logger.warn(\"session-persistence: retained lifecycle batch drain failed; events preserved\");\n\t\t\t});\n\t\t}\n\t}\n",
           "count": 1
+        },
+        {
+          "find": "import z from \"@deepseek-ai/schemastery\";",
+          "replace": "import { beginDecodedSnapshot, rememberDecodedSnapshot, invalidatePreparedCheckpoint, invalidatePreparedPath, retirePreparedCheckpoint, retireUnadoptedCheckpoint, adoptDecodedCheckpoint, checkpointFromDecoded, verifyDecodedCheckpoint, verifyPreparedCheckpoint, assertCheckpointNotPoisoned } from \"/usr/local/share/dsh/session-checkpoint-core.mjs\";\nimport z from \"@deepseek-ai/schemastery\";",
+          "count": 1
+        },
+        {
+          "find": "\t\tthis.lease = lease;\n\t}",
+          "replace": "\t\tthis.lease = lease;\n\t\tif (access === \"write\" && state.primed !== void 0) adoptDecodedCheckpoint(storage, this, state.primed, true);\n\t}",
+          "count": 1
+        },
+        {
+          "find": "\t\tconst source = await this.storage.readStoredLog(path, this.id, signal);",
+          "replace": "\t\tconst source = await this.storage.readStoredLog(path, this.id, signal);\n\t\tif (this.access === \"write\") adoptDecodedCheckpoint(this.storage, this, source);",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tthis.dshClosingAdmitted = true;\n\t\t\ttry {",
+          "replace": "\t\t\tthis.dshClosingAdmitted = true;\n\t\t\ttry {\n\t\t\tretirePreparedCheckpoint(this.storage, this);",
+          "count": 1
+        },
+        {
+          "find": "\t\tif (batch.length === 0) return;\n\t\tawait this.ensureLease();",
+          "replace": "\t\tif (batch.length === 0) return;\n\t\tinvalidatePreparedCheckpoint(this.storage, this.id);\n\t\tawait this.ensureLease();",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tif (this.state.materialized) return;\n\t\t\tawait this.ensureLease();",
+          "replace": "\t\t\tif (this.state.materialized) return;\n\t\t\tinvalidatePreparedCheckpoint(this.storage, this.id);\n\t\t\tawait this.ensureLease();",
+          "count": 1
+        },
+        {
+          "find": "\t\t\t\tbytes,\n\t\t\t\tidentity: after\n",
+          "replace": "\t\t\t\tbytes,\n\t\t\t\tidentity: after,\n\t\t\t\tdshCompleteStable: true\n",
+          "count": 1
+        },
+        {
+          "find": "\t\tconst current = await readStableJsonlFile(selected.sourcePath, signal);\n\t\treturn this.decodeStoredLog(selected.sourcePath, id, current.bytes, fileRevision(current.identity), signal);",
+          "replace": "\t\tconst dshContext = beginDecodedSnapshot(this, id, selected.sourcePath);\n\t\tconst current = await readStableJsonlFile(selected.sourcePath, signal);\n\t\treturn this.decodeStoredLog(selected.sourcePath, id, current.bytes, fileRevision(current.identity), signal, current, dshContext);",
+          "count": 1
+        },
+        {
+          "find": "\t\tconst { bytes, identity } = await readStableJsonlFile(path, signal);\n\t\treturn this.decodeStoredLog(path, expectedId, bytes, fileRevision(identity), signal);",
+          "replace": "\t\tconst dshContext = beginDecodedSnapshot(this, expectedId, path);\n\t\tconst snapshot = await readStableJsonlFile(path, signal);\n\t\treturn this.decodeStoredLog(path, expectedId, snapshot.bytes, fileRevision(snapshot.identity), signal, snapshot, dshContext);",
+          "count": 1
+        },
+        {
+          "find": "\tasync decodeStoredLog(path, expectedId, buffer, revision, signal) {",
+          "replace": "\tasync decodeStoredLog(path, expectedId, buffer, revision, signal, dshSnapshot, dshContext) {",
+          "count": 1
+        },
+        {
+          "find": "\t\tthis.memoizeStoredLog(expectedId, stored);\n\t\treturn stored;",
+          "replace": "\t\tif (dshContext !== void 0) rememberDecodedSnapshot(stored, path, buffer, dshSnapshot, dshContext);\n\t\tthis.memoizeStoredLog(expectedId, stored);\n\t\treturn stored;",
+          "count": 1
+        },
+        {
+          "find": "\tasync persistBatch(header, events, isMaterialized, inheritedEventCount) {",
+          "replace": "\tasync persistBatch(header, events, isMaterialized, inheritedEventCount) {\n\t\tinvalidatePreparedCheckpoint(this, header.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync persistHeader(header, inheritedEventCount) {",
+          "replace": "\tasync persistHeader(header, inheritedEventCount) {\n\t\tinvalidatePreparedCheckpoint(this, header.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync truncateTornTail(header, truncateTo) {",
+          "replace": "\tasync truncateTornTail(header, truncateTo) {\n\t\tinvalidatePreparedCheckpoint(this, header.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync publishStoredMigration(id, stored) {",
+          "replace": "\tasync publishStoredMigration(id, stored) {\n\t\tinvalidatePreparedCheckpoint(this, id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync materialize(meta, inheritedEventCount, events) {",
+          "replace": "\tasync materialize(meta, inheritedEventCount, events) {\n\t\tinvalidatePreparedCheckpoint(this, meta.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync materializePosix(project, dir, finalPath, id, content) {",
+          "replace": "\tasync materializePosix(project, dir, finalPath, id, content) {\n\t\tinvalidatePreparedCheckpoint(this, id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync materializeWin32(project, dir, finalPath, id, content) {",
+          "replace": "\tasync materializeWin32(project, dir, finalPath, id, content) {\n\t\tinvalidatePreparedCheckpoint(this, id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync appendLines(meta, events) {",
+          "replace": "\tasync appendLines(meta, events) {\n\t\tinvalidatePreparedCheckpoint(this, meta.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync repair(meta, offset) {",
+          "replace": "\tasync repair(meta, offset) {\n\t\tinvalidatePreparedCheckpoint(this, meta.id);",
+          "count": 1
+        },
+        {
+          "find": "\tasync rollbackAppend(path, size) {",
+          "replace": "\tasync rollbackAppend(path, size) {\n\t\tinvalidatePreparedPath(this, path);",
+          "count": 1
+        },
+        {
+          "find": "\tasync writeSyncedTempFile(finalPath, content) {",
+          "replace": "\tasync writeSyncedTempFile(finalPath, content) {\n\t\tinvalidatePreparedPath(this, finalPath);",
+          "count": 1
+        },
+        {
+          "find": "\treleaseHandle(handle, materialized) {\n\t\tthis.tracker.release(handle, materialized);",
+          "replace": "\treleaseHandle(handle, materialized) {\n\t\tretirePreparedCheckpoint(this, handle);\n\t\tthis.tracker.release(handle, materialized);",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tthis.tracker.releaseClaim(id);",
+          "replace": "\t\t\tretireUnadoptedCheckpoint(this, id);\n\t\t\tthis.tracker.releaseClaim(id);",
+          "count": 1
+        },
+        {
+          "find": "\t\t\tpeak_writer_transitions: 0, transition_ms: 0\n",
+          "replace": "\t\t\tpeak_writer_transitions: 0, transition_ms: 0,\n\t\t\tprepared_verified_count: 0, background_full_decode_count: 0, raw_verified_bytes: 0\n",
+          "count": 1
+        },
+        {
+          "find": "\t\t\t\tif (writer.dshCheckpoint !== void 0) {\n",
+          "replace": "\t\t\t\tif (writer.dshCheckpoint !== void 0) {\n\t\t\t\t\tassertCheckpointNotPoisoned(writer);\n\t\t\t\t\tif (writer.lease !== void 0) {\n\t\t\t\t\t\tconst verified = await this.dshLifecycleTimed(\"checkpoint_hash_ms\", () => verifyPreparedCheckpoint(this, writer));\n\t\t\t\t\t\tif (verified === void 0) {\n\t\t\t\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\t\t\t\tthis.dshLifecycleDiagnostics.background_full_decode_count += 1;\n\t\t\t\t\t\t\tconst stored = await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id));\n\t\t\t\t\t\t\tverifyDecodedCheckpoint(this, writer, stored, writer.dshCheckpoint);\n\t\t\t\t\t\t\twriter.dshCheckpoint = checkpointFromDecoded(this, writer, stored);\n\t\t\t\t\t\t\tthis.dshLifecycleDiagnostics.raw_verified_bytes += writer.dshCheckpoint.bytes ?? 0;\n\t\t\t\t\t\t} else {\n\t\t\t\t\t\t\tthis.dshLifecycleDiagnostics.prepared_verified_count += 1;\n\t\t\t\t\t\t\tthis.dshLifecycleDiagnostics.raw_verified_bytes += verified.bytes ?? 0;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n",
+          "count": 1
+        },
+        {
+          "find": "\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\tconst stored = await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id));\n\t\t\t\tif (stored.events.length !== writer.state.cursor) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}\n\t\t\t\tconst checkpoint = this.dshLifecycleFingerprint(stored);\n\t\t\t\twriter.dshCheckpoint = checkpoint;",
+          "replace": "\t\t\t\tlet checkpoint = await this.dshLifecycleTimed(\"checkpoint_hash_ms\", () => verifyPreparedCheckpoint(this, writer));\n\t\t\t\tif (checkpoint !== void 0) {\n\t\t\t\t\tthis.dshLifecycleDiagnostics.prepared_verified_count += 1;\n\t\t\t\t} else {\n\t\t\t\t\tthis.coldLogMemo.delete(writer.id);\n\t\t\t\t\tthis.dshLifecycleDiagnostics.background_full_decode_count += 1;\n\t\t\t\t\tconst stored = await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id));\n\t\t\t\t\tif (stored.events.length !== writer.state.cursor) throw Object.assign(new Error(\"session checkpoint changed\"), { code: \"DSH_SESSION_CHECKPOINT_CHANGED\" });\n\t\t\t\t\tcheckpoint = checkpointFromDecoded(this, writer, stored);\n\t\t\t\t}\n\t\t\t\tthis.dshLifecycleDiagnostics.raw_verified_bytes += checkpoint.bytes ?? 0;\n\t\t\t\twriter.dshCheckpoint = checkpoint;",
+          "count": 1
+        },
+        {
+          "find": "\t\t\t\tif (this.dshLifecycleFingerprint(stored) !== writer.dshCheckpoint) {\n\t\t\t\t\tconst error = new Error(\"session checkpoint changed\");\n\t\t\t\t\terror.code = \"DSH_SESSION_CHECKPOINT_CHANGED\";\n\t\t\t\t\tthrow error;\n\t\t\t\t}",
+          "replace": "\t\t\t\tverifyDecodedCheckpoint(this, writer, stored, writer.dshCheckpoint);",
+          "count": 1
+        },
+        {
+          "find": "\t\t\t\t\twriter.dshCheckpoint = this.dshLifecycleFingerprint(await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id)));",
+          "replace": "\t\t\t\t\twriter.dshCheckpoint = checkpointFromDecoded(this, writer, await this.dshLifecycleTimed(\"checkpoint_read_ms\", () => this.requireStoredLog(writer.id)));",
+          "count": 1
         }
       ],
       "previous_sha256": [
@@ -106,7 +251,7 @@
     {
       "source": "session-lifecycle.mjs",
       "target": "/usr/local/share/dsh/session-lifecycle.mjs",
-      "sha256": "a0897f6e14e41739a1a06d0c5d7dd3c5fea74a2072958860e7830899c3fc5683",
+      "sha256": "f75a2fd03252c1cac99bfe8d38055bc2162606f8d5a759f64631c21aea88271d",
       "previous_sha256": [
         "70f27344fc561c4bfd2d4dfb79858db2f1f88ee2a52bbfa73e0c666012467205"
       ]
@@ -118,6 +263,12 @@
       "previous_sha256": [
         "2bd6ca8154328b01d7e4c437413a85a3066a6dd6234b9a920e7287a330236ea6"
       ]
+    },
+    {
+      "source": "session-checkpoint-core.mjs",
+      "target": "/usr/local/share/dsh/session-checkpoint-core.mjs",
+      "sha256": "3122a8c9aceb4e289d9651eaef010bb1fd9bfdd429dbf5e31e9cacf9a4a4cec8",
+      "previous_sha256": []
     }
   ]
 }

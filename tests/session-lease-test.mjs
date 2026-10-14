@@ -34,6 +34,11 @@ function classBody(name) {
 class SessionHandleClosedError extends Error {
   constructor(id, op) { super(`closed handle: ${op}`); this.name = 'SessionHandleClosedError'; }
 }
+const poisonedMockProofs = new WeakSet();
+function assertMockProof(writer) {
+  if (writer && poisonedMockProofs.has(writer))
+    throw Object.assign(new Error('session checkpoint changed'), { code: 'DSH_SESSION_CHECKPOINT_CHANGED' });
+}
 const { Handle, Backend, Lease } = vm.runInNewContext(
   classBody('JsonlSessionHandle') + '\n' + classBody('JsonlSessionPersistence')
     + '\n' + classBody('SessionWriteLease')
@@ -44,6 +49,20 @@ const { Handle, Backend, Lease } = vm.runInNewContext(
     materializeAppendBatch: events => structuredClone(events),
     assertContiguous: (_id, batch, cursor) => batch.forEach((event, index) => assert.equal(event.seq, cursor + index)),
     SessionReadOnlyError: class extends Error {},
+    // This older suite tests the lifecycle algorithm with storage adapters.
+    // Actual raw-byte proof is tested separately with real filesystem reads.
+    beginDecodedSnapshot: () => undefined, rememberDecodedSnapshot() {},
+    invalidatePreparedCheckpoint(backend, id) { assertMockProof(backend.tracker.writers.get(id)); },
+    invalidatePreparedPath() {}, retirePreparedCheckpoint(_backend, writer) { assertMockProof(writer); }, retireUnadoptedCheckpoint() {},
+    adoptDecodedCheckpoint: () => false, verifyPreparedCheckpoint: async (_backend, writer) => { assertMockProof(writer); return undefined; },
+    assertCheckpointNotPoisoned: assertMockProof,
+    checkpointFromDecoded: (backend, _writer, stored) => backend.dshLifecycleFingerprint(stored),
+    verifyDecodedCheckpoint: (backend, writer, stored, expected) => {
+      if (backend.dshLifecycleFingerprint(stored) !== expected) {
+        poisonedMockProofs.add(writer);
+        throw Object.assign(new Error('session checkpoint changed'), { code: 'DSH_SESSION_CHECKPOINT_CHANGED' });
+      }
+    },
   });
 const deferred = () => {
   let resolve;
@@ -292,11 +311,11 @@ for (const mutation of ['append', 'truncate', 'replace-prefix', 'change-header']
     await assert.rejects(backend.dshLifecycleResume(), error => error.code === 'DSH_SESSION_CHECKPOINT_CHANGED');
     assert.equal(backend.dshLifecycleAdmission.state, 'failed'); assert.equal(handle.dshPausedEvents.length, 1);
     const foreignBytes = JSON.stringify(state.events), writes = state.writes;
-    await backend.dshLifecycleSuspend();
-    assert.equal(state.held, 0); assert.equal(state.writes, writes);
+    await assert.rejects(backend.dshLifecycleSuspend(), error => error.code === 'DSH_SESSION_CHECKPOINT_CHANGED');
+    assert.equal(state.held, 1); assert.equal(state.writes, writes);
     assert.equal(JSON.stringify(state.events), foreignBytes); assert.equal(handle.dshPausedEvents.length, 1);
-    // Test cleanup only: restore the original mock storage, then resume normally.
-    state.events = [event(0)]; state.header.createdAt = 1; await resume(backend); await handle.close();
+    // Explicit disposal of this mock fixture is not a production recovery path.
+    await handle.lease.release(); assert.equal(state.held, 0);
   });
 }
 await test('reacquire contention keeps admission closed and preserves the original handle', async () => {
@@ -415,7 +434,7 @@ await test('an idle resume performs one full checkpoint read; retained writes re
 await test('writer diagnostics contain only fixed nonnegative integer counters', async () => {
   const { backend, handle } = fixture(); await handle.append([event(0)]); await backend.dshLifecycleSuspend();
   const diagnostics = backend.dshLifecycleSnapshot().diagnostics;
-  assert.equal(Object.keys(diagnostics).length, 9);
+  assert.equal(Object.keys(diagnostics).length, 12);
   assert(Object.values(diagnostics).every(value => Number.isSafeInteger(value) && value >= 0));
   assert(diagnostics.checkpoint_serialized_bytes > 0);
   assert.equal(JSON.stringify(diagnostics).includes('test-session'), false);

@@ -6,11 +6,11 @@
     {
       "target": "/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js",
       "original_sha256": "489fef91b0c11c063029ea7aed27b312817570b9c3177aeaa44983b9a25aedcd",
-      "patched_sha256": "0f50e7e8fc6f388cf0852dc7676a64444149ed7c536600e1f509448aa1e4f95d",
+      "patched_sha256": "b01e97b97fcb204eebae185f0f1e6f6ec4c82c97f0c275777f2c4d3b39a520d2",
       "replacements": [
         {
           "find": "import z from \"@deepseek-ai/schemastery\";",
-          "replace": "import { requestPinned as dshRequestPinned, requestVia as dshRequestVia } from \"/usr/local/share/dsh/web-fetch-transport.mjs\";\nimport z from \"@deepseek-ai/schemastery\";",
+          "replace": "import { requestPinned as dshRequestPinned, requestVia as dshRequestVia, observeWebFetch as dshObserveWebFetch } from \"/usr/local/share/dsh/web-fetch-transport.mjs\";\nimport z from \"@deepseek-ai/schemastery\";",
           "count": 1
         },
         {
@@ -32,6 +32,11 @@
           "find": "publicHttpNetwork.requestVia(route.dispatcher, url, headers, signal)",
           "replace": "publicHttpNetwork.requestVia(route.proxy, url, headers, signal)",
           "count": 1
+        },
+        {
+          "find": "\tasync fetch(request, signal) {\n\t\tconst env_1 = {\n\t\t\tstack: [],\n\t\t\terror: void 0,\n\t\t\thasError: false\n\t\t};\n\t\ttry {\n\t\t\tif (signal?.aborted) throw new WebError(\"web fetch aborted\", \"WEB_ABORTED\");\n\t\t\tconst d = __addDisposableResource(env_1, deadline(signal, this.limits.timeoutMs, \"WEB_FETCH_TIMEOUT\"), false);\n\t\t\treturn await this.followAndRead(request.url, d.signal);\n\t\t} catch (e_1) {\n\t\t\tenv_1.error = e_1;\n\t\t\tenv_1.hasError = true;\n\t\t} finally {\n\t\t\t__disposeResources(env_1);\n\t\t}\n\t}",
+          "replace": "\tasync fetch(request, signal) {\n\t\treturn dshObserveWebFetch(async () => {\n\t\tconst env_1 = {\n\t\t\tstack: [],\n\t\t\terror: void 0,\n\t\t\thasError: false\n\t\t};\n\t\ttry {\n\t\t\tif (signal?.aborted) throw new WebError(\"web fetch aborted\", \"WEB_ABORTED\");\n\t\t\tconst d = __addDisposableResource(env_1, deadline(signal, this.limits.timeoutMs, \"WEB_FETCH_TIMEOUT\"), false);\n\t\t\treturn await this.followAndRead(request.url, d.signal);\n\t\t} catch (e_1) {\n\t\t\tenv_1.error = e_1;\n\t\t\tenv_1.hasError = true;\n\t\t} finally {\n\t\t\t__disposeResources(env_1);\n\t\t}\n\t\t});\n\t}",
+          "count": 1
         }
       ]
     }
@@ -40,7 +45,7 @@
     {
       "source": "web-fetch-transport.mjs",
       "target": "/usr/local/share/dsh/web-fetch-transport.mjs",
-      "sha256": "613d7d94142f6df0868d66f1a43d30086aba8deba263c1a5ca3e65d8f59f17c2"
+      "sha256": "0f364fb047b2a59b5c31d172ce22ea052afbd71291f3355b097f1e8732338147"
     }
   ]
 }

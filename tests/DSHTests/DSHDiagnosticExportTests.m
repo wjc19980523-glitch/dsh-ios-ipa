@@ -2,6 +2,10 @@
 #import "DSHLogBuffer.h"
 #import "DSHLifecycleDiagnostics.h"
 
+@interface DSHLogBuffer (DiagnosticExportReadTests)
+- (nullable NSDictionary *)incidentAtURL:(NSURL *)url;
+@end
+
 @interface DSHDiagnosticExportTests : XCTestCase
 @property (nonatomic) NSURL *directory;
 @end
@@ -293,5 +297,131 @@
     [log append:@"[dsh-ios] dsh-serve exited with code 9."];
     XCTAssertEqual(log.retainedIncidentCount, 1u);
     XCTAssertTrue([log.diagnosticReport containsString:@"exit_code"]);
+}
+- (void)testPreparedProofCountersAreNumericAndIsolatedFromPathsOrContents {
+    NSDictionary *counters = @{@"prepared_verified_count":@4, @"background_full_decode_count":@0, @"raw_verified_bytes":@4096,
+        @"raw_path":@"/root/private-proof", @"raw_contents":@"private-proof-body", @"session_id":@"private-proof-session"};
+    NSDictionary *event = @{@"event":@"quiesceWaiting", @"host_launch_id":DSHLogBuffer.hostLaunchID,
+        @"guest_session_lifecycle":@{@"diagnostics":counters, @"progress_generation":@9, @"progress_diagnostics":counters}};
+    NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:event];
+    NSDictionary *expected = @{@"prepared_verified_count":@4, @"background_full_decode_count":@0, @"raw_verified_bytes":@4096};
+    XCTAssertEqualObjects(safe[@"guest_session_lifecycle"][@"diagnostics"], expected);
+    XCTAssertEqualObjects(safe[@"guest_session_lifecycle"][@"progress_diagnostics"], expected);
+    DSHLogBuffer *log = self.persistentLog;
+    [self appendEvent:event toLog:log];
+    NSString *report = log.diagnosticReport;
+    for (NSString *secret in @[@"private-proof", @"private-proof-body", @"private-proof-session"]) XCTAssertFalse([report containsString:secret]);
+    for (NSString *key in expected) {
+        for (id invalid in @[@YES, @-1, @0.5, @"private-proof-value"]) {
+            NSMutableDictionary *values = [expected mutableCopy]; values[key] = invalid;
+            NSDictionary *filtered = [DSHLifecycleDiagnostics sanitizedEvent:@{@"event":@"quiesceWaiting", @"guest_session_lifecycle":@{@"diagnostics":values}}];
+            XCTAssertNil(filtered[@"guest_session_lifecycle"][@"diagnostics"][key]);
+        }
+    }
+}
+- (void)testLargeIndividuallyValidContextAndEventMergeProducesABoundedReadablePin {
+    // Both inputs fit the public sanitizer's cap. Together they exceeded it
+    // before the post-enrichment guard, making the one-event pin >128 KiB.
+    NSArray *keys = @[@"host_pid", @"host_started_epoch", @"guest_pid", @"health_generation", @"harness_restart_count", @"authentication_generation", @"suspend_count", @"resume_count",
+        @"filesystem_state", @"quiescing", @"quiesce_generation", @"sampled_monotonic_ns", @"session_drain_active", @"session_drain_guest_tgid", @"session_drain_generation", @"active_operations",
+        @"paused_tty_reads", @"active_fakefs_operations", @"active_fakefs_operations_complete", @"active_transactions", @"read_transactions", @"write_transactions", @"deferred_transactions", @"oldest_transaction_ms",
+        @"native_flock_count", @"tracking_overflows", @"sqlite_busy_observations", @"sqlite_error_observations", @"recovery_blocked_connections", @"last_sqlite_result", @"native_close_failures", @"native_flock_event_total",
+        @"native_flock_events_omitted", @"managed_guest_pid", @"guest_identity", @"registered", @"generation", @"ack_generation", @"transition_pending", @"poll_pending",
+        @"writer_count", @"released_count", @"pending_events", @"cycle", @"core_generation", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention",
+        @"wait_ms", @"id", @"host_fd", @"thread", @"guest_fd_at_last_lock", @"guest_tgid", @"started_monotonic_ns", @"age_ms",
+        @"host_device", @"host_inode", @"identity_stat_errno", @"identity_path_errno", @"connection", @"mode", @"cached_autocommit", @"sqlite_result"];
+    NSMutableDictionary *fields = [NSMutableDictionary new];
+    for (NSString *key in keys) fields[key] = @1;
+    NSMutableArray *details = [NSMutableArray new];
+    for (NSUInteger i = 0; i < 16; i++) [details addObject:[fields copy]];
+    NSDictionary *context = @{@"event":@"sceneDidEnterBackground", @"host_launch_id":DSHLogBuffer.hostLaunchID,
+        @"health_generation":@7, @"guest_session_lifecycle":@{@"native_flocks":details}};
+    NSDictionary *trigger = @{@"event":@"quiesceExpired", @"cycle":@1, @"native_flocks":details};
+    NSDictionary *safeContext = [DSHLifecycleDiagnostics sanitizedEvent:context];
+    NSDictionary *safeTrigger = [DSHLifecycleDiagnostics sanitizedEvent:trigger];
+    XCTAssertLessThanOrEqual([NSJSONSerialization dataWithJSONObject:safeContext options:0 error:nil].length, 32768u);
+    XCTAssertLessThanOrEqual([NSJSONSerialization dataWithJSONObject:safeTrigger options:0 error:nil].length, 32768u);
+    NSMutableDictionary *merged = [safeTrigger mutableCopy]; merged[@"guest_session_lifecycle"] = safeContext[@"guest_session_lifecycle"];
+    XCTAssertGreaterThan([NSJSONSerialization dataWithJSONObject:merged options:0 error:nil].length, 32768u, @"The fixture must exercise post-enrichment growth");
+    DSHLogBuffer *log = self.persistentLog;
+    [self appendEvent:context toLog:log]; [self appendEvent:trigger toLog:log];
+    XCTAssertEqual(log.retainedIncidentCount, 1u);
+    NSURL *pin = [self filesWithPrefix:@"incident-"].firstObject;
+    NSData *data = [NSData dataWithContentsOfURL:pin];
+    XCTAssertNotNil(data); if (!data) return;
+    XCTAssertLessThanOrEqual(data.length, 128u * 1024u);
+    DSHLogBuffer *reader = self.persistentLog;
+    NSDictionary *reopened = [reader incidentAtURL:pin];
+    XCTAssertNotNil(reopened);
+    XCTAssertEqualObjects(reopened[@"trigger"][@"event"], @"quiesceExpired");
+    XCTAssertEqualObjects(reopened[@"terminal"][@"event"], @"quiesceExpired");
+    XCTAssertTrue([reader.diagnosticReport containsString:@"quiesceExpired"]);
+}
+- (void)testWebFetchMetadataUsesFixedResultsErrorsAndSafeIntegerCounters {
+    NSDictionary *valid = @{@"event":@"webFetchCompleted", @"guest_pid":@101, @"web_request_sequence":@0,
+        @"web_duration_ms":@9007199254740991LL, @"web_result":@"success", @"web_error":@"none"};
+    XCTAssertEqualObjects([DSHLifecycleDiagnostics sanitizedEvent:valid], valid);
+    NSArray *errors = @[@"none", @"invalid_url", @"blocked_url", @"redirect_blocked", @"unsupported_content", @"too_large", @"timeout", @"aborted", @"dns", @"tls", @"connection_refused", @"proxy", @"other"];
+    for (NSString *error in errors) {
+        NSMutableDictionary *event = [valid mutableCopy]; event[@"web_result"] = @"failure"; event[@"web_error"] = error;
+        NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:event];
+        XCTAssertEqualObjects(safe[@"web_result"], @"failure"); XCTAssertEqualObjects(safe[@"web_error"], error);
+    }
+    for (NSString *key in @[@"guest_pid", @"web_request_sequence", @"web_duration_ms"]) {
+        for (id invalid in @[@YES, @-1, @0.5, @9007199254740992LL, @"private-counter", NSDecimalNumber.notANumber]) {
+            NSMutableDictionary *event = [valid mutableCopy]; event[key] = invalid;
+            XCTAssertNil([DSHLifecycleDiagnostics sanitizedEvent:event][key]);
+        }
+    }
+    NSMutableDictionary *zeroPID = [valid mutableCopy]; zeroPID[@"guest_pid"] = @0;
+    XCTAssertNil([DSHLifecycleDiagnostics sanitizedEvent:zeroPID][@"guest_pid"]);
+    // Reading an HTTP error page can complete successfully at this boundary;
+    // retain its numeric status without reclassifying the provider result.
+    NSMutableDictionary *readableHTTPError = [valid mutableCopy]; readableHTTPError[@"web_http_status"] = @503;
+    NSDictionary *httpSafe = [DSHLifecycleDiagnostics sanitizedEvent:readableHTTPError];
+    XCTAssertEqualObjects(httpSafe[@"web_result"], @"success"); XCTAssertEqualObjects(httpSafe[@"web_http_status"], @503);
+    for (id invalid in @[@YES, @99, @600, @200.5, @"private-http-status", NSDecimalNumber.notANumber]) {
+        readableHTTPError[@"web_http_status"] = invalid;
+        XCTAssertNil([DSHLifecycleDiagnostics sanitizedEvent:readableHTTPError][@"web_http_status"]);
+    }
+    NSMutableDictionary *unknown = [valid mutableCopy]; unknown[@"web_result"] = @"private-result"; unknown[@"web_error"] = @"/root/private-error";
+    NSDictionary *filtered = [DSHLifecycleDiagnostics sanitizedEvent:unknown];
+    XCTAssertNil(filtered[@"web_result"]); XCTAssertNil(filtered[@"web_error"]);
+}
+- (void)testWebFetchMetadataSurvivesDiskReopenAndTextAttachmentWithoutSensitiveValues {
+    DSHLogBuffer *log = self.persistentLog;
+    NSDictionary *failure = @{@"event":@"webFetchCompleted", @"guest_pid":@101, @"web_request_sequence":@41, @"web_duration_ms":@1234,
+        @"web_result":@"failure", @"web_error":@"connection_refused", @"url":@"https://private-web-host/private-url?token=private-query",
+        @"path":@"/root/private-web-path", @"message":@"private-web-message", @"body":@"private-web-body", @"credential":@"private-web-credential"};
+    [self appendEvent:failure toLog:log];
+    [self appendEvent:@{@"event":@"webFetchCompleted", @"guest_pid":@101, @"web_request_sequence":@42, @"web_duration_ms":@10, @"web_result":@"success", @"web_error":@"none", @"web_http_status":@503} toLog:log];
+    [self appendEvent:@{@"event":@"webFetchCompleted", @"guest_pid":@101, @"web_request_sequence":@43, @"web_duration_ms":@20, @"web_result":@"private-web-result", @"web_error":@"private-web-error"} toLog:log];
+    [log synchronizePersistentDiagnostics];
+    DSHLogBuffer *reader = self.persistentLog;
+    NSError *error = nil;
+    NSURL *file = [reader writeDiagnosticAttachmentInDirectory:[self.directory URLByAppendingPathComponent:@"exports" isDirectory:YES] error:&error];
+    XCTAssertNotNil(file); XCTAssertNil(error); XCTAssertEqualObjects(file.pathExtension, @"txt");
+    NSString *text = [NSString stringWithContentsOfURL:file encoding:NSUTF8StringEncoding error:&error];
+    XCTAssertNotNil(text); XCTAssertNil(error);
+    NSMutableDictionary<NSNumber *, NSDictionary *> *completed = [NSMutableDictionary new];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        NSDictionary *event = [DSHLifecycleDiagnostics safeEventFromLogLine:line];
+        if ([event[@"event"] isEqual:@"webFetchCompleted"]) completed[event[@"web_request_sequence"]] = event;
+    }
+    XCTAssertEqual(completed.count, 3u);
+    XCTAssertEqualObjects(completed[@41][@"guest_pid"], @101);
+    XCTAssertEqualObjects(completed[@41][@"web_duration_ms"], @1234);
+    XCTAssertEqualObjects(completed[@41][@"web_result"], @"failure");
+    XCTAssertEqualObjects(completed[@41][@"web_error"], @"connection_refused");
+    XCTAssertEqualObjects(completed[@41][@"host_launch_id"], DSHLogBuffer.hostLaunchID);
+    XCTAssertEqualObjects(completed[@42][@"web_result"], @"success");
+    XCTAssertEqualObjects(completed[@42][@"web_error"], @"none");
+    XCTAssertEqualObjects(completed[@42][@"web_http_status"], @503);
+    XCTAssertNil(completed[@43][@"web_result"]); XCTAssertNil(completed[@43][@"web_error"]);
+    for (NSString *secret in @[@"private-web-host", @"private-url", @"private-query", @"private-web-path", @"private-web-message", @"private-web-body", @"private-web-credential", @"private-web-result", @"private-web-error"]) {
+        XCTAssertFalse([text containsString:secret]);
+        for (NSURL *url in [self filesWithPrefix:@"launch-"])
+            XCTAssertFalse([[NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil] containsString:secret]);
+    }
 }
 @end

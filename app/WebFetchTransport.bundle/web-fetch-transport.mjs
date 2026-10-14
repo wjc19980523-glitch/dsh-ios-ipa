@@ -7,6 +7,56 @@ import tls from 'node:tls';
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
 import zlib from 'node:zlib';
+import { writeSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
+
+let webRequestSequence = 0;
+const webErrors = new Map([
+  ['WEB_INVALID_URL', 'invalid_url'], ['WEB_BLOCKED_URL', 'blocked_url'],
+  ['WEB_REDIRECT_BLOCKED', 'redirect_blocked'],
+  ['WEB_UNSUPPORTED_CONTENT_TYPE', 'unsupported_content'],
+  ['WEB_FETCH_TOO_LARGE', 'too_large'], ['WEB_FETCH_TIMEOUT', 'timeout'],
+  ['WEB_ABORTED', 'aborted'], ['ENOTFOUND', 'dns'], ['EAI_AGAIN', 'dns'],
+  ['ECONNREFUSED', 'connection_refused'], ['DSH_PROXY_CONNECT_FAILED', 'proxy'],
+  ['CERT_HAS_EXPIRED', 'tls'], ['CERT_NOT_YET_VALID', 'tls'],
+  ['DEPTH_ZERO_SELF_SIGNED_CERT', 'tls'], ['SELF_SIGNED_CERT_IN_CHAIN', 'tls'],
+  ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'tls'], ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'tls'],
+  ['ERR_TLS_CERT_ALTNAME_INVALID', 'tls'], ['ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED', 'tls'],
+]);
+
+function webErrorClass(error) {
+  // Never stringify an exception: messages and stacks can contain URLs,
+  // proxy credentials, response bodies or model-supplied input.
+  try {
+    for (let item = error, depth = 0; item && depth < 4; item = item.cause, depth++) {
+      if (typeof item.code === 'string' && webErrors.has(item.code)) return webErrors.get(item.code);
+    }
+  } catch {}
+  return 'other';
+}
+
+export async function observeWebFetch(operation) {
+  const sequence = webRequestSequence = webRequestSequence >= Number.MAX_SAFE_INTEGER ? 1 : webRequestSequence + 1;
+  const started = performance.now();
+  let result, failure, failed = false;
+  try { result = await operation(); return result; }
+  catch (error) { failed = true; failure = error; throw error; }
+  finally {
+    // One fixed metadata line only after the complete provider body/disposal
+    // settles. Diagnostic failures must not replace its result or exception.
+    try {
+      const event = { event: 'webFetchCompleted', guest_pid: process.pid,
+        web_request_sequence: sequence,
+        web_duration_ms: Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(performance.now() - started))),
+        web_result: failed ? 'failure' : 'success', web_error: failed ? webErrorClass(failure) : 'none' };
+      if (!failed && Number.isInteger(result?.statusCode) && result.statusCode >= 100 && result.statusCode <= 599)
+        event.web_http_status = result.statusCode;
+      // Synchronous fd output has no later unhandled stream error; a closed or
+      // failed stderr descriptor is caught locally, without touching the body.
+      writeSync(2, '[lifecycle] ' + JSON.stringify(event) + '\n');
+    } catch {}
+  }
+}
 
 function hostname(url) {
   return url.hostname.replace(/^\[|\]$/g, '');

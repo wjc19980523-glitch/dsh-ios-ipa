@@ -21,7 +21,7 @@ static NSSet<NSString *> *diagnosticEventNames(void) {
             @"webInterfaceLoaded", @"incompletePreviousBackground", @"harnessState", @"hostStarted", @"hostBootStarted",
             @"startupPerformance", @"harnessAnswered", @"harnessStartupTimedOut", @"harnessAuthenticationReady",
             @"supervisionPaused", @"supervisionResumed", @"sessionPatchVerified", @"sessionPatchInstallFailed",
-            @"harnessLaunchRequested", @"webLoadFailed", @"downloadFailed", @"migrationFailed", @"webPatchVerified", @"webPatchInstallFailed"]];
+            @"harnessLaunchRequested", @"webLoadFailed", @"downloadFailed", @"migrationFailed", @"webPatchVerified", @"webPatchInstallFailed", @"webFetchCompleted"]];
     });
     return names;
 }
@@ -51,7 +51,8 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"observed_monotonic_ns", @"nesting", @"sequence", @"host_errno", @"actor_guest_pid",
             @"actor_thread", @"exit_code", @"install_error_code", @"attempt", @"attempt_limit", @"details_omitted", @"observed_epoch",
             @"duration_seconds", @"port", @"checkpoint_read_ms", @"checkpoint_hash_ms", @"checkpoint_serialized_bytes",
-            @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms", @"progress_generation"]];
+            @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms", @"progress_generation",
+            @"prepared_verified_count", @"background_full_decode_count", @"raw_verified_bytes", @"web_request_sequence", @"web_duration_ms", @"web_http_status"]];
         enums = @{@"harness_state": @[@"idle", @"starting", @"ready", @"restarting", @"failed", @"stopped"],
             @"desired_state": @[@"running", @"quiescing"], @"ack_state": @[@"none", @"running", @"quiesced", @"failed", @"exited"],
             @"error_code": @[@"none", @"checkpoint_changed", @"not_materialized", @"ownership_conflict", @"storage_failure", @"close_failure", @"transition_failed"],
@@ -60,6 +61,8 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"type": @[@"LOCK_SH", @"LOCK_EX"],
             @"host_start_source": @[@"first_observation_sysctl_unavailable", @"kernel_process_start"],
             @"stage": @[@"image_preparation", @"guest_kernel_boot", @"web_interface_loaded"],
+            @"web_result": @[@"success", @"failure"],
+            @"web_error": @[@"none", @"invalid_url", @"blocked_url", @"redirect_blocked", @"unsupported_content", @"too_large", @"timeout", @"aborted", @"dns", @"tls", @"connection_refused", @"proxy", @"other"],
             @"phase": @[@"open", @"close_failed", @"sql_profile", @"finalize", @"step", @"step_timeout", @"retry_reset", @"retry_timeout", @"step_result", @"reset", @"prepare_failed", @"prepare_timeout", @"finalize_failed", @"begin_read", @"begin_write", @"commit", @"rollback", @"bind", @"invalid_stat", @"missing_inode", @"missing_link_source"]};
         dictionaries = [NSSet setWithArray:@[@"snapshot", @"guest_session_lifecycle", @"counts", @"lock", @"diagnostics", @"progress_diagnostics"]];
         arrays = [NSSet setWithArray:@[@"operations", @"transactions", @"native_flocks", @"native_flock_events"]];
@@ -70,6 +73,8 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
         if (!flag && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
         BOOL fractional = [@[@"host_started_epoch", @"observed_epoch", @"wait_ms", @"duration_seconds"] containsObject:key];
         if (!fractional && floor([value doubleValue]) != [value doubleValue]) return nil;
+        if ([@[@"web_request_sequence", @"web_duration_ms"] containsObject:key] && [value doubleValue] > 9007199254740991.0) return nil;
+        if ([key isEqual:@"web_http_status"] && ([value doubleValue] < 100 || [value doubleValue] > 599)) return nil;
         BOOL signedValue = [@[@"guest_pid", @"managed_guest_pid", @"session_drain_guest_tgid", @"host_fd", @"guest_fd_at_last_lock", @"guest_tgid", @"exit_code", @"install_error_code", @"actor_guest_pid", @"last_sqlite_result", @"sqlite_result", @"recovery_result", @"host_errno"] containsObject:key];
         if (!signedValue && [value doubleValue] < 0) return nil;
         return value;
@@ -98,7 +103,7 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
         for (id childKey in value) {
             if (![childKey isKindOfClass:NSString.class]) continue;
             if ([@[@"diagnostics", @"progress_diagnostics"] containsObject:key] &&
-                ![@[@"checkpoint_read_ms", @"checkpoint_hash_ms", @"checkpoint_serialized_bytes", @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms"] containsObject:childKey]) continue;
+                ![@[@"checkpoint_read_ms", @"checkpoint_hash_ms", @"checkpoint_serialized_bytes", @"drain_ms", @"close_ms", @"acquire_ms", @"active_writer_transitions", @"peak_writer_transitions", @"transition_ms", @"prepared_verified_count", @"background_full_decode_count", @"raw_verified_bytes"] containsObject:childKey]) continue;
             id child = safeMetadataValue(childKey, value[childKey], depth + 1);
             if (child) safe[childKey] = child;
         }
@@ -219,6 +224,9 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
 + (NSDictionary *)sanitizedEvent:(NSDictionary *)event {
     if (![event isKindOfClass:NSDictionary.class]) return @{};
     NSMutableDictionary *safe = [safeMetadataValue(@"snapshot", event, 0) mutableCopy];
+    if ([safe[@"event"] isEqual:@"webFetchCompleted"] &&
+        ([safe[@"guest_pid"] doubleValue] <= 0 || [safe[@"guest_pid"] doubleValue] > 9007199254740991.0))
+        [safe removeObjectForKey:@"guest_pid"];
     NSData *encoded = [NSJSONSerialization dataWithJSONObject:safe options:0 error:nil];
     if (encoded.length > 32768) {
         // Keep classification counters/identities, not an unbounded detail dump.

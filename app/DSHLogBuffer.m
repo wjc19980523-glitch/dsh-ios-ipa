@@ -309,7 +309,13 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
         [events removeObjectAtIndex:index];
         data = diagnosticJSON(self.pendingIncident);
     }
-    if (!data || ![data writeToURL:self.pendingIncidentFile options:NSDataWritingAtomic | NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:nil]) self.diagnosticWriteFailed = YES;
+    if (!data || data.length > DSHIncidentBytes) {
+        // Retain the last valid file rather than replacing it with a window
+        // the bounded reader would reject. Normal events are capped below.
+        self.diagnosticWriteFailed = YES;
+        return;
+    }
+    if (![data writeToURL:self.pendingIncidentFile options:NSDataWritingAtomic | NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:nil]) self.diagnosticWriteFailed = YES;
 }
 
 - (void)retainSafeEvent:(NSDictionary *)raw {
@@ -327,6 +333,9 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
     }
     if (!event[@"host_launch_id"] && !event[@"snapshot"][@"host_launch_id"]) event[@"host_launch_id"] = DSHLogBuffer.hostLaunchID;
     event[@"observed_epoch"] = @(NSDate.date.timeIntervalSince1970);
+    // Identity enrichment can combine two individually bounded dictionaries.
+    // Reapply the byte cap before any memory window or pin retains the merge.
+    event = [[DSHLifecycleDiagnostics sanitizedEvent:event] mutableCopy];
     self.cachedDiagnosticSummary = nil;
     [self.diagnosticEvents addObject:event];
     if (self.diagnosticEvents.count > DSHEventWindow) [self.diagnosticEvents removeObjectAtIndex:0];
@@ -502,7 +511,8 @@ DSH_EXPORTED NSNotificationName const DSHLogBufferDidChangeNotification = @"DSHL
         NSMutableString *report = [NSMutableString stringWithString:
             @"DSH local metadata diagnostic report\n"
              "Stored locally; no automatic upload. Review before sharing.\n"
-             "Scope: whitelisted native lifecycle/status/performance metadata only.\n"
+             "Scope: whitelisted lifecycle/status/performance and web-provider result metadata only.\n"
+             "Web-provider completion does not verify source freshness or factual accuracy.\n"
              "Guest free-form output, user content, URLs, paths and credentials are not included; current free-form output can be viewed in Server Log.\n"
              "Retention: at most 10 new launch files (256 KiB each), 4 pinned incident windows (128 KiB each), 32 events before/at trigger and 8 afterwards. Legacy logs are read through a bounded 256 KiB tail. Older evidence can be evicted.\n"
              "A new host launch ID does not establish a system termination reason.\n\n"];

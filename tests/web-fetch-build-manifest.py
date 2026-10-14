@@ -21,7 +21,7 @@ def build(source):
         changes.append({'find': find, 'replace': replacement, 'count': 1})
 
     replace('import z from "@deepseek-ai/schemastery";',
-            'import { requestPinned as dshRequestPinned, requestVia as dshRequestVia } from "/usr/local/share/dsh/web-fetch-transport.mjs";\n'
+            'import { requestPinned as dshRequestPinned, requestVia as dshRequestVia, observeWebFetch as dshObserveWebFetch } from "/usr/local/share/dsh/web-fetch-transport.mjs";\n'
             'import z from "@deepseek-ai/schemastery";')
     start = original.index('async function requestPinned(url, addresses, headers, signal) {')
     end = original.index('\n/**', start)
@@ -51,6 +51,13 @@ def build(source):
 * @param proxy - the route's configured proxy URL, from `proxyRouteFor`.''')
     replace('publicHttpNetwork.requestVia(route.dispatcher, url, headers, signal)',
             'publicHttpNetwork.requestVia(route.proxy, url, headers, signal)')
+    start = original.index('\tasync fetch(request, signal) {')
+    end = original.index('\n\t/** Follow same-origin redirects', start)
+    fetch = original[start:end]
+    assert fetch.endswith('\n\t}')
+    replace(fetch, fetch.replace('\tasync fetch(request, signal) {\n',
+            '\tasync fetch(request, signal) {\n\t\treturn dshObserveWebFetch(async () => {\n', 1)[:-3]
+            + '\n\t\t});\n\t}')
     resource = (BUNDLE / 'web-fetch-transport.mjs').read_bytes()
     return {
         'schema': 1,

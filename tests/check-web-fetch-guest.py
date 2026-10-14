@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import re
 
-EXPECTED = 36
+EXPECTED = 47
 
 
 def check(result, output):
@@ -29,6 +29,9 @@ def check(result, output):
         'ARM complete patched package reads HTTPS and same-origin redirect',
         'ARM complete package rejects private destination without fixture resolver',
         'ARM complete package obeys installed proxy policy without origin DNS',
+        'ARM complete provider emits private metadata only after reading the body',
+        'ARM complete provider classifies policy DNS and timeout failures privately',
+        'ARM complete provider preserves outcomes when diagnostic stderr fails',
     ]), 'missing real packaged guest assertions'
     assert text.count(f'web fetch transport: {EXPECTED}/{EXPECTED} passed; real sockets/TLS; policy dependency adapters; 100 close cycles') == 1
     assert len(re.findall(r'^WEB_FETCH_ARM_GUEST_COMPLETED=1$', text, re.M)) == 1, 'missing unique normal-completion receipt'

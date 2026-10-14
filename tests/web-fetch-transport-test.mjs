@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { requestPinned, requestVia } from '../app/WebFetchTransport.bundle/web-fetch-transport.mjs';
+import { syncBuiltinESMExports } from 'node:module';
+import { requestPinned, requestVia, observeWebFetch } from '../app/WebFetchTransport.bundle/web-fetch-transport.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(here, 'fixtures/web-transport');
@@ -29,6 +30,29 @@ async function test(name, run) {
   await run();
   passes++;
   console.log(`PASS ${name}`);
+}
+async function diagnostics(operation, failOutput = false) {
+  const originalWrite = fs.writeSync, lines = [];
+  fs.writeSync = function (fd, value, ...args) {
+    if (fd === 2 && typeof value === 'string' && value.startsWith('[lifecycle] ')) {
+      if (failOutput) throw Object.assign(new Error('injected diagnostic output failure'), { code: 'EIO' });
+      lines.push(value); return Buffer.byteLength(value);
+    }
+    return originalWrite.call(this, fd, value, ...args);
+  };
+  syncBuiltinESMExports();
+  try { await operation(lines); }
+  finally { fs.writeSync = originalWrite; syncBuiltinESMExports(); }
+}
+function diagnostic(line) {
+  assert.equal(line.split('\n').length, 2, 'one complete metadata line');
+  const value = JSON.parse(line.slice('[lifecycle] '.length));
+  assert.equal(value.event, 'webFetchCompleted'); assert.equal(value.guest_pid, process.pid);
+  assert(Number.isSafeInteger(value.web_request_sequence) && value.web_request_sequence > 0);
+  assert(Number.isSafeInteger(value.web_duration_ms) && value.web_duration_ms >= 0);
+  assert.deepEqual(Object.keys(value).sort(), ['event', 'guest_pid', 'web_duration_ms', 'web_error',
+    'web_request_sequence', 'web_result', ...(value.web_http_status === undefined ? [] : ['web_http_status'])].sort());
+  return value;
 }
 async function listen(server) {
   servers.push(server);
@@ -48,6 +72,8 @@ function serve(req, res) {
   if (req.url === '/binary') { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.end('binary'); return; }
   if (req.url === '/gzip-invalid') { res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip' }); res.end('invalid gzip'); return; }
   if (req.url === '/abrupt') { res.writeHead(200, { 'content-type': 'text/plain', 'content-length': 100 }); res.write('start'); setTimeout(() => res.destroy(), 5); return; }
+  if (req.url === '/denied') { res.writeHead(403, { 'content-type': 'text/plain' }); res.end('fixture denied'); return; }
+  if (req.url === '/delayed-body') { res.writeHead(200, { 'content-type': 'text/plain' }); res.write('first '); setTimeout(() => res.end('last'), 30); return; }
   const text = JSON.stringify({ weather: 'fixture-only', temperature: 23 });
   const kind = req.url.slice(1);
   const enc = ['gzip', 'deflate', 'br'].includes(kind) ? kind : undefined;
@@ -180,6 +206,58 @@ try {
     assert.equal(process._getActiveHandles().filter(handle => handle instanceof net.Socket && handle.remotePort && !handle.destroyed).length, 0);
   });
 
+  await test('diagnostics complete once after the operation and never serialize its body', async () => {
+    await diagnostics(async lines => {
+      let release; const wait = new Promise(resolve => { release = resolve; });
+      const answer = { statusCode: 200, body: { content: 'PRIVATE_BODY_SECRET' }, url: 'https://PRIVATE_URL_SECRET/' };
+      const pending = observeWebFetch(async () => { await wait; return answer; });
+      assert.equal(lines.length, 0); release(); assert.equal(await pending, answer);
+      assert.equal(lines.length, 1); const event = diagnostic(lines[0]);
+      assert.equal(event.web_result, 'success'); assert.equal(event.web_error, 'none'); assert.equal(event.web_http_status, 200);
+      assert(!lines[0].includes('PRIVATE_'));
+    });
+  });
+  await test('diagnostics classify only fixed error codes without messages credentials or stacks', async () => {
+    await diagnostics(async lines => {
+      for (const [code, expected] of [
+        ['WEB_INVALID_URL', 'invalid_url'], ['WEB_BLOCKED_URL', 'blocked_url'], ['WEB_REDIRECT_BLOCKED', 'redirect_blocked'],
+        ['WEB_UNSUPPORTED_CONTENT_TYPE', 'unsupported_content'], ['WEB_FETCH_TOO_LARGE', 'too_large'],
+        ['WEB_FETCH_TIMEOUT', 'timeout'], ['WEB_ABORTED', 'aborted'], ['ENOTFOUND', 'dns'], ['EAI_AGAIN', 'dns'],
+        ['ECONNREFUSED', 'connection_refused'], ['DSH_PROXY_CONNECT_FAILED', 'proxy'],
+        ['ERR_TLS_CERT_ALTNAME_INVALID', 'tls'], ['UNRECOGNIZED_CREDENTIAL_SECRET', 'other'],
+      ]) {
+        const failure = Object.assign(new Error('https://CREDENTIAL_SECRET@host/PRIVATE_PATH?token=TOKEN_SECRET'),
+          { code: 'WEB_PROVIDER_ERROR', cause: Object.assign(new Error('BODY_SECRET'), { code }) });
+        const before = lines.length;
+        await assert.rejects(observeWebFetch(async () => { throw failure; }), error => error === failure);
+        assert.equal(lines.length, before + 1); const event = diagnostic(lines.at(-1));
+        assert.equal(event.web_result, 'failure'); assert.equal(event.web_error, expected); assert.equal(event.web_http_status, undefined);
+      }
+      assert(!lines.join('').includes('SECRET'));
+      const hostile = Object.defineProperty({}, 'code', { get() { throw new Error('SECRET'); } });
+      await assert.rejects(observeWebFetch(async () => { throw hostile; }), error => error === hostile);
+      assert.equal(diagnostic(lines.at(-1)).web_error, 'other');
+    });
+  });
+  await test('failed diagnostic output preserves the original success and failure', async () => {
+    await diagnostics(async lines => {
+      const answer = {}; assert.equal(await observeWebFetch(async () => answer), answer);
+      const failure = new Error('ORIGINAL_SECRET');
+      await assert.rejects(observeWebFetch(async () => { throw failure; }), error => error === failure);
+      assert.equal(lines.length, 0);
+    }, true);
+  });
+  await test('concurrent completion diagnostics retain separate request identities', async () => {
+    await diagnostics(async lines => {
+      let finishFirst; const firstWait = new Promise(resolve => { finishFirst = resolve; });
+      const first = observeWebFetch(async () => { await firstWait; return { statusCode: 201 }; });
+      await observeWebFetch(async () => ({ statusCode: 202 })); finishFirst(); await first;
+      assert.equal(lines.length, 2); const secondEvent = diagnostic(lines[0]), firstEvent = diagnostic(lines[1]);
+      assert.equal(firstEvent.web_http_status, 201); assert.equal(secondEvent.web_http_status, 202);
+      assert.equal(secondEvent.web_request_sequence, firstEvent.web_request_sequence + 1);
+    });
+  });
+
   if (process.env.DSH_WEB_GUEST === '1') {
     // This branch imports the complete actual npm packages in the ARM guest,
     // including their real timeout/proxy/schema dependencies. The injected DNS
@@ -215,6 +293,46 @@ try {
         assert.equal((await provider.fetch({ url: url('/ok', true).href })).statusCode, 200);
       } finally { await restore(); }
     });
+    await test('ARM complete provider emits private metadata only after reading the body', async () => {
+      await diagnostics(async lines => {
+        const provider = new production.HttpFetchProvider(actualLimits, async () => pin);
+        const pending = provider.fetch({ url: url('/delayed-body').href }); assert.equal(lines.length, 0);
+        assert.equal((await pending).body.content, 'first last'); assert.equal(lines.length, 1);
+        assert.equal(diagnostic(lines[0]).web_result, 'success');
+        await assert.rejects(provider.fetch({ url: url('/gzip-invalid').href }), error => error.code === 'WEB_PROVIDER_ERROR');
+        assert.equal(lines.length, 2); assert.equal(diagnostic(lines[1]).web_result, 'failure');
+        assert.equal((await provider.fetch({ url: url('/denied').href })).statusCode, 403);
+        assert.equal(lines.length, 3); assert.equal(diagnostic(lines[2]).web_http_status, 403);
+        assert.equal(diagnostic(lines[2]).web_result, 'success');
+        assert(!lines.join('').includes('first last')); assert(!lines.join('').includes('web-transport.test'));
+      });
+    });
+    await test('ARM complete provider classifies policy DNS and timeout failures privately', async () => {
+      await diagnostics(async lines => {
+        await assert.rejects(new production.HttpFetchProvider(actualLimits).fetch({ url: 'https://PRIVATE_TOKEN@host/' }), error => error.code === 'WEB_BLOCKED_URL');
+        assert.equal(diagnostic(lines.at(-1)).web_error, 'blocked_url');
+        const dns = new production.HttpFetchProvider(actualLimits, async () => {
+          throw Object.assign(new Error('PRIVATE_DNS_SECRET'), { code: 'ENOTFOUND' });
+        });
+        await assert.rejects(dns.fetch({ url: url().href }), error => error.code === 'WEB_PROVIDER_ERROR');
+        assert.equal(diagnostic(lines.at(-1)).web_error, 'dns');
+        await assert.rejects(new production.HttpFetchProvider({ ...actualLimits, timeoutMs: 30 }, async () => pin)
+          .fetch({ url: url('/stream-hang').href }), error => error.code === 'WEB_FETCH_TIMEOUT');
+        assert.equal(diagnostic(lines.at(-1)).web_error, 'timeout');
+        await assert.rejects(new production.HttpFetchProvider(actualLimits, async () => pin)
+          .fetch({ url: `https://wrong.web-transport.test:${tlsPort}/ok` }), error => error.code === 'WEB_PROVIDER_ERROR');
+        assert.equal(diagnostic(lines.at(-1)).web_error, 'tls'); assert.equal(lines.length, 4);
+        assert(!lines.join('').includes('PRIVATE_')); assert(!lines.join('').includes('web-transport.test'));
+      });
+    });
+    await test('ARM complete provider preserves outcomes when diagnostic stderr fails', async () => {
+      await diagnostics(async lines => {
+        const provider = new production.HttpFetchProvider(actualLimits, async () => pin);
+        assert.equal((await provider.fetch({ url: url().href })).statusCode, 200);
+        await assert.rejects(provider.fetch({ url: 'file:///PRIVATE_PATH_SECRET' }), error => error.code === 'WEB_INVALID_URL');
+        assert.equal(lines.length, 0);
+      }, true);
+    });
   }
 
   const sourcePath = process.env.DSH_WEB_FETCH_SOURCE;
@@ -242,10 +360,10 @@ try {
   // Evaluate the actual patched provider implementation. Only its imports and
   // plugin registration/config tail are adapted; transport and policy code are exact.
   const implementation = patched.replace(/^import .*;\r?\n/gm, '').split('const MAX_NODE_TIMER_DELAY_MS =')[0];
-  const api = new Function('WebError', 'lookup', 'isIP', 'ipaddr', 'proxyRouteFor', 'deadline', 'timeoutOf', 'dshRequestPinned', 'dshRequestVia',
+  const api = new Function('WebError', 'lookup', 'isIP', 'ipaddr', 'proxyRouteFor', 'deadline', 'timeoutOf', 'dshRequestPinned', 'dshRequestVia', 'dshObserveWebFetch',
     `${implementation}\nreturn { HttpFetchProvider, resolvePublicAddresses, validateFetchUrl, isPublicIpAddress };`)
     (WebError, () => { throw new Error('unexpected OS DNS'); }, net.isIP, ipaddr, () => route,
-      deadline, signal => signal.reason?.fixtureTimeout ? signal.reason : undefined, requestPinned, requestVia);
+      deadline, signal => signal.reason?.fixtureTimeout ? signal.reason : undefined, requestPinned, requestVia, observeWebFetch);
   const limits = { timeoutMs: 1000, maxResponseBytes: 1000, maxBodyChars: 1000, maxRedirects: 2, userAgent: 'fixture' };
   const provider = new api.HttpFetchProvider(limits, async () => pin);
   await test('exact production provider reads transport and same-origin redirect', async () => {
@@ -300,6 +418,34 @@ try {
   await test('provider deadline remains a failing timeout, not partial success', async () => {
     const limited = new api.HttpFetchProvider({ ...limits, timeoutMs: 30 }, async () => pin);
     await assert.rejects(limited.fetch({ url: url('/hang').href }), error => error.code === 'WEB_FETCH_TIMEOUT');
+  });
+  await test('exact provider diagnostics record body failure after successful HTTP headers', async () => {
+    await diagnostics(async lines => {
+      await assert.rejects(provider.fetch({ url: url('/gzip-invalid').href }), error => error.code === 'WEB_PROVIDER_ERROR');
+      assert.equal(lines.length, 1); assert.equal(diagnostic(lines[0]).web_result, 'failure');
+      assert.equal(diagnostic(lines[0]).web_error, 'other');
+    });
+  });
+  await test('exact provider diagnostics preserve readable HTTP denial status', async () => {
+    await diagnostics(async lines => {
+      const answer = await provider.fetch({ url: url('/denied').href }); assert.equal(answer.statusCode, 403);
+      assert.equal(answer.body.content, 'fixture denied'); assert.equal(lines.length, 1);
+      assert.equal(diagnostic(lines[0]).web_result, 'success'); assert.equal(diagnostic(lines[0]).web_http_status, 403);
+    });
+  });
+  await test('exact provider diagnostics do not echo a credential URL on policy refusal', async () => {
+    await diagnostics(async lines => {
+      await assert.rejects(provider.fetch({ url: 'https://CREDENTIAL_SECRET@host/PATH_SECRET' }), error => error.code === 'WEB_BLOCKED_URL');
+      assert.equal(lines.length, 1); assert.equal(diagnostic(lines[0]).web_error, 'blocked_url');
+      assert(!lines[0].includes('SECRET')); assert(!lines[0].includes('https:'));
+    });
+  });
+  await test('exact provider diagnostics wait for complete successful body consumption', async () => {
+    await diagnostics(async lines => {
+      const pending = provider.fetch({ url: url('/delayed-body').href }); assert.equal(lines.length, 0);
+      const answer = await pending; assert.equal(answer.body.content, 'first last'); assert.equal(lines.length, 1);
+      assert.equal(diagnostic(lines[0]).web_result, 'success'); assert(diagnostic(lines[0]).web_duration_ms >= 10);
+    });
   });
   console.log(`web fetch transport: ${passes}/${passes} passed; real sockets/TLS; policy dependency adapters; 100 close cycles`);
   if (process.env.DSH_WEB_GUEST === '1') console.log('WEB_FETCH_ARM_GUEST_COMPLETED=1');

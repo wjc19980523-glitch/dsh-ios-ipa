@@ -11,13 +11,16 @@ result = dict(phase='web-fetch-native', host_pid=123, timed_out=False, exit_kind
     exit_code=0, helper_exit_status=0, reader_processes=0, signal=None, signal_errors=[],
     completed_before_deadline=True, runner_error=None, pipe_eof=True,
     descendants_at_exit=[], residual_processes=[], elapsed_seconds=3.0)
-names = [f'fixture {index}' for index in range(32)] + [
+names = [f'fixture {index}' for index in range(40)] + [
     'ARM original packaged provider reproduces incompatible parser failure',
     'ARM complete patched package reads HTTPS and same-origin redirect',
     'ARM complete package rejects private destination without fixture resolver',
     'ARM complete package obeys installed proxy policy without origin DNS',
+    'ARM complete provider emits private metadata only after reading the body',
+    'ARM complete provider classifies policy DNS and timeout failures privately',
+    'ARM complete provider preserves outcomes when diagnostic stderr fails',
 ]
-output = '\n'.join('PASS ' + name for name in names) + '\nweb fetch transport: 36/36 passed; real sockets/TLS; policy dependency adapters; 100 close cycles\nWEB_FETCH_ARM_GUEST_COMPLETED=1\n'
+output = '\n'.join('PASS ' + name for name in names) + '\nweb fetch transport: 47/47 passed; real sockets/TLS; policy dependency adapters; 100 close cycles\nWEB_FETCH_ARM_GUEST_COMPLETED=1\n'
 module.check(result, output)
 count = 1
 for key, value in [

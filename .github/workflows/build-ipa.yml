@@ -468,6 +468,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/session-lease-prepare.py --tarball build/root.tar.gz --extract-original build/session-lease-original.js
+          python3 tests/session-lease-installer-test.py 2>&1 | tee cilogs-verify/session-installer.log
           node tests/session-lease-test.mjs build/session-lease-original.js 2>&1 | tee cilogs-verify/session-algorithm.log
           node tests/session-lease-controller-test.mjs 2>&1 | tee cilogs-verify/session-controller.log
           node --jitless tests/session-lease-transport-test.mjs 2>&1 | tee cilogs-verify/session-control-tcp.log

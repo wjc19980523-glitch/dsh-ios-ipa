@@ -42,7 +42,8 @@ for(const patch of payload.manifest.patches){
  const bytes=Buffer.from(text,'utf8');if(sha(bytes)!==patch.patched_sha256)throw new Error('patched digest mismatch');
  changes.push({target:patch.target,bytes,mode:stat.mode&0o777});
 }
-if(payload.guest_test)changes.push({target:payload.guest_test_target,bytes:Buffer.from(payload.guest_test,'base64'),mode:0o644});
+if(payload.guest_test)changes.push({target:'/tmp/dsh-session-lease-test.mjs',bytes:Buffer.from(payload.guest_test,'base64'),mode:0o644});
+if(payload.prepared_test)changes.push({target:'/tmp/dsh-session-prepared-test.mjs',bytes:Buffer.from(payload.prepared_test,'base64'),mode:0o644});
 // Preflight above finishes before the first write. Resources are installed
 // before the package's import becomes visible, using normal guest file APIs.
 for(const change of changes){
@@ -90,10 +91,8 @@ def main():
     assert not (options.include_guest_test and options.include_prepared_test)
     if options.include_guest_test:
         payload['guest_test'] = base64.b64encode((ROOT / 'tests/session-lease-guest-test.mjs').read_bytes()).decode('ascii')
-        payload['guest_test_target'] = '/tmp/dsh-session-lease-test.mjs'
     if options.include_prepared_test:
-        payload['guest_test'] = base64.b64encode((ROOT / 'tests/session-lease-prepared-guest-test.mjs').read_bytes()).decode('ascii')
-        payload['guest_test_target'] = '/tmp/dsh-session-prepared-test.mjs'
+        payload['prepared_test'] = base64.b64encode((ROOT / 'tests/session-lease-prepared-guest-test.mjs').read_bytes()).decode('ascii')
     encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode('utf-8')).decode('ascii')
     # The CLI bootstrap accepts a small argv buffer. Deliver the installer as
     # stdin data, never as a shell/Node argument or a new pipe-reading process.

@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { realpath, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,16 +13,18 @@ const fixtures = resolve(process.env.DSH_JOB_FIXTURES ?? 'build/job-tracking-fix
 const pkg = async name => import(pathToFileURL(join(fixtures, 'node_modules/@deepseek-ai', name, 'lib/index.js')).href);
 const { Context } = await pkg('cordis');
 const { LocalJobRegistry } = await pkg('dsh-jobs-local');
+const { SystemPrompt } = await pkg('dsh-system-prompt');
+const { ToolRuntime } = await pkg('dsh-tools');
 const { apply: applyBash } = await pkg('dsh-tool-bash');
 const { apply: applyJobs } = await pkg('dsh-tool-jobs');
 
 async function fixture(t, { refuse = false, track = true, preparationDelay = 0 } = {}) {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-real-job-'));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-real-job-')));
   const ledger = new JobLedger(home); await ledger.ready;
   const ctx = new Context(), definitions = new Map(), children = new Set(); let spawns = 0;
   const owners = new Map(['A', 'B'].map(id => [id, { id, session: { id, header: { cwd: process.cwd() } }, ctx: new Context(), status: 'busy' }]));
   ctx.provide('agents', { get: id => owners.get(id) });
-  ctx.provide('systemPrompt', { section() {}, getSectionOrder() { return 1; } });
+  new SystemPrompt(ctx, {});
   ctx.provide('tools', { register(tool) { definitions.set(tool.name, tool); return () => definitions.delete(tool.name); } });
   ctx.provide('shellEnv', { collect: () => ({}) });
   const shell = {
@@ -74,6 +76,14 @@ async function fixture(t, { refuse = false, track = true, preparationDelay = 0 }
 }
 const command = (delay, code = 0) => `exec '${process.execPath}' -e 'setTimeout(()=>{console.log("unauthorized fixture");process.exit(${code})},${delay})'`;
 const args = (delay, code, more = {}) => ({ command: command(delay, code), description: 'Run controlled local child', workdir: process.cwd(), ...more });
+
+test('the real packaged SystemPrompt rejects the previous missing-order registration and accepts the finite jobs order', () => {
+  const ctx = new Context(); new SystemPrompt(ctx, {});
+  const prompt = ctx.get('systemPrompt');
+  assert.throws(() => prompt.section({ name: 'old-tracking-negative-control', text: 'fixture' }), /order must be a finite number/);
+  assert.doesNotThrow(() => prompt.section({ name: 'fixed-tracking-positive-control',
+    order: prompt.getSectionOrder('TOOL_JOBS'), text: 'fixture' }));
+});
 
 test('actual foreground wait timeout promotes same running process, then records real exit zero', async t => {
   const f = await fixture(t);
@@ -202,4 +212,50 @@ test('pinned patched bridge runs through real Cordis hooks and reports exit evid
   assert(saved.records.some(record => record.job_id === value.jobId && record.state === 'failed' && record.exit_code === 8));
   const status = JSON.parse(await f.call('job_status', { execution_id: history.records.at(-1).execution_id }));
   assert.equal(status.record.state, 'failed'); assert.equal(f.spawns(), 1);
+});
+
+test('real prompt assembly offers bridge tools and the real tool runtime returns the controlled device result', { timeout: 10000 }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-real-registration-')));
+  const ctx = new Context(); new SystemPrompt(ctx, {}); new ToolRuntime(ctx, {});
+  ctx.provide('agents', { get: () => undefined });
+  new LocalJobRegistry(ctx, {});
+  const calls = [];
+  const server = http.createServer((request, response) => {
+    request.resume(); calls.push(request.url);
+    assert.equal(request.headers.authorization, 'Bearer controlled-registration-fixture');
+    response.setHeader('content-type', 'application/json');
+    response.end(request.url === '/v1/device' ? '{"systemVersion":"controlled-device-version"}' : '{"accepted":1}');
+  });
+  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  const before = Object.fromEntries(['DSH_HOST_BRIDGE_URL', 'DSH_HOST_BRIDGE_TOKEN', 'DSH_HOME'].map(k => [k, process.env[k]]));
+  process.env.DSH_HOST_BRIDGE_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.DSH_HOST_BRIDGE_TOKEN = 'controlled-registration-fixture'; process.env.DSH_HOME = home;
+  const jobs = ctx.get('jobs');
+  t.after(async () => {
+    try {
+      await jobs.disposeAll();
+      // Wait for the passive observer's own fixture journal before removing it.
+      await globalThis[Symbol.for('dsh.jobTracking.v1')]?.get(jobs)?.flush();
+      await ctx.fiber.dispose();
+    } finally {
+      server.closeAllConnections();
+      await new Promise(done => server.close(done));
+      for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+  const bridge = await import(pathToFileURL(join(fixtures, 'bridge-patched.mjs')).href + '?real-registration-proof');
+  assert.doesNotThrow(() => bridge.apply(ctx));
+  const assembly = await ctx.get('systemPrompt').assemble();
+  for (const name of ['device_info', 'job_status', 'job_history', 'development_preflight'])
+    assert(assembly.tools.some(tool => tool.name === name), `${name} must actually be offered in the assembled model schema`);
+  assert(assembly.sections.some(section => section.name === 'dsh:durable-job-status'));
+  const result = await ctx.get('tools').execute({ name: 'device_info', arguments: {},
+    callId: 'controlled-device-info', signal: new AbortController().signal,
+    agent: { id: 'A', ctx: new Context(), session: { id: 'A', header: { cwd: process.cwd() } } }, workspace: process.cwd() });
+  assert.equal(result.isError, false);
+  assert(JSON.stringify(result).includes('controlled-device-version'));
+  assert(calls.includes('/v1/device'));
 });

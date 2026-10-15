@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, symlink, link, stat, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import { realpath, mkdtemp, readFile, writeFile, rm, symlink, link, stat, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JobLedger, jobOutcome, toolOutcome } from '../app/JobTracking.bundle/job-ledger.mjs';
@@ -12,9 +12,10 @@ const event = (status = 'running', detail, owner = 'session-A', id = 'bash-1', t
   ({ type, cause, job: { id, owner, kind: 'bash', status, detail, label: 'SECRET_TOKEN=must-not-be-saved',
     result: 'sensitive output', output: { spillPaths: ['/private/secret'] } } });
 async function fixture(t, options = {}) {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-job-ledger-'));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-ledger-')));
   const ledger = new JobLedger(home, { runID: RUN1, ...options }); await ledger.ready;
   t.after(async () => { await ledger.flush(); await rm(home, { recursive: true, force: true }); });
+  assert.equal(ledger.storage, 'available', 'trusted fixture must be writable before fault injection');
   return { home, ledger };
 }
 
@@ -148,7 +149,7 @@ test('actual activity middleware distinguishes success, promotion, failure, and 
   assert.equal(rows.filter(r => r.outcome === 'started').length, 5); assert(!JSON.stringify(rows).includes('PRIVATE'));
 });
 test('tracking tools and middleware never execute or cancel work, and do not override policy', async t => {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-job-plugin-')); t.after(() => rm(home, { recursive: true, force: true }));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-plugin-'))); t.after(() => rm(home, { recursive: true, force: true }));
   const tools = new Map(), hooks = {}, listeners = []; let starts = 0;
   const jobs = { events: { subscribe: (_filter, fn) => listeners.push(fn) },
     get: id => ({ ...event().job, id }), start: () => { starts++; throw new Error('must not execute'); } };
@@ -163,4 +164,40 @@ test('tracking tools and middleware never execute or cancel work, and do not ove
   assert.equal(await hooks['tools/post-execute'](exec, {}, async () => blocked), blocked);
   for (let i = 0; i < 20; i++) await tools.get('job_status').execute({ execution_id: `${RUN1}:bash-1` }, exec);
   assert.equal(starts, 0); await ledger.flush();
+});
+
+test('an intentional parent symlink is still refused after fixture canonicalization', async t => {
+  const { home, ledger } = await fixture(t); await ledger.flush();
+  const before = await readFile(ledger.path), alias = join(home, 'intentional-alias');
+  await symlink(home, alias, 'dir');
+  const unsafe = new JobLedger(alias, { runID: RUN2 }); await unsafe.flush();
+  assert.equal(unsafe.storage, 'unavailable'); assert.deepEqual(await readFile(ledger.path), before);
+});
+
+test('live progress separates recent output, silence, failure and unknown without cancelling or persisting output', async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-progress-')));
+  const tools = new Map(), listeners = []; let now = 100, cancellations = 0;
+  let current = { ...event().job, output: { total: 0 } };
+  const jobs = { events: { subscribe: (_filter, fn) => listeners.push(fn) },
+    get: (_id, owner) => { assert.equal(owner, 'session-A'); if (!current) throw new Error('gone'); return current; },
+    kill: () => { cancellations++; } };
+  const ctx = { get: key => key === 'jobs' ? jobs : undefined, tools: { register: tool => tools.set(tool.name, tool) }, on() {} };
+  const ledger = installJobTracking(ctx, tool => tool, { home, runID: RUN1, now: () => now });
+  t.after(async () => { await ledger.flush(); await rm(home, { recursive: true, force: true }); });
+  await ledger.ready;
+  for (const listener of listeners) listener({ type: 'registered', job: current });
+  const query = owner => tools.get('job_status').execute({ execution_id: `${RUN1}:bash-1` }, { agent: { id: owner } }).then(JSON.parse);
+  assert.equal((await query('session-A')).live.observation, 'no_output_observed');
+  current.output.total = 4;
+  for (const listener of listeners) listener({ type: 'output', id: 'bash-1', owner: 'session-A', total: 4, content: 'SECRET_NOT_TO_SAVE' });
+  assert.equal((await query('session-A')).live.observation, 'output_observed_recently');
+  now += 60000;
+  const quiet = await query('session-A'); assert.equal(quiet.live.observation, 'no_recent_output'); assert.equal(quiet.live.state, 'running');
+  assert.equal((await query('session-B')).record, null);
+  current = { ...current, status: 'completed', detail: 'exit code: 9' };
+  for (const listener of listeners) listener({ type: 'settled', job: current });
+  const failed = await query('session-A'); assert.equal(failed.record.state, 'failed'); assert.equal(failed.live.state, 'failed');
+  current = null; assert.equal((await query('session-A')).live.state, 'unknown');
+  assert.equal(cancellations, 0); await ledger.flush();
+  const bytes = await readFile(ledger.path, 'utf8'); assert(!bytes.includes('SECRET')); assert(!bytes.includes('output_bytes')); assert(!bytes.includes('last_output_at'));
 });

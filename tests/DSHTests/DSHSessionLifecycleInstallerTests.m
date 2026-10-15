@@ -534,16 +534,18 @@ static NSString *DSHInstallerTestHash(NSData *data) {
 
 - (void)prepareJobTrackingFixture {
     NSString *package = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
-    NSString *parent = package.stringByDeletingLastPathComponent;
+    NSString *directory = package.stringByDeletingLastPathComponent;
+    NSString *parent = directory;
     while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
     self.filesystem.files[package] = self.original;
-    self.resources = @{@"job-tracking.mjs": DSHInstallerTestData(@"export const tracking = 1;"),
+    self.resources = @{@"development-tools.mjs": DSHInstallerTestData(@"export const development = 1;"),
+                       @"job-tracking.mjs": DSHInstallerTestData(@"export const tracking = 1;"),
                        @"job-ledger.mjs": DSHInstallerTestData(@"export const ledger = 1;")};
     NSMutableDictionary *patch = [self.manifest[@"patches"][0] mutableCopy];
     patch[@"target"] = package;
     NSMutableArray *files = [NSMutableArray array];
-    for (NSString *name in @[@"job-tracking.mjs", @"job-ledger.mjs"])
-        [files addObject:@{@"source": name, @"target": [parent stringByAppendingPathComponent:name],
+    for (NSString *name in @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs"])
+        [files addObject:@{@"source": name, @"target": [directory stringByAppendingPathComponent:name],
             @"sha256": DSHInstallerTestHash(self.resources[name])}];
     self.manifest = @{@"schema": @1, @"patches": @[patch], @"files": files};
 }
@@ -556,6 +558,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSError *error = nil;
     XCTAssertTrue([self installJobs:&error], @"%@", error);
     XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs",
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js"]));
@@ -564,10 +567,39 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertEqual(self.filesystem.writeCalls, writes);
 }
 - (void)testJobTrackingManifestCannotWriteSessionOrWebPackages {
-    XCTAssertFalse([self installJobs:nil]);
+    NSError *error = nil;
+    XCTAssertFalse([self installJobs:&error]);
+    XCTAssertEqualObjects(error.domain, DSHSessionLifecycleInstallerErrorDomain);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
+    XCTAssertEqualObjects(error.userInfo[@"target"], @"manifest");
     [self prepareJobTrackingFixture];
-    XCTAssertFalse([self install:nil]);
-    XCTAssertFalse([self installWeb:nil]);
+    XCTAssertFalse([self install:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
+    // Match the web installer's resource count so this exercises its resource
+    // whitelist, rather than passing because an unrelated schema check failed.
+    NSDictionary *jobsManifest = self.manifest;
+    NSMutableDictionary *webShape = [jobsManifest mutableCopy];
+    webShape[@"files"] = @[jobsManifest[@"files"][0]];
+    self.manifest = webShape;
+    XCTAssertFalse([self installWeb:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
+    XCTAssertEqualObjects(error.userInfo[@"target"], @"manifest");
+    // Also prove that otherwise-valid tracking resources cannot authorize
+    // writing either protected package through a forged patch target.
+    for (NSString *target in @[
+        @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+        @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js"]) {
+        NSMutableDictionary *foreign = [jobsManifest mutableCopy];
+        NSMutableDictionary *patch = [jobsManifest[@"patches"][0] mutableCopy];
+        patch[@"target"] = target; foreign[@"patches"] = @[patch]; self.manifest = foreign;
+        XCTAssertFalse([self installJobs:&error]);
+        XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
+        XCTAssertEqualObjects(error.userInfo[@"operation"], @"package whitelist");
+        XCTAssertEqualObjects(error.userInfo[@"target"], @"manifest");
+    }
     XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
 }
 - (void)testUnknownBridgeIsPreservedWithoutAnyTrackingResourceWrites {
@@ -575,9 +607,46 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSString *package = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
     NSData *unknown = DSHInstallerTestData(@"user-customized-bridge");
     self.filesystem.files[package] = unknown;
-    XCTAssertFalse([self installJobs:nil]);
+    NSError *error = nil;
+    XCTAssertFalse([self installJobs:&error]);
+    XCTAssertEqualObjects(error.domain, DSHSessionLifecycleInstallerErrorDomain);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"unrecognized package hash");
+    XCTAssertEqualObjects(error.userInfo[@"target"], package);
     XCTAssertEqualObjects(self.filesystem.files[package], unknown);
     XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testUnknownDevelopmentHelperIsPreservedWithoutAnyTrackingResourceWrites {
+    [self prepareJobTrackingFixture];
+    NSString *helper = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs";
+    NSData *unknown = DSHInstallerTestData(@"user-customized-development-helper");
+    self.filesystem.files[helper] = unknown;
+    NSError *error = nil;
+    XCTAssertFalse([self installJobs:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"unrecognized existing controller");
+    XCTAssertEqualObjects(error.userInfo[@"target"], helper);
+    XCTAssertEqualObjects(self.filesystem.files[helper], unknown);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testKnownTrackingControllerUpgradeCommitsHelperFirstAndPreservesLedger {
+    [self prepareJobTrackingFixture];
+    NSString *prefix = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/";
+    NSString *controller = [prefix stringByAppendingString:@"job-tracking.mjs"];
+    NSString *ledger = [prefix stringByAppendingString:@"job-ledger.mjs"];
+    self.filesystem.files[[prefix stringByAppendingString:@"index.js"]] = self.patched;
+    self.filesystem.files[ledger] = self.resources[@"job-ledger.mjs"];
+    NSData *previous = DSHInstallerTestData(@"known-old-tracking-controller");
+    self.filesystem.files[controller] = previous;
+    NSMutableDictionary *manifest = [self.manifest mutableCopy];
+    NSMutableArray *files = [self.manifest[@"files"] mutableCopy];
+    NSMutableDictionary *record = [files[1] mutableCopy];
+    record[@"previous_sha256"] = @[DSHInstallerTestHash(previous)];
+    files[1] = record; manifest[@"files"] = files; self.manifest = manifest;
+    XCTAssertTrue([self installJobs:nil]);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[
+        [prefix stringByAppendingString:@"development-tools.mjs"], controller]));
+    XCTAssertEqualObjects(self.filesystem.files[ledger], self.resources[@"job-ledger.mjs"]);
 }
 - (void)testActualBundledManifestInstallsItsPinnedCanonicalPackage {
     NSURL *bundle = [NSBundle.mainBundle URLForResource:@"SessionLifecycle" withExtension:@"bundle"];

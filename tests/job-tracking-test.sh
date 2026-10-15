@@ -19,4 +19,4 @@ trap cleanup EXIT
 python3 "$HERE/job-tracking-prepare.py" --fixtures "$WORK"
 export DSH_JOB_FIXTURES="$WORK"
 node --check "$WORK/bridge-patched.mjs"
-node --test "$HERE/job-ledger-test.mjs" "$HERE/job-tracking-runtime-test.mjs"
+node --test "$HERE/job-ledger-test.mjs" "$HERE/job-tracking-runtime-test.mjs" "$HERE/development-tools-test.mjs"

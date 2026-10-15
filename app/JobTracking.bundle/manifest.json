@@ -2,9 +2,17 @@
   "schema": 1,
   "files": [
     {
+      "source": "development-tools.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs",
+      "sha256": "c29375e91bc7fd295c86c5162629632effe736e99fe3e33637342d988bd9f4ac"
+    },
+    {
       "source": "job-tracking.mjs",
       "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
-      "sha256": "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1"
+      "sha256": "f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510",
+      "previous_sha256": [
+        "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1"
+      ]
     },
     {
       "source": "job-ledger.mjs",

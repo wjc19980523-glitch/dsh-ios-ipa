@@ -569,7 +569,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
 - (void)testJobTrackingManifestCannotWriteSessionOrWebPackages {
     NSError *error = nil;
     XCTAssertFalse([self installJobs:&error]);
-    XCTAssertEqualObjects(error.domain, DSHSessionLifecycleInstallerErrorDomain);
+    XCTAssertEqualObjects(error.domain, @"DSHSessionLifecycleInstaller");
     XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
     XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
     XCTAssertEqualObjects(error.userInfo[@"target"], @"manifest");
@@ -609,7 +609,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     self.filesystem.files[package] = unknown;
     NSError *error = nil;
     XCTAssertFalse([self installJobs:&error]);
-    XCTAssertEqualObjects(error.domain, DSHSessionLifecycleInstallerErrorDomain);
+    XCTAssertEqualObjects(error.domain, @"DSHSessionLifecycleInstaller");
     XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
     XCTAssertEqualObjects(error.userInfo[@"operation"], @"unrecognized package hash");
     XCTAssertEqualObjects(error.userInfo[@"target"], package);

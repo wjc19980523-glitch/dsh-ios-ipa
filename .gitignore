@@ -1,5 +1,6 @@
 # generated
 build/
+cilogs-verify/
 *.xcresult
 xcuserdata/
 DSH.xcodeproj/project.xcworkspace/xcuserdata/

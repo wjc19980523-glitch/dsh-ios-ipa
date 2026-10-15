@@ -444,7 +444,10 @@ jobs:
           python3 -c "import hashlib,json; from pathlib import Path; expected=json.loads(Path('app/SessionLifecycle.bundle/manifest.json').read_text())['rootfs_sha256']; actual=hashlib.sha256(Path('build/root.tar.gz').read_bytes()).hexdigest(); assert actual==expected, 'Session-only update must retain the Build 26 rootfs; refusing an unintended data migration'"
 
       - name: Native runner execution and failure-propagation regressions
-        run: python3 tests/native-runner-test.py
+        run: |
+          set -euo pipefail
+          python3 tests/native-runner-test.py
+          python3 tests/job-tracking-supervision-test.py
 
       - name: Guest helper real wait-status regressions (Bash 3.2 and Bash 5)
         run: |

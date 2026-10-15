@@ -1,6 +1,7 @@
 // Real packaged Bash + job registry + job controls; only the shell service is a
 // local POSIX child_process adapter. No downloads, iPad, credentials, or npm install.
-import test from 'node:test';
+import nodeTest from 'node:test';
+import { createTracedTest, traceStage, traceAwait } from './job-tracking-trace.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { realpath, mkdtemp, rm, readFile } from 'node:fs/promises';
@@ -9,18 +10,34 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { JobLedger } from '../app/JobTracking.bundle/job-ledger.mjs';
 import http from 'node:http';
+const FILE_TAG = 'job-tracking-runtime-test';
+const test = createTracedTest(nodeTest, FILE_TAG);
+traceStage(FILE_TAG, 'file:bootstrap');
 const fixtures = resolve(process.env.DSH_JOB_FIXTURES ?? 'build/job-tracking-fixtures');
 const pkg = async name => import(pathToFileURL(join(fixtures, 'node_modules/@deepseek-ai', name, 'lib/index.js')).href);
+traceStage(FILE_TAG, 'import:cordis:start');
 const { Context } = await pkg('cordis');
+traceStage(FILE_TAG, 'import:cordis:done');
+traceStage(FILE_TAG, 'import:jobs-local:start');
 const { LocalJobRegistry } = await pkg('dsh-jobs-local');
+traceStage(FILE_TAG, 'import:jobs-local:done');
+traceStage(FILE_TAG, 'import:system-prompt:start');
 const { SystemPrompt } = await pkg('dsh-system-prompt');
+traceStage(FILE_TAG, 'import:system-prompt:done');
+traceStage(FILE_TAG, 'import:tools:start');
 const { ToolRuntime } = await pkg('dsh-tools');
+traceStage(FILE_TAG, 'import:tools:done');
+traceStage(FILE_TAG, 'import:tool-bash:start');
 const { apply: applyBash } = await pkg('dsh-tool-bash');
+traceStage(FILE_TAG, 'import:tool-bash:done');
+traceStage(FILE_TAG, 'import:tool-jobs:start');
 const { apply: applyJobs } = await pkg('dsh-tool-jobs');
+traceStage(FILE_TAG, 'import:tool-jobs:done');
 
 async function fixture(t, { refuse = false, track = true, preparationDelay = 0 } = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-real-job-')));
-  const ledger = new JobLedger(home); await ledger.ready;
+  const ledger = new JobLedger(home);
+  await traceAwait(FILE_TAG, 'fixture:ledger.ready', t, () => ledger.ready);
   const ctx = new Context(), definitions = new Map(), children = new Set(); let spawns = 0;
   const owners = new Map(['A', 'B'].map(id => [id, { id, session: { id, header: { cwd: process.cwd() } }, ctx: new Context(), status: 'busy' }]));
   ctx.provide('agents', { get: id => owners.get(id) });
@@ -68,10 +85,12 @@ async function fixture(t, { refuse = false, track = true, preparationDelay = 0 }
   const exec = owner => ({ name: 'bash', agent: owners.get(owner), signal: new AbortController().signal,
     callId: 'fixture-call', workspace: process.cwd() });
   const call = (name, args, owner = 'A', context) => definitions.get(name).execute(args, context ?? exec(owner));
-  t.after(async () => { await jobs.disposeAll(); await ledger.flush();
+  t.after(async () => {
+    await traceAwait(FILE_TAG, 'fixture:jobs.disposeAll', t, () => jobs.disposeAll());
+    await traceAwait(FILE_TAG, 'fixture:ledger.flush', t, () => ledger.flush());
     for (const child of children) child.kill('SIGTERM');
     assert.equal(children.size, 0, 'no child process may be left behind');
-    await rm(home, { recursive: true, force: true }); });
+    await traceAwait(FILE_TAG, 'fixture:rm', t, () => rm(home, { recursive: true, force: true })); });
   return { jobs, ledger, call, exec, ctx, home, owners, spawns: () => spawns };
 }
 const command = (delay, code = 0) => `exec '${process.execPath}' -e 'setTimeout(()=>{console.log("unauthorized fixture");process.exit(${code})},${delay})'`;
@@ -178,8 +197,8 @@ test('pinned patched bridge runs through real Cordis hooks and reports exit evid
       response.setHeader('content-type', 'application/json'); response.end('{"accepted":1}');
     });
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  await traceAwait(FILE_TAG, 'bridge:server.listen', t, () => new Promise(resolve => server.listen(0, '127.0.0.1', resolve)));
+  t.after(() => traceAwait(FILE_TAG, 'bridge:server.close', t, () => new Promise(resolve => server.close(resolve))));
   const before = Object.fromEntries(['DSH_HOST_BRIDGE_URL', 'DSH_HOST_BRIDGE_TOKEN', 'DSH_HOME'].map(k => [k, process.env[k]]));
   process.env.DSH_HOST_BRIDGE_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.DSH_HOST_BRIDGE_TOKEN = 'controlled-fixture-not-a-credential'; process.env.DSH_HOME = f.home;
@@ -226,24 +245,25 @@ test('real prompt assembly offers bridge tools and the real tool runtime returns
     response.setHeader('content-type', 'application/json');
     response.end(request.url === '/v1/device' ? '{"systemVersion":"controlled-device-version"}' : '{"accepted":1}');
   });
-  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  await traceAwait(FILE_TAG, 'registration:server.listen', t, () => new Promise(done => server.listen(0, '127.0.0.1', done)));
   const before = Object.fromEntries(['DSH_HOST_BRIDGE_URL', 'DSH_HOST_BRIDGE_TOKEN', 'DSH_HOME'].map(k => [k, process.env[k]]));
   process.env.DSH_HOST_BRIDGE_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.DSH_HOST_BRIDGE_TOKEN = 'controlled-registration-fixture'; process.env.DSH_HOME = home;
   const jobs = ctx.get('jobs');
   t.after(async () => {
     try {
-      await jobs.disposeAll();
+      await traceAwait(FILE_TAG, 'registration:jobs.disposeAll', t, () => jobs.disposeAll());
       // Wait for the passive observer's own fixture journal before removing it.
-      await globalThis[Symbol.for('dsh.jobTracking.v1')]?.get(jobs)?.flush();
-      await ctx.fiber.dispose();
+      await traceAwait(FILE_TAG, 'registration:ledger.flush', t,
+        () => globalThis[Symbol.for('dsh.jobTracking.v1')]?.get(jobs)?.flush());
+      await traceAwait(FILE_TAG, 'registration:ctx.dispose', t, () => ctx.fiber.dispose());
     } finally {
       server.closeAllConnections();
-      await new Promise(done => server.close(done));
+      await traceAwait(FILE_TAG, 'registration:server.close', t, () => new Promise(done => server.close(done)));
       for (const [key, value] of Object.entries(before)) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
-      await rm(home, { recursive: true, force: true });
+      await traceAwait(FILE_TAG, 'registration:rm', t, () => rm(home, { recursive: true, force: true }));
     }
   });
   const bridge = await import(pathToFileURL(join(fixtures, 'bridge-patched.mjs')).href + '?real-registration-proof');
@@ -259,3 +279,4 @@ test('real prompt assembly offers bridge tools and the real tool runtime returns
   assert(JSON.stringify(result).includes('controlled-device-version'));
   assert(calls.includes('/v1/device'));
 });
+traceStage(FILE_TAG, 'file:registered');

@@ -1,4 +1,5 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
+import { createTracedTest, traceStage, traceAwait } from './job-tracking-trace.mjs';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import http from 'node:http';
@@ -8,6 +9,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { developmentPreflight, downloadDependency } from '../app/JobTracking.bundle/development-tools.mjs';
+const FILE_TAG = 'development-tools-test';
+const test = createTracedTest(nodeTest, FILE_TAG);
+traceStage(FILE_TAG, 'file:bootstrap');
 
 const body = Buffer.from('controlled dependency fixture\n');
 const sha256 = createHash('sha256').update(body).digest('hex');
@@ -33,16 +37,16 @@ async function fixture(t) {
     else { res.writeHead(200, { 'Content-Length': body.length }); res.end(body); }
   });
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
-  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  await traceAwait(FILE_TAG, 'fixture:server.listen', t, () => new Promise(done => server.listen(0, '127.0.0.1', done)));
   const url = path => `https://127.0.0.1:${server.address().port}${path}`;
   const destination = join(home, 'dependency.bin');
   const args = path => ({ url: url(path), destination, sha256, connectSeconds: 1, stallSeconds: 1, totalSeconds: 5 });
   t.after(async () => {
     for (const socket of sockets) socket.destroy();
-    await new Promise(done => server.close(done));
+    await traceAwait(FILE_TAG, 'fixture:server.close', t, () => new Promise(done => server.close(done)));
     const names = await readdir(home);
     assert(!names.some(name => name.includes('.dsh-part-') || name.endsWith('.dsh-download-lock')), 'owned transfers and locks must be cleaned up');
-    await rm(home, { recursive: true, force: true });
+    await traceAwait(FILE_TAG, 'fixture:rm', t, () => rm(home, { recursive: true, force: true }));
   });
   const waitRequest = async () => {
     const deadline = Date.now() + 5000;
@@ -149,22 +153,24 @@ test('CLI SIGTERM is propagated to its curl child and returns a genuine nonzero 
   const finished = new Promise(done => child.once('close', (code, signal) => done({ code, signal })));
   try {
     await f.waitRequest(); child.kill('SIGTERM');
-    const status = await finished; assert.equal(status.code, 1); assert.equal(status.signal, null);
+    const status = await traceAwait(FILE_TAG, 'cli:close', t, () => finished);
+    assert.equal(status.code, 1); assert.equal(status.signal, null);
     assert.equal(JSON.parse(output.trim().split('\n').at(-1)).state, 'interrupted');
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-    await finished;
+    await traceAwait(FILE_TAG, 'cli:finally.close', t, () => finished);
   }
 });
 test('oversized response fails under its declared bound', async t => {
   const f = await fixture(t), result = await f.download({ ...f.args('/ok'), maxBytes: 2 });
   assert.equal(result.state, 'failed'); await assert.rejects(readFile(f.destination), { code: 'ENOENT' });
 });
-test('CLI returns a genuine nonzero exit for unsupported native build and invalid download', async () => {
+test('CLI returns a genuine nonzero exit for unsupported native build and invalid download', async t => {
   for (const args of [['preflight', 'native-ios'], ['download', 'https://fixture.invalid', '/tmp/unused', 'invalid']]) {
     const child = spawn(process.execPath, ['app/JobTracking.bundle/development-tools.mjs', ...args], { stdio: ['ignore','pipe','pipe'] });
     let output = ''; child.stdout.on('data', bytes => { output += bytes; }); child.stderr.resume();
-    const code = await new Promise(done => child.once('close', done));
+    const code = await traceAwait(FILE_TAG, 'cli:preflight-or-invalid.close', t,
+      () => new Promise(done => child.once('close', done)));
     if (process.platform !== 'darwin' || args[0] === 'download') assert.equal(code, 1);
     assert.equal(typeof JSON.parse(output).state, 'string');
   }
@@ -218,10 +224,11 @@ test('disabling default curlrc still honors an explicitly inherited HTTPS proxy 
   const proxy = http.createServer();
   proxy.on('connect', (request, socket) => { connects++; assert(request.url.startsWith('127.0.0.1:'));
     socket.end('HTTP/1.1 502 Controlled fixture\r\nContent-Length: 0\r\n\r\n'); });
-  await new Promise(done => proxy.listen(0, '127.0.0.1', done));
-  t.after(() => new Promise(done => proxy.close(done)));
+  await traceAwait(FILE_TAG, 'proxy:server.listen', t, () => new Promise(done => proxy.listen(0, '127.0.0.1', done)));
+  t.after(() => traceAwait(FILE_TAG, 'proxy:server.close', t, () => new Promise(done => proxy.close(done))));
   const proxyURL = `http://127.0.0.1:${proxy.address().port}`;
   const environment = { ...f.environment, HTTPS_PROXY: proxyURL, https_proxy: proxyURL, NO_PROXY: '', no_proxy: '' };
   const result = await downloadDependency(f.args('/ok'), { environment });
   assert.equal(result.state, 'failed'); assert.equal(connects, 1); assert.equal(f.requests(), 0);
 });
+traceStage(FILE_TAG, 'file:registered');

@@ -155,10 +155,13 @@ def run(a):
                 if due > 0 and elapsed >= due and label not in sampled and raw_status is None and not timed_out:
                     sampled.add(label)
                     destination = a.result.parent / label
-                    observer = subprocess.Popen([sys.executable, str(Path(__file__).with_name('guest-observer.py')),
+                    observer_command = [sys.executable, str(Path(__file__).with_name('guest-observer.py')),
                         '--pid', str(p.pid), '--phase', a.phase, '--output', str(destination),
                         '--start-identity', identity or 'unknown',
-                        '--events', str(a.events), '--executable', str(Path(a.command[0]).resolve())],
+                        '--events', str(a.events), '--executable', str(Path(a.command[0]).resolve())]
+                    if getattr(a, 'host_only', False):
+                        observer_command.append('--host-only')
+                    observer = subprocess.Popen(observer_command,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                     observers.append((label, observer))
             for key, _ in selector.select(0.02):
@@ -236,6 +239,7 @@ if __name__ == '__main__':
     parser.add_argument('--initial-sample-after', type=float, default=0)
     parser.add_argument('--events', type=Path, required=True)
     parser.add_argument('--stdin-file')
+    parser.add_argument('--host-only', action='store_true')
     separator = sys.argv.index('--')
     args = parser.parse_args(sys.argv[1:separator])
     args.command = sys.argv[separator + 1:]

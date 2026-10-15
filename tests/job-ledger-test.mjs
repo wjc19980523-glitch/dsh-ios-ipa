@@ -1,10 +1,14 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
+import { createTracedTest, traceStage, traceAwait } from './job-tracking-trace.mjs';
 import assert from 'node:assert/strict';
 import { realpath, mkdtemp, readFile, writeFile, rm, symlink, link, stat, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JobLedger, jobOutcome, toolOutcome } from '../app/JobTracking.bundle/job-ledger.mjs';
 import { installJobTracking, installTaskActivity } from '../app/JobTracking.bundle/job-tracking.mjs';
+const FILE_TAG = 'job-ledger-test';
+const test = createTracedTest(nodeTest, FILE_TAG);
+traceStage(FILE_TAG, 'file:bootstrap');
 
 const RUN1 = '11111111-1111-4111-8111-111111111111';
 const RUN2 = '22222222-2222-4222-8222-222222222222';
@@ -13,8 +17,12 @@ const event = (status = 'running', detail, owner = 'session-A', id = 'bash-1', t
     result: 'sensitive output', output: { spillPaths: ['/private/secret'] } } });
 async function fixture(t, options = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-ledger-')));
-  const ledger = new JobLedger(home, { runID: RUN1, ...options }); await ledger.ready;
-  t.after(async () => { await ledger.flush(); await rm(home, { recursive: true, force: true }); });
+  const ledger = new JobLedger(home, { runID: RUN1, ...options });
+  await traceAwait(FILE_TAG, 'fixture:ledger.ready', t, () => ledger.ready);
+  t.after(async () => {
+    await traceAwait(FILE_TAG, 'fixture:ledger.flush', t, () => ledger.flush());
+    await traceAwait(FILE_TAG, 'fixture:rm', t, () => rm(home, { recursive: true, force: true }));
+  });
   assert.equal(ledger.storage, 'available', 'trusted fixture must be writable before fault injection');
   return { home, ledger };
 }
@@ -149,7 +157,8 @@ test('actual activity middleware distinguishes success, promotion, failure, and 
   assert.equal(rows.filter(r => r.outcome === 'started').length, 5); assert(!JSON.stringify(rows).includes('PRIVATE'));
 });
 test('tracking tools and middleware never execute or cancel work, and do not override policy', async t => {
-  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-plugin-'))); t.after(() => rm(home, { recursive: true, force: true }));
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-job-plugin-')));
+  t.after(() => traceAwait(FILE_TAG, 'plugin:rm', t, () => rm(home, { recursive: true, force: true })));
   const tools = new Map(), hooks = {}, listeners = []; let starts = 0;
   const jobs = { events: { subscribe: (_filter, fn) => listeners.push(fn) },
     get: id => ({ ...event().job, id }), start: () => { starts++; throw new Error('must not execute'); } };
@@ -183,7 +192,10 @@ test('live progress separates recent output, silence, failure and unknown withou
     kill: () => { cancellations++; } };
   const ctx = { get: key => key === 'jobs' ? jobs : undefined, tools: { register: tool => tools.set(tool.name, tool) }, on() {} };
   const ledger = installJobTracking(ctx, tool => tool, { home, runID: RUN1, now: () => now });
-  t.after(async () => { await ledger.flush(); await rm(home, { recursive: true, force: true }); });
+  t.after(async () => {
+    await traceAwait(FILE_TAG, 'progress:ledger.flush', t, () => ledger.flush());
+    await traceAwait(FILE_TAG, 'progress:rm', t, () => rm(home, { recursive: true, force: true }));
+  });
   await ledger.ready;
   for (const listener of listeners) listener({ type: 'registered', job: current });
   const query = owner => tools.get('job_status').execute({ execution_id: `${RUN1}:bash-1` }, { agent: { id: owner } }).then(JSON.parse);
@@ -201,3 +213,4 @@ test('live progress separates recent output, silence, failure and unknown withou
   assert.equal(cancellations, 0); await ledger.flush();
   const bytes = await readFile(ledger.path, 'utf8'); assert(!bytes.includes('SECRET')); assert(!bytes.includes('output_bytes')); assert(!bytes.includes('last_output_at'));
 });
+traceStage(FILE_TAG, 'file:registered');

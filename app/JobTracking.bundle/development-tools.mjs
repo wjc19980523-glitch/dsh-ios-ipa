@@ -63,8 +63,9 @@ async function hashFile(path, maxBytes, expectedIdentity) {
 }
 const integer = (n, min, max) => Number.isSafeInteger(n) && n >= min && n <= max;
 
-// Runs only when explicitly requested. curl retains its normal TLS, CA and proxy
-// configuration. HTTPS-only redirects, no implicit retry, checksum before publish.
+// Runs only when explicitly requested. Ignore default curlrc so it cannot add
+// insecure/upload/extra URLs. Keep existing environment CA/proxy and system TLS
+// trust. One literal URL, HTTPS-only redirects, checksum before publication.
 // The existing bash/job tools remain responsible for waiting and backgrounding.
 export async function downloadDependency({ url, destination, sha256, connectSeconds = 15,
   stallSeconds = 60, totalSeconds = 900, maxBytes = 64 * 1024 * 1024 },
@@ -98,7 +99,7 @@ export async function downloadDependency({ url, destination, sha256, connectSeco
     const file = await open(temporary, 'wx', 0o600);
     try { identity = await file.stat(); } finally { await file.close(); }
     phase = 'transfer';
-    const args = ['--fail', '--silent', '--show-error', '--location',
+    const args = ['--disable', '--globoff', '--fail', '--silent', '--show-error', '--location',
       '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', String(connectSeconds),
       '--speed-time', String(stallSeconds), '--speed-limit', '1', '--max-time', String(totalSeconds),
       '--max-filesize', String(maxBytes), '--retry', '0', '--output', temporary,

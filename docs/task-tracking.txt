@@ -44,7 +44,8 @@ job_status.live 提供当前 run、当前会话的注册状态和数字输出观
 node /usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs download <https-url> <absolute-destination> <expected-sha256>
 参数必须逐个正确引用；不要从待验证文件本身生成所谓的可信预期值。官方包管理器继续使用自身签名与锁文件，不能拿这个辅助程序替代包签名校验。
 默认连接期限15秒、无有效传输60秒、总期限900秒、文件上限64MiB。只约束这次显式下载；不取消现有任务，不自动重试，不申请额外 iOS 后台常驻。
-沿用 curl 已有 CA/代理配置，不添加 insecure、不更换镜像。限制为 HTTPS 及 HTTPS 重定向；输出仅数字元数据和固定原因码。
+受控下载的 curl 首参数固定为 --disable，随后 --globoff：不读取默认curlrc，不把URL中的{}[]展开成额外请求。不添加 insecure、不更换镜像；限制为 HTTPS 及 HTTPS 重定向，输出仅数字元数据和固定原因码。
+环境级 CURL_CA_BUNDLE/SSL_CERT_FILE、HTTPS_PROXY/NO_PROXY 等仍按 curl 规则继承，系统信任边界不变。合法但仅写在curlrc中的CA、代理、速率或header设置也会被忽略，这是受控单文件契约的明确限制。不会读取/迁移真实curlrc、静默恢复配置或关闭TLS；仅依赖curlrc的环境可能明确失败，需要经审核的显式受控配置，不能用insecure或换镜像绕过。普通bash/curl调用不受这个辅助入口规则影响。
 已存在且校验相同的文件直接复用，零新请求；不匹配、链接、同目标下载锁或未知遗留锁会拒绝。不会擅自清理旧锁、覆盖已有文件或重复下载。
 新下载写入本次独有临时文件，校验后以不覆盖目标的方式发布。404、停滞、校验失败、目标被用户创建、同步失败均不会报成功。
 明确取消或 CLI 收到 SIGTERM/SIGINT 时，会传播到本次下载拥有的 curl 子进程，等待其结束并清理自己的临时文件与目录锁；不操作其他任务。系统 SIGKILL 后不能承诺运行清理，遗留锁必须作为未知状态保留。

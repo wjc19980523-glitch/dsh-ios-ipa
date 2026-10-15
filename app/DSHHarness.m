@@ -4,6 +4,7 @@
 //
 
 #import "DSHHarness.h"
+#import "DSHActivityLog.h"
 #import "DSHHarnessAuth.h"
 #import "DSHPortAllocator.h"
 #import "DSHReadinessProbe.h"
@@ -291,6 +292,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
 
 - (void)stop {
     NSAssert(NSThread.isMainThread, @"stop on main");
+    [DSHActivityLog.shared markUnconfirmedGuestTasksUnknown];
     self.userStopped = YES;
     self.launchGeneration++;
     self.startupSupervisorGeneration++;
@@ -548,6 +550,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
 - (void)processExitedWithCode:(int)exitCode generation:(NSUInteger)generation {
     if (generation != self.launchGeneration)
         return; // an older incarnation; already superseded
+    [DSHActivityLog.shared markUnconfirmedGuestTasksUnknown];
     [DSHLifecycleDiagnostics recordEvent:@"guestExited" harness:self];
     self.guestPid = 0;
     // Retire this launch before cancelling its probe so the probe's handler

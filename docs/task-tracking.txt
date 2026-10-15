@@ -1,0 +1,31 @@
+DSH 本地任务记录
+
+运行中的任务仍由原来的 jobs 服务管理，job_output/job_kill 的行为不变。
+新增 job_history 和 job_status 只查询本会话的元数据，不执行、终止、恢复或重放命令。
+
+执行身份由 tracking run UUID 与原 job ID 共同组成，避免 Harness 重启后 bash-1 等编号复用造成误认。
+状态：running/stopping 是当前注册表观测；succeeded 必须有明确的 exit 0；非零退出为 failed；已确认信号终止为 interrupted；无法确认则 unknown。
+等待超时、空 job_list、工具没有抛异常以及单独的 completed 字样都不是命令成功证据。
+新进程启动后，历史 running/stopping 一律转 unknown，不猜测旧进程仍活着或已经被杀死。
+
+记录位置：DSH_HOME/.job-history/v1.json。最多256条、256KiB；优先淘汰已结束记录，尽量保留长任务。
+保存的是编号、作用域哈希、状态、观测时间和退出码/信号；不保存命令、参数、stdout/stderr、URL、路径或错误原文。
+原子写入并同步文件和目录。损坏、未知格式、链接或写入失败时保留原文件，返回 persistence=unavailable。
+pending_writes=true 表示最新观测尚未完成持久化，不能据此承诺突然终止前的数据都已保存。
+记录有保留上限；历史不存在不代表任务成功，也不代表可以安全地重复执行。
+
+Activity 使用结构化工具流水线及 jobs 事件；后台提升显示进行中，非零退出显示错误，未知和中断单独显示。
+Harness stop/真实退出，以及新 App 加载旧进行中记录时，缺少最终确认的状态变为 unknown。
+当前进程内唯一 correlation ID 可跨越10分钟以上任务持续关联；旧记录不会仅因耗时长而与结束状态脱节。
+
+桥接更新通过 JobTracking.bundle 与原有固定白名单、哈希校验安装器分发。
+资源先落盘，最后更新已知原始桥接模块；未知桥接源码不覆盖。root.tar.gz 和用户配置/工作区不修改。
+
+本地验证：bash tests/job-tracking-test.sh
+测试使用已打包的真实 Bash 工具、jobs 注册表、job_* 控件与 Cordis；POSIX shell 服务为可控 child_process 适配器。
+等待期限缩短到毫秒级来验证同一状态分支，不声称进行了真实420秒下载。
+不下载依赖、不执行真实安装或构建、不使用用户凭据。
+新增 Objective-C XCTest 需在获授权的 macOS/Xcode 环境实际执行；Linux 上的 JS 检查不能代替。
+
+边界：该记录不赋予 iOS 后台执行权限，不恢复已经消失的进程，也不能解释未采集的历史安装任务。
+启动阶段的会话恢复告警与未知第三方 flock 仍是单独问题，本改动不放宽生命周期准入或文件锁。

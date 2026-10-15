@@ -39,6 +39,8 @@ typedef NS_ENUM(NSInteger, DSHActivityOutcome) {
     DSHActivityOutcomeTimedOut,
     DSHActivityOutcomeError,
     DSHActivityOutcomeStarted,        // in flight; updated when it finishes
+    DSHActivityOutcomeInterrupted,
+    DSHActivityOutcomeUnknown,
 };
 
 NSString *DSHActivityOutcomeName(DSHActivityOutcome outcome);
@@ -96,6 +98,7 @@ extern NSNotificationName const DSHActivityLogDidChangeNotification;
 
 /// Plain text, for sharing out of the viewer.
 - (NSString *)plainText;
+- (void)markUnconfirmedGuestTasksUnknown;
 - (void)clear;
 
 /// Test hook: forget everything, including what is on disk.

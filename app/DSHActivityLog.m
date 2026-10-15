@@ -26,6 +26,8 @@ NSString *DSHActivityOutcomeName(DSHActivityOutcome outcome) {
         case DSHActivityOutcomeTimedOut: return @"timed out";
         case DSHActivityOutcomeError: return @"error";
         case DSHActivityOutcomeStarted: return @"started";
+        case DSHActivityOutcomeInterrupted: return @"interrupted";
+        case DSHActivityOutcomeUnknown: return @"unknown";
     }
 }
 
@@ -49,7 +51,9 @@ static DSHActivityOutcome OutcomeFromName(NSString *name) {
     if ([name isEqualToString:@"timed out"]) return DSHActivityOutcomeTimedOut;
     if ([name isEqualToString:@"error"]) return DSHActivityOutcomeError;
     if ([name isEqualToString:@"started"]) return DSHActivityOutcomeStarted;
-    return DSHActivityOutcomeOK;
+    if ([name isEqualToString:@"interrupted"]) return DSHActivityOutcomeInterrupted;
+    if ([name isEqualToString:@"ok"]) return DSHActivityOutcomeOK;
+    return DSHActivityOutcomeUnknown;
 }
 
 @interface DSHActivityEntry ()
@@ -191,19 +195,30 @@ static DSHActivityOutcome OutcomeFromName(NSString *name) {
     return flat.length ? flat : nil;
 }
 
-/// Only in-flight rows are candidates, and only recent ones: a correlation id
-/// from the guest is unique per call, but a crashed turn can leave a start
-/// behind forever and it should not capture a later call's result.
+/// Current-process correlation IDs are unique and never restored from disk.
+/// The bounded record capacity limits this scan; elapsed time must not sever
+/// a long-running task from its real completion.
 - (NSUInteger)indexOfCorrelation:(NSString *)correlationID {
-    NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-600];
     for (NSInteger i = (NSInteger) self.storage.count - 1; i >= 0; i--) {
         DSHActivityEntry *entry = self.storage[i];
-        if ([entry.date compare:cutoff] == NSOrderedAscending)
-            break;
-        if (entry.outcome == DSHActivityOutcomeStarted && [entry.correlationID isEqualToString:correlationID])
+        if ((entry.outcome == DSHActivityOutcomeStarted || entry.outcome == DSHActivityOutcomeUnknown) &&
+            [entry.correlationID isEqualToString:correlationID])
             return (NSUInteger) i;
     }
     return NSNotFound;
+}
+
+- (void)markUnconfirmedGuestTasksUnknown {
+    dispatch_async(self.queue, ^{
+        BOOL changed = NO;
+        for (DSHActivityEntry *entry in self.storage) {
+            if (entry.source != DSHActivitySourceGuestTool || entry.outcome != DSHActivityOutcomeStarted) continue;
+            entry.outcome = DSHActivityOutcomeUnknown;
+            entry.result = @"Harness transition: final task outcome was not confirmed. Do not repeat automatically.";
+            changed = YES;
+        }
+        if (changed) { [self scheduleSave]; [self scheduleNotify]; }
+    });
 }
 
 #pragma mark Reading
@@ -283,6 +298,10 @@ static DSHActivityOutcome OutcomeFromName(NSString *name) {
         if (![row isKindOfClass:NSDictionary.class])
             continue;
         DSHActivityEntry *entry = [DSHActivityEntry entryFromDictionary:row];
+        if (entry.source == DSHActivitySourceGuestTool && entry.outcome == DSHActivityOutcomeStarted) {
+            entry.outcome = DSHActivityOutcomeUnknown;
+            entry.result = @"Previous app run: final task outcome was not confirmed.";
+        }
         if (entry)
             [self.storage addObject:entry];
     }

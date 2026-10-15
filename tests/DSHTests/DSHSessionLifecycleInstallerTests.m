@@ -531,6 +531,54 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertFalse([installer installWithError:nil]);
     XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
 }
+
+- (void)prepareJobTrackingFixture {
+    NSString *package = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
+    NSString *parent = package.stringByDeletingLastPathComponent;
+    while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+    self.filesystem.files[package] = self.original;
+    self.resources = @{@"job-tracking.mjs": DSHInstallerTestData(@"export const tracking = 1;"),
+                       @"job-ledger.mjs": DSHInstallerTestData(@"export const ledger = 1;")};
+    NSMutableDictionary *patch = [self.manifest[@"patches"][0] mutableCopy];
+    patch[@"target"] = package;
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSString *name in @[@"job-tracking.mjs", @"job-ledger.mjs"])
+        [files addObject:@{@"source": name, @"target": [parent stringByAppendingPathComponent:name],
+            @"sha256": DSHInstallerTestHash(self.resources[name])}];
+    self.manifest = @{@"schema": @1, @"patches": @[patch], @"files": files};
+}
+- (BOOL)installJobs:(NSError **)error {
+    return [[[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest resources:self.resources
+        filesystem:self.filesystem package:DSHVerifiedSystemPackageJobTracking] installWithError:error];
+}
+- (void)testJobTrackingInstallsResourcesBeforeBridgeAndIsIdempotent {
+    [self prepareJobTrackingFixture];
+    NSError *error = nil;
+    XCTAssertTrue([self installJobs:&error], @"%@", error);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js"]));
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([self installJobs:&error]);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+}
+- (void)testJobTrackingManifestCannotWriteSessionOrWebPackages {
+    XCTAssertFalse([self installJobs:nil]);
+    [self prepareJobTrackingFixture];
+    XCTAssertFalse([self install:nil]);
+    XCTAssertFalse([self installWeb:nil]);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
+- (void)testUnknownBridgeIsPreservedWithoutAnyTrackingResourceWrites {
+    [self prepareJobTrackingFixture];
+    NSString *package = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
+    NSData *unknown = DSHInstallerTestData(@"user-customized-bridge");
+    self.filesystem.files[package] = unknown;
+    XCTAssertFalse([self installJobs:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[package], unknown);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+}
 - (void)testActualBundledManifestInstallsItsPinnedCanonicalPackage {
     NSURL *bundle = [NSBundle.mainBundle URLForResource:@"SessionLifecycle" withExtension:@"bundle"];
     XCTAssertNotNil(bundle);

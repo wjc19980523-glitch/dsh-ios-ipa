@@ -31,11 +31,14 @@ static const NSUInteger kMaxBatch = 50;
             if (![name isKindOfClass:NSString.class] || name.length == 0)
                 continue;
             NSString *status = event[@"outcome"];
-            DSHActivityOutcome outcome = DSHActivityOutcomeOK;
-            if ([status isEqualToString:@"error"]) outcome = DSHActivityOutcomeError;
+            DSHActivityOutcome outcome = DSHActivityOutcomeUnknown;
+            if ([status isEqualToString:@"ok"]) outcome = DSHActivityOutcomeOK;
+            else if ([status isEqualToString:@"error"]) outcome = DSHActivityOutcomeError;
             else if ([status isEqualToString:@"refused"]) outcome = DSHActivityOutcomeRefused;
             else if ([status isEqualToString:@"declined"]) outcome = DSHActivityOutcomeDeclined;
             else if ([status isEqualToString:@"started"]) outcome = DSHActivityOutcomeStarted;
+            else if ([status isEqualToString:@"interrupted"]) outcome = DSHActivityOutcomeInterrupted;
+            else if ([status isEqualToString:@"timed out"]) outcome = DSHActivityOutcomeTimedOut;
 
             [DSHActivityLog.shared recordSource:DSHActivitySourceGuestTool
                                            name:name

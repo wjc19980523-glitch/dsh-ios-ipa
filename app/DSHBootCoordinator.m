@@ -152,6 +152,13 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
         }
         [DSHHarness.shared.log append:@"[network] web transport patch verified"];
 
+        NSError *jobInstallError = nil;
+        if (![DSHSessionLifecycleInstaller installBundledJobTrackingPatchWithError:&jobInstallError]) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:@"[dsh-ios] task tracking install failed code=%ld", (long)jobInstallError.code]];
+            [self setPhase:DSHBootPhaseFailed message:@"The task tracking update could not be installed. Your data has been preserved." progress:-1];
+            return;
+        }
+
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{
             [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{

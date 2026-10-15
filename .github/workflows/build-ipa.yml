@@ -464,6 +464,11 @@ jobs:
       - name: Production task-loop and cleanup identity (positive and old-code negative control)
         run: bash tests/task-lifecycle-context-test.sh
 
+      - name: Durable task metadata and real packaged job regressions (offline)
+        run: |
+          set -euo pipefail
+          bash tests/job-tracking-test.sh 2>&1 | tee cilogs-verify/job-tracking.log
+
       - name: Session backend algorithm and controller regressions
         run: |
           set -euo pipefail

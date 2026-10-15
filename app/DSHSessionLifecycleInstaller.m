@@ -10,6 +10,7 @@
 __attribute__((visibility("default"))) NSErrorDomain const DSHSessionLifecycleInstallerErrorDomain = @"DSHSessionLifecycleInstaller";
 static NSString *const DSHSessionPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
 static NSString *const DSHWebFetchPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
+static NSString *const DSHJobTrackingPackagePath = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
 static NSUInteger const DSHSessionMaximumFileSize = 4 * 1024 * 1024;
 
 @implementation DSHSessionLifecycleFileInfo
@@ -156,9 +157,13 @@ static BOOL DSHPreviousHashesAreValid(id value) {
 + (BOOL)installBundledWebFetchPatchWithError:(NSError **)error {
     return [self installBundledPackage:DSHVerifiedSystemPackageWebFetch error:error];
 }
++ (BOOL)installBundledJobTrackingPatchWithError:(NSError **)error {
+    return [self installBundledPackage:DSHVerifiedSystemPackageJobTracking error:error];
+}
 + (BOOL)installBundledPackage:(DSHVerifiedSystemPackage)package error:(NSError **)error {
     BOOL session = package == DSHVerifiedSystemPackageSession;
-    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : @"WebFetchTransport" withExtension:@"bundle"];
+    BOOL jobs = package == DSHVerifiedSystemPackageJobTracking;
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : jobs ? @"JobTracking" : @"WebFetchTransport" withExtension:@"bundle"];
     NSError *underlying = nil;
     NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]
         options:0 error:&underlying] : nil;
@@ -168,7 +173,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : @[@"web-fetch-transport.mjs"];
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"job-tracking.mjs", @"job-ledger.mjs"] : @[@"web-fetch-transport.mjs"];
     for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
@@ -281,18 +286,22 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     if (error) *error = nil;
     if (![self.manifest isKindOfClass:NSDictionary.class] || ![self.resources isKindOfClass:NSDictionary.class] || !self.filesystem)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"installer inputs", nil, nil);
-    if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch)
+    if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch && self.package != DSHVerifiedSystemPackageJobTracking)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package kind", nil, nil);
     BOOL session = self.package == DSHVerifiedSystemPackageSession;
-    NSString *packagePath = session ? DSHSessionPackagePath : DSHWebFetchPackagePath;
+    BOOL jobs = self.package == DSHVerifiedSystemPackageJobTracking;
+    NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
-        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : 1))
+        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : jobs ? 2 : 1))
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"schema", nil, nil);
     NSDictionary *allowed = session ? @{
         @"session-lifecycle.mjs": @"/usr/local/share/dsh/session-lifecycle.mjs",
         @"session-lifecycle-core.mjs": @"/usr/local/share/dsh/session-lifecycle-core.mjs",
         @"session-checkpoint-core.mjs": @"/usr/local/share/dsh/session-checkpoint-core.mjs",
+    } : jobs ? @{
+        @"job-tracking.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
+        @"job-ledger.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
     } : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *resourcePlans = [NSMutableArray array];

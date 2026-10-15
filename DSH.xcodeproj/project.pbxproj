@@ -115,6 +115,7 @@
 		A18ABFAAA83A3F4BDA0923EE /* SessionLifecycle.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 1C02E680C9A87266790BABD5 /* SessionLifecycle.bundle */; };
 		A2C4E52C5A2B7061DB92FC45 /* DSHActivityLog.m in Sources */ = {isa = PBXBuildFile; fileRef = C1DADF81DC64C6861C2ED592 /* DSHActivityLog.m */; };
 		A2ECA64CEC72C77F8782569B /* DSHTurnPresence.m in Sources */ = {isa = PBXBuildFile; fileRef = 8512649B2633AC953F105761 /* DSHTurnPresence.m */; };
+		A412133032BC5D3040A2071B /* JobTracking.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 9CE70707A36C7A3930AD59CA /* JobTracking.bundle */; };
 		A5C4F21037E3CCD19D384C7F /* DSHTurnPresenceTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 3850AD9CB98B4CFCCB57E9E2 /* DSHTurnPresenceTests.m */; };
 		A75E200EE299AC45B82F8973 /* DSHLifecycleDiagnosticsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 95ACDE19393813BAED586108 /* DSHLifecycleDiagnosticsTests.m */; };
 		AAD29564581DFD40628D2C2A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0F8C8E77A4A458943799EC80 /* Assets.xcassets */; };
@@ -330,6 +331,7 @@
 		9691DB6B6548557C88DC4EC6 /* DSHGuestSessionLifecycle.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = DSHGuestSessionLifecycle.h; sourceTree = "<group>"; };
 		9778FFBF0EC3C103B3A7AD7C /* UpgradeRootViewController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = UpgradeRootViewController.m; sourceTree = "<group>"; };
 		99A7A9F3FD4C1576C130EF74 /* libresolv.tbd */ = {isa = PBXFileReference; includeInIndex = 1; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
+		9CE70707A36C7A3930AD59CA /* JobTracking.bundle */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = "wrapper.plug-in"; path = JobTracking.bundle; sourceTree = "<group>"; };
 		9F48BF3A6091EA749068814E /* DSHReadinessProbe.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = DSHReadinessProbe.m; sourceTree = "<group>"; };
 		A049EF8A0010E79E3498FB62 /* Terminal.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = Terminal.m; sourceTree = "<group>"; };
 		A16E099E40DCC673BF6BA463 /* colontildehash.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = colontildehash.png; sourceTree = "<group>"; };
@@ -936,6 +938,7 @@
 				13AFA0C3B352FBE83EF63AE9 /* PrivacyInfo.xcprivacy */,
 				1C02E680C9A87266790BABD5 /* SessionLifecycle.bundle */,
 				0134E76BB0F2D586235B1169 /* WebFetchTransport.bundle */,
+				9CE70707A36C7A3930AD59CA /* JobTracking.bundle */,
 			);
 			name = app;
 			path = app;
@@ -1137,6 +1140,7 @@
 				E336AC4E395EB7F51CDD30FC /* PrivacyInfo.xcprivacy in Resources */,
 				A18ABFAAA83A3F4BDA0923EE /* SessionLifecycle.bundle in Resources */,
 				2C179A1609D535CC1C926F4E /* WebFetchTransport.bundle in Resources */,
+				A412133032BC5D3040A2071B /* JobTracking.bundle in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

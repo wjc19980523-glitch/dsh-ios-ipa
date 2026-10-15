@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "source": "job-tracking.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
+      "sha256": "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1"
+    },
+    {
+      "source": "job-ledger.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
+      "sha256": "06fda24c5715e516f65f8b14ce42e19588b900cfc234a4f1ca4bd225446b945f"
+    }
+  ],
+  "patches": [
+    {
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js",
+      "original_sha256": "b8e449621a37de7b74d85eb074861b711755bb2f122da8ee48e479c0eb4590f2",
+      "patched_sha256": "f587c00109b3112cb4993ff57a3913a963a47dad2f77d60e4cfbe808db6d0d5e",
+      "replacements": [
+        {
+          "find": "import { defineTool } from \"@deepseek-ai/dsh-tools\";",
+          "replace": "import { defineTool } from \"@deepseek-ai/dsh-tools\";\nimport {installJobTracking,installTaskActivity} from \"./job-tracking.mjs\";",
+          "count": 1
+        },
+        {
+          "find": "export const inject = [\"tools\"];",
+          "replace": "export const inject = [\"tools\", \"jobs\"];",
+          "count": 1
+        },
+        {
+          "find": "function installActivityReporter(ctx) {\n  const pending = [];\n  let flushing = false;\n  let timer = null;\n  // Tool calls are matched to their results by id so a row can carry both what\n  // was asked and how it ended.\n  const open = new Map();\n  const MAX_OPEN_CALLS = 200;\n\n  const flush = async () => {\n    timer = null;\n    if (flushing || pending.length === 0) return;\n    flushing = true;\n    const batch = pending.splice(0, 50);\n    try {\n      await call(\"/v1/activity\", { method: \"POST\", body: { events: batch } });\n    } catch {\n      // The app may be gone, backgrounded, or simply not listening. Dropping\n      // the batch is correct: the alternative is retrying forever in a loop\n      // that competes with the work the user actually asked for.\n    } finally {\n      flushing = false;\n      if (pending.length) schedule();\n    }\n  };\n\n  const schedule = () => {\n    if (timer !== null) return;\n    timer = setTimeout(flush, 400);\n    timer.unref?.();\n  };\n\n  const push = (event) => {\n    // Bounded: a runaway loop must not turn into unbounded memory.\n    if (pending.length >= 200) pending.shift();\n    pending.push(event);\n    schedule();\n  };\n\n  /** One line describing a call, never the whole argument object. */\n  const describe = (name, args) => {\n    if (!args || typeof args !== \"object\") return undefined;\n    // The command is the whole point of logging a shell tool.\n    for (const key of [\"command\", \"cmd\", \"script\"]) {\n      if (typeof args[key] === \"string\") return args[key];\n    }\n    for (const key of [\"path\", \"file_path\", \"filePath\", \"url\", \"pattern\", \"query\"]) {\n      if (typeof args[key] === \"string\") return `${key}: ${args[key]}`;\n    }\n    const keys = Object.keys(args);\n    return keys.length ? `{${keys.join(\", \")}}` : undefined;\n  };\n\n  ctx.on(\"session/event\", (_session, event) => {\n    try {\n      if (event?.type === \"tool/call\") {\n        const { id, name, arguments: args } = event.data ?? {};\n        if (!name) return;\n        // A cancelled session may never publish tool/result. Bound this map as\n        // carefully as the pending queue so repeated interrupted turns cannot\n        // slowly grow the Node process for the lifetime of the app.\n        if (open.size >= MAX_OPEN_CALLS)\n          open.delete(open.keys().next().value);\n        open.set(id, { name, at: Date.now() });\n        // The id travels with both halves so the app can turn the start row\n        // into the result row instead of stacking two rows per call.\n        push({ id: String(id), name, detail: describe(name, args), outcome: \"started\" });\n      } else if (event?.type === \"tool/result\") {\n        const { id, isError } = event.data ?? {};\n        const started = open.get(id);\n        open.delete(id);\n        if (!started) return;\n        push({\n          id: String(id),\n          name: started.name,\n          outcome: isError ? \"error\" : \"ok\",\n          duration: (Date.now() - started.at) / 1000,\n        });\n      } else if (event?.type === \"approval/decided\") {\n        // dsh's own permission prompts, which are a different gate from the\n        // app's — worth seeing in the same timeline.\n        const { decision, toolName } = event.data ?? {};\n        push({\n          name: toolName ? `approval: ${toolName}` : \"approval\",\n          detail: typeof decision === \"string\" ? decision : undefined,\n          outcome: decision === \"deny\" || decision === \"denied\" ? \"declined\" : \"ok\",\n        });\n      }\n    } catch {\n      // Never let reporting break a turn.\n    }\n  }, { global: true });\n}\n\n",
+          "replace": "function installActivityReporter(ctx) {\n  const pending = [];\n  let timer = null, flushing = false;\n  const flush = async () => {\n    timer = null;\n    if (flushing || !pending.length) return;\n    flushing = true;\n    const batch = pending.splice(0, 50);\n    try { await call('/v1/activity', { method: 'POST', body: { events: batch } }); } catch {}\n    finally { flushing = false; if (pending.length) schedule(); }\n  };\n  const schedule = () => { if (timer === null) { timer = setTimeout(flush, 400); timer.unref?.(); } };\n  installTaskActivity(ctx, event => {\n    if (pending.length >= 200) pending.shift();\n    pending.push(event); schedule();\n  });\n  ctx.effect(() => () => { if (timer !== null) clearTimeout(timer); pending.length = 0; });\n}\n\n",
+          "count": 1
+        },
+        {
+          "find": "  installActivityReporter(ctx);",
+          "replace": "  installJobTracking(ctx, defineTool);\n  installActivityReporter(ctx);",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

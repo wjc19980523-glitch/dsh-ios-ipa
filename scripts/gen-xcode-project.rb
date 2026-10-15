@@ -253,6 +253,10 @@ tests_group.new_group('emu', 'emu').new_file('neon_convert_test.c')
 attrs = (project.root_object.attributes['TargetAttributes'] ||= {})
 attrs[tests.uuid] = { 'TestTargetID' => dsh.uuid }
 attrs[uitests.uuid] = { 'TestTargetID' => dsh.uuid }
+# Append new resources after existing allocations so established project and
+# scheme identifiers stay stable when a bundle is added.
+job_tracking_ref = app_group.new_file('JobTracking.bundle')
+dsh.resources_build_phase.add_file_reference(job_tracking_ref)
 project.save
 
 # --- scheme -------------------------------------------------------------------

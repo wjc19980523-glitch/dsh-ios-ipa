@@ -16,6 +16,7 @@ typedef NS_ENUM(NSInteger, DSHSessionLifecycleInstallerError) {
 typedef NS_ENUM(NSUInteger, DSHVerifiedSystemPackage) {
     DSHVerifiedSystemPackageSession,
     DSHVerifiedSystemPackageWebFetch,
+    DSHVerifiedSystemPackageJobTracking,
 };
 
 typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
@@ -59,6 +60,7 @@ typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
 /// NO is a boot failure; callers must not start Harness after an install error.
 + (BOOL)installBundledPatchWithError:(NSError **)error;
 + (BOOL)installBundledWebFetchPatchWithError:(NSError **)error;
++ (BOOL)installBundledJobTrackingPatchWithError:(NSError **)error;
 
 /// Exposed for real-fakefs integration tests as well as fault adapters. This
 /// returns an adapter, not a mounted filesystem or an admission permit.

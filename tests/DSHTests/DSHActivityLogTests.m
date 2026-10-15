@@ -21,6 +21,13 @@
 @property (nonatomic) DSHHostBridge *bridge;
 @end
 
+static NSURL *DSHActivityReloadFixtureURL;
+@interface DSHActivityReloadFixture : DSHActivityLog
+@end
+@implementation DSHActivityReloadFixture
+- (NSURL *)fileURL { return DSHActivityReloadFixtureURL; }
+@end
+
 @implementation DSHActivityLogTests
 
 - (void)setUp {
@@ -273,6 +280,69 @@
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     XCTAssertEqual(DSHActivityLog.shared.entries.count, 0u);
     XCTAssertEqualObjects(DSHActivityLog.shared.plainText, @"");
+}
+
+- (void)testUnknownAndInterruptedTaskReportsAreNotPresentedAsSuccess {
+    NSInteger status = 0;
+    [self send:@"POST" path:@"/v1/activity" body:@{@"events": @[
+        @{@"name": @"task_unknown", @"outcome": @"unknown"},
+        @{@"name": @"task_interrupted", @"outcome": @"interrupted"},
+        @{@"name": @"task_invalid_status", @"outcome": @"not-a-status"},
+    ]} status:&status];
+    XCTAssertEqual(status, 200);
+    XCTAssertEqual([self waitForEntryNamed:@"task_unknown"].outcome, DSHActivityOutcomeUnknown);
+    XCTAssertEqual([self waitForEntryNamed:@"task_interrupted"].outcome, DSHActivityOutcomeInterrupted);
+    XCTAssertEqual([self waitForEntryNamed:@"task_invalid_status"].outcome, DSHActivityOutcomeUnknown);
+}
+
+- (void)testPreviousRunUnfinishedToolActivityLoadsAsUnknown {
+    NSURL *directory = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+        URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    XCTAssertTrue([NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:NO attributes:nil error:nil]);
+    DSHActivityReloadFixtureURL = [directory URLByAppendingPathComponent:@"activity.json"];
+    NSArray *rows = @[
+        @{@"t": @1, @"source": @"tool", @"name": @"pending_task", @"outcome": @"started", @"duration": @0},
+        @{@"t": @2, @"source": @"tool", @"name": @"finished_task", @"outcome": @"ok", @"duration": @1},
+    ];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:rows options:0 error:nil];
+    XCTAssertTrue([data writeToURL:DSHActivityReloadFixtureURL atomically:YES]);
+    DSHActivityReloadFixture *log = [DSHActivityReloadFixture new];
+    XCTAssertEqual(log.entries.count, 2u);
+    XCTAssertEqual(log.entries.firstObject.outcome, DSHActivityOutcomeOK);
+    XCTAssertEqual(log.entries.lastObject.outcome, DSHActivityOutcomeUnknown);
+    XCTAssertEqualObjects([NSData dataWithContentsOfURL:DSHActivityReloadFixtureURL], data,
+                         @"Loading a previous run must not rewrite or erase its evidence");
+    XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:directory error:nil]);
+    DSHActivityReloadFixtureURL = nil;
+}
+
+- (void)testLongTaskCompletionKeepsItsOriginalActivityRow {
+    NSString *correlation = NSUUID.UUID.UUIDString;
+    [DSHActivityLog.shared recordSource:DSHActivitySourceGuestTool name:@"long_task" detail:nil result:nil
+        outcome:DSHActivityOutcomeStarted duration:0 correlationID:correlation];
+    DSHActivityEntry *entry = [self waitForEntryNamed:@"long_task"];
+    XCTAssertNotNil(entry);
+    [entry setValue:[NSDate dateWithTimeIntervalSinceNow:-1200] forKey:@"date"];
+    [DSHActivityLog.shared recordSource:DSHActivitySourceGuestTool name:@"long_task" detail:nil result:@"exit 7"
+        outcome:DSHActivityOutcomeError duration:1200 correlationID:correlation];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    while (DSHActivityLog.shared.entries.firstObject.outcome == DSHActivityOutcomeStarted && [deadline timeIntervalSinceNow] > 0)
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    XCTAssertEqual(DSHActivityLog.shared.entries.count, 1u);
+    XCTAssertEqual(DSHActivityLog.shared.entries.firstObject.outcome, DSHActivityOutcomeError);
+}
+
+- (void)testHarnessTransitionMarksUnconfirmedTasksUnknownAndKeepsLaterProof {
+    NSString *correlation = NSUUID.UUID.UUIDString;
+    [DSHActivityLog.shared recordSource:DSHActivitySourceGuestTool name:@"transition_task" detail:nil result:nil
+        outcome:DSHActivityOutcomeStarted duration:0 correlationID:correlation];
+    [self waitForEntryNamed:@"transition_task"];
+    [DSHActivityLog.shared markUnconfirmedGuestTasksUnknown];
+    XCTAssertEqual(DSHActivityLog.shared.entries.firstObject.outcome, DSHActivityOutcomeUnknown);
+    [DSHActivityLog.shared recordSource:DSHActivitySourceGuestTool name:@"transition_task" detail:nil result:@"exit 0"
+        outcome:DSHActivityOutcomeOK duration:1 correlationID:correlation];
+    XCTAssertEqual(DSHActivityLog.shared.entries.count, 1u);
+    XCTAssertEqual(DSHActivityLog.shared.entries.firstObject.outcome, DSHActivityOutcomeOK);
 }
 
 @end

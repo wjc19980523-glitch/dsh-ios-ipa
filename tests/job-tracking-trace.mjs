@@ -2,7 +2,8 @@
 import { appendFileSync, writeSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const destination = process.env.DSH_JOB_TRACE_FILE ? resolve(process.env.DSH_JOB_TRACE_FILE) : null;
+const destination = process.env.DSH_JOB_TRACE_FILE
+  ? `${resolve(process.env.DSH_JOB_TRACE_FILE)}.${process.pid}.jsonl` : null;
 const contexts = new WeakMap();
 const FILE_TAGS = new Set(['runner', 'job-ledger-test', 'job-tracking-runtime-test', 'development-tools-test']);
 const AWAIT_STAGES = new Set([

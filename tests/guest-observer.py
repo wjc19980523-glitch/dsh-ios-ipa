@@ -162,23 +162,93 @@ def host_events(a, result):
     allowed['runner'] = {'bootstrap', 'beforeExit', 'exit'}
     allowed['shell'] = {stage + ':' + event for stage in ('prepare', 'syntax', 'suite') for event in ('start', 'done')}
     result['service_events'] = []
+    issues, files = set(), [(a.events, None)]
+    max_files, max_bytes, per_file_bytes = 32, 1024 * 1024, 256 * 1024
+    shard_name = re.compile(re.escape(a.events.name) + r'\.([1-9][0-9]{0,9})\.jsonl')
+    # Bound discovery as well as reads; no paths or directory names are saved.
     try:
-        with a.events.open('rb') as source:
-            size = source.seek(0, os.SEEK_END)
-            offset = max(0, size - 1024 * 1024)
-            source.seek(offset)
-            if offset: source.readline()  # Discard a partial leading JSON line.
-            lines = source.read(1024 * 1024).decode('utf-8', errors='replace').splitlines()
-        result['service_events_status'] = 'truncated' if offset else 'completed'
+        with os.scandir(a.events.parent) as entries:
+            for count, entry in enumerate(entries):
+                if count >= 256:
+                    issues.add('directory-entry-limit')
+                    break
+                match = shard_name.fullmatch(entry.name)
+                if not match or int(match[1]) >= 2 ** 31: continue
+                if len(files) >= max_files:
+                    issues.add('file-count-limit')
+                    break
+                files.append((Path(entry.path), int(match[1])))
+    except OSError:
+        issues.add('directory-unavailable')
+    files[1:] = sorted(files[1:], key=lambda item: item[1])
+    result['service_events_files'] = []
+    result['service_events_bytes_read'] = 0
+    for path, shard_pid in files:
+        summary = dict(kind='main' if shard_pid is None else 'pid-shard', status='completed')
+        if shard_pid is not None: summary['pid'] = shard_pid
+        result['service_events_files'].append(summary)
+        allowance = min(per_file_bytes, max_bytes - result['service_events_bytes_read'])
+        if allowance <= 0:
+            issues.add('byte-limit')
+            summary['status'] = 'skipped-byte-limit'
+            continue
+        try:
+            if path.is_symlink() or not path.is_file():
+                if not path.exists(): raise FileNotFoundError()
+                issues.add('non-regular-file')
+                summary['status'] = 'non-regular-file'
+                continue
+            with path.open('rb') as source:
+                size = source.seek(0, os.SEEK_END)
+                offset = max(0, size - allowance)
+                source.seek(offset)
+                data = source.read(allowance)
+            result['service_events_bytes_read'] += len(data)
+        except FileNotFoundError:
+            issues.add('main-file-missing' if shard_pid is None else 'shard-file-missing')
+            summary['status'] = 'missing'
+            continue
+        except OSError:
+            issues.add('file-unavailable')
+            summary['status'] = 'unavailable'
+            continue
+        if offset:
+            issues.add('byte-limit')
+            summary['status'] = 'incomplete'
+            data = data.partition(b'\n')[2]  # Discard the partial leading line.
+        if data and not data.endswith(b'\n'):
+            issues.add('partial-line')
+            summary['status'] = 'incomplete'
+        if not data and shard_pid is not None:
+            issues.add('empty-shard-file')
+            summary['status'] = 'incomplete'
+        try: lines = data.decode('utf-8').splitlines()
+        except UnicodeDecodeError:
+            issues.add('invalid-utf8')
+            summary['status'] = 'incomplete'
+            lines = data.decode('utf-8', errors='replace').splitlines()
         for line in lines:
             try: row = json.loads(line)
-            except ValueError: continue
-            if not isinstance(row, dict) or row.get('schema') != 1 or row.get('phase') != 'job-tracking' or a.phase != 'job-tracking':
+            except ValueError:
+                issues.add('malformed-json')
+                summary['status'] = 'incomplete'
+                continue
+            if not isinstance(row, dict) or type(row.get('schema')) is not int or row['schema'] != 1 or row.get('phase') != 'job-tracking' or a.phase != 'job-tracking':
+                issues.add('invalid-record')
+                summary['status'] = 'incomplete'
                 continue
             tag, event = row.get('fileTag'), row.get('event')
             if not isinstance(tag, str) or not isinstance(event, str) or event not in allowed.get(tag, set()):
+                issues.add('invalid-record')
+                summary['status'] = 'incomplete'
                 continue
             if type(row.get('pid')) is not int or not 0 < row['pid'] < 2 ** 31:
+                issues.add('invalid-record')
+                summary['status'] = 'incomplete'
+                continue
+            if shard_pid is not None and row['pid'] != shard_pid:
+                issues.add('shard-pid-mismatch')
+                summary['status'] = 'incomplete'
                 continue
             clean = dict(schema=1, phase='job-tracking', fileTag=tag, event=event, pid=row['pid'])
             for field in ('ppid', 'case_id', 'exit_code'):
@@ -189,9 +259,10 @@ def host_events(a, result):
             value = row.get('node_version')
             if isinstance(value, str) and re.fullmatch(r'v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}', value): clean['node_version'] = value
             result['service_events'].append(clean)
-    except OSError as error:
-        result['service_events_status'] = 'unavailable'
-        result['service_events_error'] = type(error).__name__
+    if not result['service_events']: issues.add('no-valid-events')
+    result['service_events_issues'] = sorted(issues)
+    available = any(item['status'] in ('completed', 'incomplete') for item in result['service_events_files'])
+    result['service_events_status'] = ('incomplete' if available else 'unavailable') if issues else 'completed'
 
 
 def collect_host(a, result, identity, save):

@@ -30,6 +30,21 @@ def complete_result():
 PASS = '# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n'
 
 
+def trace_rows(base):
+    """Validate every complete producer file, rather than hiding malformed lines."""
+    rows = []
+    for path in [base, *sorted(base.parent.glob(base.name + '.*.jsonl'))]:
+        if not path.is_file():
+            continue
+        shard_pid = int(path.name[len(base.name) + 1:-6]) if path != base else None
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if shard_pid is not None and row['pid'] != shard_pid:
+                raise AssertionError('trace shard PID mismatch')
+            rows.append(row)
+    return rows
+
+
 class CountEvidenceTests(unittest.TestCase):
     def test_complete_clean_exit_passes(self):
         self.assertTrue(checker.verify(complete_result(), PASS, 1)['verified'])
@@ -85,6 +100,27 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertNotIn('SYNTHETIC_SECRET', json.dumps(frames))
             self.assertNotIn('0x123', json.dumps(frames))
 
+    def test_host_phase_reader_aggregates_pid_shards_and_reports_corruption(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='dsh-job-shards-') as work:
+            path = Path(work) / 'phases.jsonl'
+            shell = dict(schema=1, phase='job-tracking', fileTag='shell', event='suite:start', pid=42)
+            worker = dict(schema=1, phase='job-tracking', fileTag='runner', event='bootstrap', pid=43)
+            path.write_text(json.dumps(shell) + '\n')
+            shard = Path(str(path) + '.43.jsonl')
+            shard.write_text(json.dumps(worker) + '\n')
+            result = {}
+            args = SimpleNamespace(events=path, phase='job-tracking')
+            observer_module.host_events(args, result)
+            self.assertEqual(result['service_events_status'], 'completed', result)
+            self.assertEqual({row['pid'] for row in result['service_events']}, {42, 43})
+            shard.write_text(json.dumps(dict(worker, pid=44)) + '\nnot-json\n')
+            result = {}; observer_module.host_events(args, result)
+            self.assertEqual(result['service_events_status'], 'incomplete', result)
+            self.assertIn('malformed-json', result['service_events_issues'])
+            self.assertIn('shard-pid-mismatch', result['service_events_issues'])
+            self.assertEqual(result['service_events'], [shell])
+
 
 class OwnedProcessTests(unittest.TestCase):
     def probe(self, source, *, timeout=2, sample_after=0, test=False, trace=True):
@@ -106,7 +142,7 @@ class OwnedProcessTests(unittest.TestCase):
                 '--timeout', str(timeout), '--sample-after', str(sample_after), '--', *command],
                 env=environment, capture_output=True, text=True, timeout=10)
             proof = json.loads(result.read_text())
-            rows = [json.loads(line) for line in events.read_text().splitlines()] if events.is_file() else []
+            rows = trace_rows(events)
             observer_path = root / '75-seconds/observer.json'
             observer = json.loads(observer_path.read_text()) if observer_path.exists() else None
             self.assertTrue(proof['pipe_eof'])
@@ -200,7 +236,7 @@ class OwnedProcessTests(unittest.TestCase):
     def test_trace_write_failure_is_nonzero_and_preserves_an_existing_nonzero(self):
         for original, expected in [(0, 1), (7, 7)]:
             with self.subTest(original=original):
-                source = "import fs from 'node:fs'; const path = process.env.DSH_JOB_TRACE_FILE; fs.unlinkSync(path); fs.mkdirSync(path); process.exitCode = " + str(original) + ';'
+                source = "import fs from 'node:fs'; const path = process.env.DSH_JOB_TRACE_FILE + '.' + process.pid + '.jsonl'; fs.unlinkSync(path); fs.mkdirSync(path); process.exitCode = " + str(original) + ';'
                 process, proof, _, _ = self.probe(source)
                 self.assertEqual(process.returncode, expected, process.stdout)
                 self.assertEqual(proof['exit_code'], expected)
@@ -220,6 +256,44 @@ class OwnedProcessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stdout)
         self.assertTrue(any(row['event'] == 'body:done' for row in rows))
         self.assertTrue(any(row['event'] == 'after:last' for row in rows))
+
+    def test_concurrent_producers_keep_complete_pid_shards_on_workspace_filesystem(self):
+        # /tmp alone misses the reproduced WSL /mnt/d shared-append corruption.
+        node = shutil.which('node'); self.assertIsNotNone(node)
+        diagnostics = HERE.parent / 'cilogs-verify'; diagnostics.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='trace-integrity.', dir=diagnostics) as work:
+            root = Path(work); events = root / 'phases.jsonl'; barrier = root / 'ready'
+            shell = dict(schema=1, phase='job-tracking', fileTag='shell', event='suite:start', pid=os.getpid())
+            events.write_text(json.dumps(shell) + '\n')
+            module = json.dumps((HERE / 'job-tracking-trace.mjs').as_uri())
+            source = ("import fs from 'node:fs'; const { traceStage } = await import(" + module + "); "
+                      "while (!fs.existsSync(process.argv[1])) await new Promise(r => setTimeout(r, 2)); "
+                      "for (let i = 0; i < 64; i++) traceStage('job-ledger-test', 'body:start');")
+            environment = os.environ.copy(); environment['DSH_JOB_TRACE_FILE'] = str(events)
+            children = []
+            try:
+                for _ in range(8):
+                    children.append(subprocess.Popen([node, '--input-type=module', '-e', source, str(barrier)],
+                        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+                barrier.write_text('ready')
+                for child in children:
+                    stdout, stderr = child.communicate(timeout=8)
+                    self.assertEqual(child.returncode, 0, stdout + stderr)
+                shards = list(root.glob('phases.jsonl.*.jsonl'))
+                self.assertEqual(len(shards), 8)
+                rows = trace_rows(events)
+                self.assertEqual(json.loads(events.read_text()), shell)
+                self.assertEqual(len(rows), 1 + 8 * (64 + 3))
+                for child in children:
+                    owned = [row for row in rows if row['pid'] == child.pid]
+                    self.assertEqual(sum(row['event'] == 'body:start' for row in owned), 64)
+                    for event in ('bootstrap', 'beforeExit', 'exit'):
+                        self.assertEqual(sum(row['event'] == event for row in owned), 1)
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate(timeout=3)
 
     def test_wrapper_preserves_primary_failure_when_tee_also_fails(self):
         # Negative infrastructure fixture, not a substitute for real Node tests.

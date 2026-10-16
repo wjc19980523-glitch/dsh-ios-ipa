@@ -57,7 +57,8 @@ def host_processes(pgid):
         if int(parts[2]) != pgid:
             skipped.append(dict(pid=int(parts[0]), reason='left-supervised-group'))
             continue
-        is_node = Path(parts[9]).name.lower() in ('node', 'nodejs')
+        # Darwin's ucomm column is width-padded even in the final position.
+        is_node = Path(parts[9].strip()).name.lower() in ('node', 'nodejs')
         if not is_node: non_nodes += 1
         if not re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3]):
             raise RuntimeError('invalid-process-state')

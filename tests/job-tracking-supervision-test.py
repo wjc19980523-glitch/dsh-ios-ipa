@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('job_result', HERE / 'check-job-tracking-result.py')
@@ -120,6 +121,57 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertIn('malformed-json', result['service_events_issues'])
             self.assertIn('shard-pid-mismatch', result['service_events_issues'])
             self.assertEqual(result['service_events'], [shell])
+
+
+class HostProcessTableTests(unittest.TestCase):
+    def parse_darwin(self, names):
+        table = '\n'.join(f'{800 + i} 799 800 S Fri Oct 16 00:38:36 2026 ' + name.ljust(16)
+                          for i, name in enumerate(names)) + '\n'
+        completed = subprocess.CompletedProcess([], 0, stdout=table, stderr='')
+        with mock.patch.object(observer_module.sys, 'platform', 'darwin'), \
+             mock.patch.object(observer_module.subprocess, 'run', return_value=completed) as query:
+            rows, non_nodes, skipped = observer_module.host_processes(800)
+        self.assertEqual(query.call_args.args[0],
+            ['/bin/ps', '-g', '800', '-o', 'pid=,ppid=,pgid=,stat=,lstart=,ucomm='])
+        return rows, non_nodes, skipped
+
+    def test_darwin_padded_last_column_recognizes_only_exact_node_basenames(self):
+        rows, non_nodes, skipped = self.parse_darwin(['bash', 'node', 'nodejs'])
+        self.assertEqual([row['pid'] for row in rows if row['is_node']], [801, 802])
+        self.assertEqual(non_nodes, 1)
+        self.assertEqual(skipped, [])
+        self.assertTrue(all(row['pgid'] == 800 and row['start_identity'].startswith('800 ') for row in rows))
+        self.assertTrue(all('ucomm' not in row and 'command' not in row for row in rows))
+
+    def test_darwin_padding_does_not_admit_node_like_names_or_leave_group(self):
+        rows, non_nodes, skipped = self.parse_darwin(['node-helper', 'notnode', 'nodejs-helper'])
+        self.assertFalse(any(row['is_node'] for row in rows))
+        self.assertEqual(non_nodes, 3)
+        self.assertEqual(skipped, [])
+        self.assertNotIn('node-helper', json.dumps(rows))
+        outside = '900 799 900 S Fri Oct 16 00:38:36 2026 node            \n'
+        completed = subprocess.CompletedProcess([], 0, stdout=outside, stderr='')
+        with mock.patch.object(observer_module.sys, 'platform', 'darwin'), \
+             mock.patch.object(observer_module.subprocess, 'run', return_value=completed):
+            rows, non_nodes, skipped = observer_module.host_processes(800)
+        self.assertEqual(rows, [])
+        self.assertEqual(skipped, [dict(pid=900, reason='left-supervised-group')])
+
+    def test_changed_process_identity_never_collects_descriptors_or_samples(self):
+        import time
+        row = dict(pid=801, ppid=800, pgid=800, state='S',
+                   start_identity='800 Fri Oct 16 00:38:36 2026', is_node=True)
+        for identity in ('800 Fri Oct 16 00:38:37 2026', '900 Fri Oct 16 00:38:36 2026'):
+            with self.subTest(identity=identity), \
+                 mock.patch.object(observer_module, 'process_identity', return_value=identity) as check, \
+                 mock.patch.object(observer_module.subprocess, 'run') as collect:
+                result = observer_module.observe_host_process(row, '/unused', time.monotonic() + 1)
+            check.assert_called_once_with(801)
+            collect.assert_not_called()
+            self.assertEqual(result['identity_status'], 'changed-or-unavailable')
+            self.assertEqual(result['sample_status'], 'skipped-identity-unconfirmed')
+            self.assertNotIn('descriptors', result)
+            self.assertNotIn('sample_frames', result)
 
 
 class OwnedProcessTests(unittest.TestCase):

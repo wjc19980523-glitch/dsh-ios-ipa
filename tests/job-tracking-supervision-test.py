@@ -128,6 +128,45 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertIn('shard-pid-mismatch', result['service_events_issues'])
             self.assertEqual(result['service_events'], [shell])
 
+    def test_host_phase_reader_keeps_all_fixed_cleanup_boundaries(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='dsh-job-cleanup-phases-') as work:
+            path = Path(work) / 'phases.jsonl'
+            shell = dict(schema=1, phase='job-tracking', fileTag='shell', event='suite:start', pid=42)
+            path.write_text(json.dumps(shell) + '\n')
+            rows = [dict(schema=1, phase='job-tracking', fileTag='job-tracking-runtime-test',
+                         event=stage + ':' + boundary, pid=43)
+                    for stage in ('bridge:ctx.dispose', 'bridge:ledger.flush', 'bridge:env.restore',
+                                  'fixture:children.stop') for boundary in ('start', 'done', 'error')]
+            Path(str(path) + '.43.jsonl').write_text(''.join(
+                json.dumps(dict(row, token='SYNTHETIC_SECRET')) + '\n' for row in rows))
+            result = {}
+            observer_module.host_events(SimpleNamespace(events=path, phase='job-tracking'), result)
+            self.assertEqual(result['service_events_status'], 'completed', result)
+            self.assertEqual(result['service_events_issues'], [])
+            self.assertEqual(result['service_events'], [shell, *rows])
+            self.assertNotIn('SYNTHETIC_SECRET', json.dumps(result))
+
+    def test_host_phase_reader_rejects_cleanup_free_text_and_wrong_file_tag(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='dsh-job-cleanup-phases-') as work:
+            path = Path(work) / 'phases.jsonl'
+            shell = dict(schema=1, phase='job-tracking', fileTag='shell', event='suite:start', pid=42)
+            path.write_text(json.dumps(shell) + '\n')
+            rows = []
+            for stage in ('bridge:ctx.dispose', 'bridge:ledger.flush', 'bridge:env.restore', 'fixture:children.stop'):
+                rows.extend([dict(schema=1, phase='job-tracking', fileTag='job-tracking-runtime-test',
+                                  event=stage + ':SYNTHETIC_SECRET', pid=43),
+                             dict(schema=1, phase='job-tracking', fileTag='development-tools-test',
+                                  event=stage + ':done', pid=43)])
+            Path(str(path) + '.43.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            result = {}
+            observer_module.host_events(SimpleNamespace(events=path, phase='job-tracking'), result)
+            self.assertEqual(result['service_events_status'], 'incomplete', result)
+            self.assertEqual(result['service_events_issues'], ['invalid-record'])
+            self.assertEqual(result['service_events'], [shell])
+            self.assertNotIn('SYNTHETIC_SECRET', json.dumps(result))
+
 
 class HostProcessTableTests(unittest.TestCase):
     def parse_darwin(self, names):

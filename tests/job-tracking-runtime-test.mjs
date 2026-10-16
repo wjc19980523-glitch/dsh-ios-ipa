@@ -2,6 +2,7 @@
 // local POSIX child_process adapter. No downloads, iPad, credentials, or npm install.
 import nodeTest from 'node:test';
 import { createTracedTest, traceStage, traceAwait } from './job-tracking-trace.mjs';
+import { captureBridgeLedger, cleanupJobTrackingFixture, closeFixtureServer } from './job-tracking-cleanup.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { realpath, mkdtemp, rm, readFile } from 'node:fs/promises';
@@ -34,7 +35,7 @@ traceStage(FILE_TAG, 'import:tool-jobs:start');
 const { apply: applyJobs } = await pkg('dsh-tool-jobs');
 traceStage(FILE_TAG, 'import:tool-jobs:done');
 
-async function fixture(t, { refuse = false, track = true, preparationDelay = 0 } = {}) {
+async function fixture(t, { refuse = false, track = true, preparationDelay = 0, manualCleanup = false } = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-real-job-')));
   const ledger = new JobLedger(home);
   await traceAwait(FILE_TAG, 'fixture:ledger.ready', t, () => ledger.ready);
@@ -85,13 +86,13 @@ async function fixture(t, { refuse = false, track = true, preparationDelay = 0 }
   const exec = owner => ({ name: 'bash', agent: owners.get(owner), signal: new AbortController().signal,
     callId: 'fixture-call', workspace: process.cwd() });
   const call = (name, args, owner = 'A', context) => definitions.get(name).execute(args, context ?? exec(owner));
-  t.after(async () => {
+  if (!manualCleanup) t.after(async () => {
     await traceAwait(FILE_TAG, 'fixture:jobs.disposeAll', t, () => jobs.disposeAll());
     await traceAwait(FILE_TAG, 'fixture:ledger.flush', t, () => ledger.flush());
     for (const child of children) child.kill('SIGTERM');
     assert.equal(children.size, 0, 'no child process may be left behind');
     await traceAwait(FILE_TAG, 'fixture:rm', t, () => rm(home, { recursive: true, force: true })); });
-  return { jobs, ledger, call, exec, ctx, home, owners, spawns: () => spawns };
+  return { jobs, ledger, call, exec, ctx, home, owners, children, spawns: () => spawns };
 }
 const command = (delay, code = 0) => `exec '${process.execPath}' -e 'setTimeout(()=>{console.log("unauthorized fixture");process.exit(${code})},${delay})'`;
 const args = (delay, code, more = {}) => ({ command: command(delay, code), description: 'Run controlled local child', workdir: process.cwd(), ...more });
@@ -186,9 +187,26 @@ test('actual foreground call cancellation is distinct from a wait timeout', asyn
 });
 
 test('pinned patched bridge runs through real Cordis hooks and reports exit evidence without command contents', async t => {
-  const f = await fixture(t, { track: false }); await f.ledger.flush();
+  const f = await fixture(t, { track: false, manualCleanup: true });
+  const before = Object.fromEntries(['DSH_HOST_BRIDGE_URL', 'DSH_HOST_BRIDGE_TOKEN', 'DSH_HOME'].map(k => [k, process.env[k]]));
+  let server, trackingLedger;
+  t.after(() => {
+    return cleanupJobTrackingFixture({ ...f, trackingLedger,
+      checkChildren: () => {
+        for (const child of f.children) child.kill('SIGTERM');
+        assert.equal(f.children.size, 0, 'no child process may be left behind');
+      },
+      remove: () => rm(f.home, { recursive: true, force: true }),
+      closeServer: () => closeFixtureServer(server),
+      restoreEnvironment: () => { for (const [key, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      } },
+      step: (stage, operation) => traceAwait(FILE_TAG, stage, t, operation),
+    });
+  });
+  await f.ledger.flush();
   const rows = [];
-  const server = http.createServer((request, response) => {
+  server = http.createServer((request, response) => {
     let text = '';
     request.on('data', bytes => { text += bytes; });
     request.on('end', () => {
@@ -198,15 +216,11 @@ test('pinned patched bridge runs through real Cordis hooks and reports exit evid
     });
   });
   await traceAwait(FILE_TAG, 'bridge:server.listen', t, () => new Promise(resolve => server.listen(0, '127.0.0.1', resolve)));
-  t.after(() => traceAwait(FILE_TAG, 'bridge:server.close', t, () => new Promise(resolve => server.close(resolve))));
-  const before = Object.fromEntries(['DSH_HOST_BRIDGE_URL', 'DSH_HOST_BRIDGE_TOKEN', 'DSH_HOME'].map(k => [k, process.env[k]]));
   process.env.DSH_HOST_BRIDGE_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.DSH_HOST_BRIDGE_TOKEN = 'controlled-fixture-not-a-credential'; process.env.DSH_HOME = f.home;
-  t.after(() => { for (const [key, value] of Object.entries(before)) {
-    if (value === undefined) delete process.env[key]; else process.env[key] = value;
-  } });
   const bridge = await import(pathToFileURL(join(fixtures, 'bridge-patched.mjs')).href);
-  bridge.apply(f.ctx);
+  captureBridgeLedger(f.ctx, () => bridge.apply(f.ctx), ledger => { trackingLedger = ledger; });
+  assert(trackingLedger, 'the fixture must own the actual bridge journal');
   const exec = f.exec('A');
   await f.ctx.waterfall('tools/pre-execute', exec, async () => ({ kind: 'allow' }));
   const value = await f.call('bash', args(100, 8, { run_in_background: true }));
@@ -221,6 +235,7 @@ test('pinned patched bridge runs through real Cordis hooks and reports exit evid
   assert(!JSON.stringify(rows).includes('unauthorized fixture'));
   assert(!JSON.stringify(rows).includes('controlled-fixture-not-a-credential'));
   let history = JSON.parse(await f.call('job_history', {}));
+  assert.equal(trackingLedger.runID, history.run_id, 'cleanup must drain the journal used by the bridge tools');
   while (history.pending_writes && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
     history = JSON.parse(await f.call('job_history', {}));

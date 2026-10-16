@@ -9,6 +9,7 @@ const FILE_TAGS = new Set(['runner', 'job-ledger-test', 'job-tracking-runtime-te
 const AWAIT_STAGES = new Set([
   'fixture:ledger.ready', 'fixture:ledger.flush', 'fixture:jobs.disposeAll', 'fixture:rm',
   'fixture:server.listen', 'fixture:server.close', 'bridge:server.listen', 'bridge:server.close',
+  'bridge:ctx.dispose', 'bridge:ledger.flush', 'bridge:env.restore', 'fixture:children.stop',
   'registration:server.listen', 'registration:jobs.disposeAll', 'registration:ledger.flush',
   'registration:ctx.dispose', 'registration:server.close', 'registration:rm',
   'plugin:rm', 'progress:ledger.flush', 'progress:rm',

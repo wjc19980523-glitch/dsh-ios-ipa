@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Controlled local-only evidence tests; no real guest, Xcode or network."""
 import importlib.util
+import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +22,9 @@ spec.loader.exec_module(checker)
 observer_spec = importlib.util.spec_from_file_location('job_observer', HERE / 'guest-observer.py')
 observer_module = importlib.util.module_from_spec(observer_spec)
 observer_spec.loader.exec_module(observer_module)
+runner_spec = importlib.util.spec_from_file_location('job_runner', HERE / 'guest-runner.py')
+runner_module = importlib.util.module_from_spec(runner_spec)
+runner_spec.loader.exec_module(runner_module)
 
 
 def complete_result():
@@ -174,6 +180,160 @@ class HostProcessTableTests(unittest.TestCase):
             self.assertNotIn('sample_frames', result)
 
 
+class ObserverCleanupTests(unittest.TestCase):
+    def run_with_controlled_observer(self, source, *, observer_source='import time; time.sleep(20)',
+                                     confirmed=True, reap_failure=False):
+        from types import SimpleNamespace
+        node = shutil.which('node'); self.assertIsNotNone(node)
+        with tempfile.TemporaryDirectory(prefix='dsh-observer-cleanup-') as work:
+            root = Path(work)
+            events = root / 'events.jsonl'; events.write_text('')
+            options = SimpleNamespace(result=root / 'result.json', events=events, phase='controlled-cleanup',
+                timeout=1, sample_after=.2, initial_sample_after=0, host_only=True,
+                command=[node, '-e', source])
+            popen = subprocess.Popen
+            observers = []
+            def start(command, *args, **kwargs):
+                if len(command) > 1 and Path(command[1]).name == 'guest-observer.py':
+                    command = [sys.executable, '-c', observer_source]
+                    child = popen(command, *args, **kwargs)
+                    if reap_failure:
+                        wait = child.wait
+                        calls = 0
+                        def controlled_wait(timeout=None):
+                            nonlocal calls
+                            calls += 1
+                            if calls == 2: raise OSError(errno.EIO, 'controlled reap failure')
+                            return wait(timeout=timeout)
+                        child.wait = controlled_wait
+                    observers.append(child)
+                    return child
+                return popen(command, *args, **kwargs)
+            try:
+                with mock.patch.object(runner_module.subprocess, 'Popen', side_effect=start), \
+                     mock.patch.object(runner_module.sys, 'stdout', io.StringIO()):
+                    status = runner_module.run(options)
+                proof = json.loads(options.result.read_text())
+                self.assertEqual(len(observers), 1)
+                sample = proof['samples'][0]
+                if reap_failure:
+                    self.assertTrue(sample['forced_cleanup'], sample)
+                    self.assertIsNone(sample['exit_status'])
+                    self.assertIn(dict(operation='reap', errno=errno.EIO), sample['cleanup_errors'])
+                    self.assertNotEqual(sample['residual_processes'], [])
+                elif confirmed:
+                    self.assertTrue(sample['forced_cleanup'], sample)
+                    self.assertEqual(sample['cleanup_reason'], 'observer-cleanup-deadline')
+                    self.assertEqual(sample['exit_status'], -signal.SIGKILL)
+                else:
+                    self.assertFalse(sample['forced_cleanup'], sample)
+                    self.assertIsNone(sample['cleanup_reason'])
+                    self.assertEqual(sample['exit_status'], 7)
+                if not reap_failure:
+                    self.assertEqual(sample['cleanup_errors'], [])
+                    self.assertEqual(sample['residual_processes'], [])
+                self.assertEqual(sample['cleanup_confirmed'], confirmed)
+                if not reap_failure:
+                    self.assertEqual(runner_module.process_group(sample['observer_pgid']), [])
+                self.assertEqual(proof['residual_processes'], [])
+                self.assertTrue(proof['pipe_eof'])
+                return status, proof
+            finally:
+                for child in observers:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait(timeout=2)
+                    self.assertEqual(runner_module.process_group(child.pid), [])
+
+    def test_controlled_long_observer_cleanup_preserves_primary_nonzero_exit(self):
+        status, proof = self.run_with_controlled_observer('setTimeout(() => process.exit(7), 400);')
+        self.assertEqual(status, 7)
+        self.assertEqual(proof['wait_status'], 7 << 8)
+        self.assertEqual(proof['exit_code'], 7)
+        self.assertFalse(proof['timed_out'])
+        self.assertIsNone(proof['runner_error'])
+
+    def test_controlled_long_observer_cleanup_preserves_real_timeout_failure(self):
+        status, proof = self.run_with_controlled_observer('setInterval(() => {}, 1000);')
+        self.assertEqual(status, 142)
+        self.assertEqual(proof['wait_status'], 14)
+        self.assertTrue(proof['timed_out'])
+        self.assertFalse(proof['completed_before_deadline'])
+        self.assertFalse(checker.verify(proof, PASS, 1)['verified'])
+
+    def test_unexpected_observer_failure_keeps_business_zero_but_fails_helper(self):
+        status, proof = self.run_with_controlled_observer('setTimeout(() => process.exit(0), 400);',
+            observer_source='raise SystemExit(7)', confirmed=False)
+        self.assertEqual(status, 125)
+        self.assertEqual(proof['wait_status'], 0)
+        self.assertEqual(proof['exit_code'], 0)
+        self.assertFalse(proof['timed_out'])
+        self.assertEqual(proof['runner_error'], 'ObserverCleanupFailure')
+        self.assertFalse(checker.verify(proof, PASS, 1)['verified'])
+
+    def test_reap_io_failure_keeps_primary_wait_status_and_writes_failure_receipt(self):
+        status, proof = self.run_with_controlled_observer('setTimeout(() => process.exit(7), 400);',
+            confirmed=False, reap_failure=True)
+        self.assertEqual(status, 7)
+        self.assertEqual(proof['wait_status'], 7 << 8)
+        self.assertEqual(proof['exit_code'], 7)
+        self.assertEqual(proof['helper_exit_status'], 7)
+        self.assertFalse(proof['timed_out'])
+        self.assertEqual(proof['runner_error'], 'ObserverCleanupFailure')
+
+    def test_denied_cleanup_does_not_claim_a_kill_or_known_empty_group(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], start_new_session=True)
+        try:
+            with mock.patch.object(runner_module.os, 'killpg', side_effect=PermissionError(1, 'controlled denial')):
+                sample = runner_module.stop_observers([('controlled-denial', child)])[0]
+            self.assertFalse(sample['forced_cleanup'])
+            self.assertIsNone(sample['exit_status'])
+            self.assertIsNone(sample['residual_processes'])
+            self.assertTrue(sample['cleanup_errors'])
+            self.assertFalse(sample['cleanup_confirmed'])
+        finally:
+            child.kill(); child.wait(timeout=2)
+        self.assertEqual(runner_module.process_group(child.pid), [])
+
+    def test_natural_nonzero_observer_exit_is_reaped_and_rejected(self):
+        child = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(7)'], start_new_session=True)
+        sample = runner_module.stop_observers([('controlled-nonzero', child)])[0]
+        self.assertEqual(sample['exit_status'], 7)
+        self.assertFalse(sample['forced_cleanup'])
+        self.assertIsNone(sample['cleanup_reason'])
+        self.assertEqual(sample['residual_processes'], [])
+        self.assertFalse(sample['cleanup_confirmed'])
+
+    def test_cleanup_acceptance_requires_exact_signal_owner_and_complete_evidence(self):
+        sample = dict(exit_status=-signal.SIGKILL, forced_cleanup=True,
+            cleanup_reason='observer-cleanup-deadline', cleanup_errors=[], residual_processes=[])
+        self.assertTrue(runner_module.observer_cleanup_succeeded(sample))
+        for change in (dict(exit_status=7), dict(exit_status=None), dict(forced_cleanup=False),
+                       dict(cleanup_reason=None), dict(residual_processes=None),
+                       dict(residual_processes=[dict(pid=42)]), dict(cleanup_errors=[dict(errno=1)])):
+            with self.subTest(change=change):
+                self.assertFalse(runner_module.observer_cleanup_succeeded(dict(sample, **change)))
+
+    def test_failed_process_group_query_is_unknown(self):
+        failed = subprocess.CompletedProcess([], 1, stdout='', stderr='controlled failure')
+        with mock.patch.object(runner_module.subprocess, 'run', return_value=failed):
+            self.assertIsNone(runner_module.process_group(42))
+
+    def test_malformed_process_group_rows_are_unknown(self):
+        for text in ('42 1 42\n', '42 1 42 S extra\n', 'notpid 1 42 S\n',
+                     '42 notppid 42 S\n', '42 1 notpgid S\n'):
+            with self.subTest(text=text), mock.patch.object(runner_module.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr='')):
+                self.assertIsNone(runner_module.process_group(42))
+        for text in ('', '\n   \n', '43 1 43 S\n'):
+            with self.subTest(text=text), mock.patch.object(runner_module.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr='')):
+                self.assertEqual(runner_module.process_group(42), [])
+        with mock.patch.object(runner_module.subprocess, 'run',
+                return_value=subprocess.CompletedProcess([], 0, stdout='42 1 42 S\n', stderr='')):
+            self.assertEqual(runner_module.process_group(42), [dict(pid=42, ppid=1, pgid=42, state='S')])
+
+
 class OwnedProcessTests(unittest.TestCase):
     def probe(self, source, *, timeout=2, sample_after=0, test=False, trace=True):
         node = shutil.which('node')
@@ -233,12 +393,25 @@ class OwnedProcessTests(unittest.TestCase):
     def test_host_observer_is_bounded_and_never_invokes_guest_lldb(self):
         process, proof, rows, observer = self.probe('setInterval(() => {}, 1000);', timeout=1, sample_after=.2)
         self.assertEqual(process.returncode, 142)
+        self.assertEqual(proof['wait_status'], 14)
+        self.assertTrue(proof['timed_out'])
+        self.assertFalse(proof['completed_before_deadline'])
+        self.assertFalse(checker.verify(proof, PASS, 1)['verified'])
         self.assertEqual(len(proof['samples']), 1)
         self.assertIsNotNone(observer)
         self.assertEqual(observer['mode'], 'host-only')
-        self.assertEqual(proof['samples'][0]['exit_status'], 0)
+        sample = proof['samples'][0]
+        self.assertTrue(runner_module.observer_cleanup_succeeded(sample), sample)
+        self.assertTrue(sample['cleanup_confirmed'], sample)
         self.assertEqual(observer['process_tree_status'], 'completed', observer)
         self.assertTrue(any(row['pid'] == proof['host_pid'] for row in observer['process_tree']))
+        self.assertNotIn('lldb_exit_status', observer)
+        if sample['exit_status'] != 0:
+            self.assertEqual(sample['exit_status'], -signal.SIGKILL)
+            self.assertTrue(sample['forced_cleanup'])
+            self.assertEqual(sample['cleanup_reason'], 'observer-cleanup-deadline')
+            self.assertEqual(sample['residual_processes'], [])
+            return  # A forced stop promises bounded cleanup, not a completed sample.
         self.assertTrue(observer['host_processes'], observer)
         self.assertTrue(any(row['pid'] == proof['host_pid'] and row['identity_status'] in ('matched', 'changed-or-unavailable')
                             for row in observer['host_processes']))
@@ -271,7 +444,12 @@ class OwnedProcessTests(unittest.TestCase):
                 self.assertTrue(proof['host_processes'], proof)
                 self.assertTrue(all(row['pid'] != child.pid and row['pgid'] == child.pid for row in proof['host_processes']))
                 self.assertTrue(all(row['identity_status'] == 'matched' for row in proof['host_processes']))
-                if sys.platform != 'darwin':
+                if sys.platform == 'darwin':
+                    self.assertTrue(all(row['sample_status'] == 'completed' for row in proof['host_processes']), proof)
+                    self.assertTrue(all(row['sample_exit_status'] == 0 for row in proof['host_processes']), proof)
+                    self.assertTrue(all(any('function' in frame for frame in row['sample_frames'])
+                                        for row in proof['host_processes']), proof)
+                else:
                     self.assertTrue(all(row['sample_status'] == 'macOS-only' for row in proof['host_processes']))
             finally:
                 try: os.killpg(child.pid, signal.SIGTERM)

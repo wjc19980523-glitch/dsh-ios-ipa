@@ -22,20 +22,80 @@ def process_identity(pid):
     except (OSError, subprocess.SubprocessError): return None
 
 
-def process_group(pgid):
+def process_group(pgid, timeout=1):
     # No argv, environment, paths or user names enter diagnostics.
     rows = []
     try:
         ps = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,stat='],
-                            capture_output=True, text=True, timeout=1)
+                            capture_output=True, text=True, timeout=timeout)
+        if ps.returncode != 0: return None
         for line in ps.stdout.splitlines():
             parts = line.split()
-            if len(parts) == 4 and int(parts[2]) == pgid:
+            if not parts: continue
+            if len(parts) != 4 or not all(re.fullmatch(r'[0-9]+', part) for part in parts[:3]) or \
+                    not re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3]):
+                return None
+            if int(parts[2]) == pgid:
                 rows.append(dict(pid=int(parts[0]), ppid=int(parts[1]),
                                  pgid=int(parts[2]), state=parts[3]))
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None  # Unknown is never a clean process group.
     return rows
+
+
+def observer_cleanup_succeeded(sample):
+    if sample['residual_processes'] != [] or sample['cleanup_errors']:
+        return False
+    return sample['exit_status'] == 0 or (
+        sample['exit_status'] == -signal.SIGKILL and sample['forced_cleanup'] and
+        sample['cleanup_reason'] == 'observer-cleanup-deadline')
+
+
+def stop_observers(observers):
+    samples = []
+    for label, observer in observers:
+        sample = dict(label=label, observer_pid=observer.pid, observer_pgid=observer.pid,
+                      exit_status=None, forced_cleanup=False, cleanup_reason=None,
+                      cleanup_errors=[], residual_processes=None)
+        try:
+            observer.wait(timeout=2)  # Preserve the original natural-exit allowance.
+        except subprocess.TimeoutExpired:
+            sample['cleanup_reason'] = 'observer-cleanup-deadline'
+        except OSError as error:
+            sample['cleanup_errors'].append(dict(operation='wait', errno=error.errno))
+        # The old post-SIGKILL wait was unbounded. Reap and group verification
+        # now share one second, independently of the business deadline.
+        tail_deadline = time.monotonic() + 1
+        if sample['cleanup_reason'] and observer.returncode is None:
+            # This direct child has not been reaped, so its PID/PGID cannot have
+            # been recycled. Never signal an old group after reaping its leader.
+            try:
+                os.killpg(observer.pid, signal.SIGKILL)
+                sample['forced_cleanup'] = True
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                sample['cleanup_errors'].append(dict(operation='signal-group', errno=error.errno))
+            try:
+                observer.wait(timeout=max(0, tail_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                sample['cleanup_errors'].append(dict(operation='reap', error='TimeoutExpired'))
+            except OSError as error:
+                sample['cleanup_errors'].append(dict(operation='reap', errno=error.errno))
+        sample['exit_status'] = observer.returncode
+        while time.monotonic() < tail_deadline:
+            sample['residual_processes'] = process_group(observer.pid,
+                timeout=min(1, tail_deadline - time.monotonic()))
+            if sample['residual_processes'] == [] or sample['residual_processes'] is None:
+                break
+            if not sample['forced_cleanup']:
+                break  # Report remaining children; do not signal a reaped leader's old group.
+            time.sleep(min(.02, max(0, tail_deadline - time.monotonic())))
+        if sample['residual_processes'] is None:
+            sample['cleanup_errors'].append(dict(operation='inspect-group', error='Unconfirmed'))
+        sample['cleanup_confirmed'] = observer_cleanup_succeeded(sample)
+        samples.append(sample)
+    return samples
 
 
 def redact_output(data):
@@ -90,6 +150,7 @@ def run(a):
     eof = False
     chunks = []
     observers = []
+    samples = []
     sampled = set()
     descendants = None
     killed_at = None
@@ -181,12 +242,9 @@ def run(a):
         if before_cleanup:
             send(signal.SIGKILL)
         # Sampling is independent of the deadline. It is also owned and reaped.
-        for _, observer in observers:
-            try: observer.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                try: os.killpg(observer.pid, signal.SIGKILL)
-                except ProcessLookupError: pass
-                observer.wait()
+        samples = stop_observers(observers)
+        if any(not sample['cleanup_confirmed'] for sample in samples) and runner_error is None:
+            runner_error = 'ObserverCleanupFailure'
         if raw_status is None:
             # Detach/observer cleanup must finish before interpreting ECHILD.
             # A genuinely lost status is unknown/failure, never invented zero.
@@ -223,7 +281,7 @@ def run(a):
                   reader_processes=0, helper_exit_status=status,
                   observer_wait_interruptions=observer_wait_interruptions, runner_error=runner_error,
                   signal_errors=signal_errors,
-                  samples=[dict(label=label, exit_status=observer.returncode) for label, observer in observers])
+                  samples=samples)
     a.result.write_text(json.dumps(result, indent=2) + '\n')
     sys.stdout.write(output)
     return status

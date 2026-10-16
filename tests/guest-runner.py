@@ -22,24 +22,44 @@ def process_identity(pid):
     except (OSError, subprocess.SubprocessError): return None
 
 
-def process_group(pgid, timeout=1):
+def process_group(pgid, timeout=1, diagnostic=None):
     # No argv, environment, paths or user names enter diagnostics.
     rows = []
+    details = dict(status='unconfirmed', rows_seen=0, matched_rows=0)
     try:
         ps = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,stat='],
                             capture_output=True, text=True, timeout=timeout)
-        if ps.returncode != 0: return None
+        if ps.returncode != 0:
+            details.update(status='ps-nonzero', return_code=ps.returncode)
+            return None
         for line in ps.stdout.splitlines():
             parts = line.split()
             if not parts: continue
-            if len(parts) != 4 or not all(re.fullmatch(r'[0-9]+', part) for part in parts[:3]) or \
-                    not re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3]):
+            details['rows_seen'] += 1
+            malformed = ('field-count' if len(parts) != 4 else
+                'numeric-field' if not all(re.fullmatch(r'[0-9]+', part) for part in parts[:3]) else
+                'state-field' if not re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3]) else None)
+            if malformed:
+                details.update(status='malformed-row', malformed_kind=malformed)
                 return None
             if int(parts[2]) == pgid:
                 rows.append(dict(pid=int(parts[0]), ppid=int(parts[1]),
                                  pgid=int(parts[2]), state=parts[3]))
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+                details['matched_rows'] += 1
+        details['status'] = 'confirmed'
+    except subprocess.TimeoutExpired:
+        details['status'] = 'timeout'
+        return None
+    except OSError as error:
+        details.update(status='os-error', errno=error.errno)
+        return None
+    except ValueError:
+        details.update(status='malformed-row', malformed_kind='value-error')
         return None  # Unknown is never a clean process group.
+    finally:
+        if diagnostic is not None:
+            diagnostic.clear()
+            diagnostic.update(details)
     return rows
 
 
@@ -56,7 +76,8 @@ def stop_observers(observers):
     for label, observer in observers:
         sample = dict(label=label, observer_pid=observer.pid, observer_pgid=observer.pid,
                       exit_status=None, forced_cleanup=False, cleanup_reason=None,
-                      cleanup_errors=[], residual_processes=None)
+                      cleanup_errors=[], residual_processes=None,
+                      residual_query=dict(status='not-requested'))
         try:
             observer.wait(timeout=2)  # Preserve the original natural-exit allowance.
         except subprocess.TimeoutExpired:
@@ -85,7 +106,7 @@ def stop_observers(observers):
         sample['exit_status'] = observer.returncode
         while time.monotonic() < tail_deadline:
             sample['residual_processes'] = process_group(observer.pid,
-                timeout=min(1, tail_deadline - time.monotonic()))
+                timeout=min(1, tail_deadline - time.monotonic()), diagnostic=sample['residual_query'])
             if sample['residual_processes'] == [] or sample['residual_processes'] is None:
                 break
             if not sample['forced_cleanup']:
@@ -153,6 +174,8 @@ def run(a):
     samples = []
     sampled = set()
     descendants = None
+    process_queries = dict(descendants_at_exit=dict(status='not-requested'),
+                           before_cleanup=dict(status='not-requested'), residual_processes=dict(status='not-requested'))
     killed_at = None
     observer_wait_interruptions = 0
     runner_error = input_close_error
@@ -196,7 +219,7 @@ def run(a):
                     reaped_at = time.monotonic() - started
                     if reaped_at >= a.timeout:
                         timed_out = True
-                    descendants = process_group(p.pid)
+                    descendants = process_group(p.pid, diagnostic=process_queries['descendants_at_exit'])
             if raw_status is not None and eof:
                 break
             if elapsed >= a.timeout and not timed_out and raw_status is None:
@@ -238,7 +261,7 @@ def run(a):
             send(signal.SIGKILL)
         selector.close()
         p.stdout.close()
-        before_cleanup = process_group(p.pid)
+        before_cleanup = process_group(p.pid, diagnostic=process_queries['before_cleanup'])
         if before_cleanup:
             send(signal.SIGKILL)
         # Sampling is independent of the deadline. It is also owned and reaped.
@@ -260,7 +283,7 @@ def run(a):
                 time.sleep(0.02)
             p.returncode = os.waitstatus_to_exitcode(raw_status) if raw_status is not None else 125
 
-    residual = process_group(p.pid)
+    residual = process_group(p.pid, diagnostic=process_queries['residual_processes'])
     output = redact_output(b''.join(chunks).decode('utf-8', errors='replace'))
     exited = raw_status is not None and os.WIFEXITED(raw_status)
     exit_code = os.WEXITSTATUS(raw_status) if exited else None
@@ -278,6 +301,7 @@ def run(a):
                   business_output=bool(output.strip()),
                   timeout_kind=('business-output-then-timeout' if output.strip() else 'no-business-output-timeout') if timed_out else None,
                   descendants_at_exit=descendants, residual_processes=residual, pipe_eof=eof,
+                  process_group_queries=process_queries,
                   reader_processes=0, helper_exit_status=status,
                   observer_wait_interruptions=observer_wait_interruptions, runner_error=runner_error,
                   signal_errors=signal_errors,

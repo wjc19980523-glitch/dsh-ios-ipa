@@ -8,6 +8,7 @@ import os
 import http.client
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
 import tempfile
@@ -220,27 +221,144 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(r['residual_processes'], [])
             self.assertIsNone(r['runner_error'])
 
-    def test_denied_all_signals_is_unknown_failure_not_zero(self):
+    def denied_signals_probe(self, query_failure=None, *, source='import time; time.sleep(20)',
+                             timeout=0.1, expect_live=True):
         with tempfile.TemporaryDirectory(prefix='dsh-signal-test-') as tmp:
             result = Path(tmp) / 'result.json'
             options = argparse.Namespace(result=result, phase='signal-test', events=Path(tmp) / 'events',
-                timeout=0.1, sample_after=0, initial_sample_after=0,
-                command=[sys.executable, '-c', 'import time; time.sleep(20)'])
+                timeout=timeout, sample_after=0, initial_sample_after=0, command=[sys.executable, '-c', source])
+            real_popen, real_run, real_kill, real_killpg = subprocess.Popen, subprocess.run, os.kill, os.killpg
+            owned = []
+            attempts = []
+            def start(command, *args, **kwargs):
+                child = real_popen(command, *args, **kwargs)
+                if command == options.command: owned.append(child)
+                return child
+            def deny(pid, sig, *, group):
+                if owned and pid == owned[0].pid:
+                    attempts.append(dict(target='group' if group else 'leader', signal=sig))
+                    raise PermissionError(errno.EPERM, 'controlled owned signal denial')
+                return (real_killpg if group else real_kill)(pid, sig)
+            def query(command, *args, **kwargs):
+                if command == ['ps', '-axo', 'pid=,ppid=,pgid=,stat=']:
+                    if query_failure == 'ps-nonzero':
+                        return subprocess.CompletedProcess(command, 2, stdout='', stderr='controlled private text')
+                    if query_failure == 'malformed-row':
+                        return subprocess.CompletedProcess(command, 0, stdout='1 2 3\n', stderr='')
+                    if query_failure == 'os-error': raise OSError(errno.EIO, 'controlled private text')
+                    if query_failure == 'timeout': raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+                    # Supply a real, targeted table to the production parser.
+                    # Unrelated machine rows cannot make the live-positive fixture flaky.
+                    command = ['ps', '-p', str(owned[0].pid), '-o', 'pid=,ppid=,pgid=,stat=']
+                return real_run(command, *args, **kwargs)
             try:
-                with mock.patch.object(runner.os, 'killpg', side_effect=PermissionError(errno.EPERM, 'injected group denial')), \
-                     mock.patch.object(runner.os, 'kill', side_effect=PermissionError(errno.EPERM, 'injected leader denial')):
+                with mock.patch.object(runner.subprocess, 'Popen', side_effect=start), \
+                     mock.patch.object(runner.subprocess, 'run', side_effect=query), \
+                     mock.patch.object(runner.os, 'killpg', side_effect=lambda pid, sig: deny(pid, sig, group=True)), \
+                     mock.patch.object(runner.os, 'kill', side_effect=lambda pid, sig: deny(pid, sig, group=False)):
                     status = runner.run(options)
                 r = json.loads(result.read_text())
+                if expect_live:
+                    # run() caches 125 on Popen when its wait status is unknown;
+                    # use the real owner wait API rather than that cached poll value.
+                    self.assertEqual(os.waitpid(owned[0].pid, os.WNOHANG), (0, 0))
+                    real_kill(owned[0].pid, 0)
+                    live = real_run(['ps', '-p', str(owned[0].pid), '-o', 'pid=,ppid=,pgid=,stat='],
+                                    capture_output=True, text=True, timeout=1)
+                    self.assertEqual(live.returncode, 0)
+                    fields = live.stdout.split()
+                    self.assertEqual(int(fields[0]), owned[0].pid)
+                    self.assertEqual(int(fields[2]), owned[0].pid)
+                    self.assertFalse(fields[3].startswith('Z'))
+            finally:
+                if owned:
+                    try:
+                        pid, _ = os.waitpid(owned[0].pid, os.WNOHANG)
+                        reaped = pid == owned[0].pid
+                    except ChildProcessError: reaped = True
+                    if not reaped:
+                        try: real_kill(owned[0].pid, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    deadline = time.monotonic() + 1
+                    while not reaped and time.monotonic() < deadline:
+                        try:
+                            pid, _ = os.waitpid(owned[0].pid, os.WNOHANG)
+                            if pid: reaped = True; break
+                        except ChildProcessError:
+                            reaped = True; break
+                        time.sleep(.01)
+                    self.assertTrue(reaped, 'fixture owner must reap its real child')
+                    with self.assertRaises(ProcessLookupError): real_killpg(owned[0].pid, 0)
+            print(json.dumps(dict(probe='owned-signal-denial', query=query_failure or 'real-owned-table',
+                status=status, wait_status=r['wait_status'], exit_kind=r['exit_kind'],
+                final_query=r['process_group_queries']['residual_processes'],
+                owned_live_verified=expect_live, owner_group_cleanup_verified=True)), flush=True)
+            return status, r, attempts
+
+    def test_denied_all_signals_is_unknown_failure_not_zero(self):
+        status, r, attempts = self.denied_signals_probe()
+        self.assertEqual(status, 125)
+        self.assertIsNone(r['wait_status'])
+        self.assertEqual(r['exit_kind'], 'unknown')
+        self.assertTrue(r['residual_processes'], r)
+        self.assertTrue(r['signal_errors'])
+        self.assertTrue(r['timed_out'])
+        self.assertEqual(r['process_group_queries']['residual_processes']['status'], 'confirmed')
+        self.assertEqual(r['process_group_queries']['residual_processes']['matched_rows'], 1)
+        self.assertTrue({('group', signal.SIGALRM), ('leader', signal.SIGALRM),
+                         ('group', signal.SIGKILL), ('leader', signal.SIGKILL)} <=
+                        {(row['target'], row['signal']) for row in attempts})
+
+    def test_unknown_group_queries_still_fail_all_signal_denial(self):
+        for failure in ('ps-nonzero', 'malformed-row', 'os-error', 'timeout'):
+            with self.subTest(failure=failure):
+                status, r, _ = self.denied_signals_probe(failure)
                 self.assertEqual(status, 125)
                 self.assertIsNone(r['wait_status'])
                 self.assertEqual(r['exit_kind'], 'unknown')
-                self.assertTrue(r['residual_processes'])
+                self.assertIsNone(r['residual_processes'])
+                self.assertNotEqual(r['residual_processes'], [])
+                self.assertTrue(r['timed_out'])
                 self.assertTrue(r['signal_errors'])
-            finally:
-                if result.exists():
-                    pid = json.loads(result.read_text())['host_pid']
-                    os.kill(pid, 9)
-                    os.waitpid(pid, 0)
+                self.assertEqual(r['process_group_queries']['residual_processes']['status'], failure)
+                self.assertNotIn('controlled private text', json.dumps(r))
+                detail = r['process_group_queries']['residual_processes']
+                self.assertTrue(set(detail) <= {'status', 'rows_seen', 'matched_rows',
+                                                'return_code', 'errno', 'malformed_kind'})
+                if failure == 'ps-nonzero': self.assertEqual(detail['return_code'], 2)
+                if failure == 'malformed-row': self.assertEqual(detail['malformed_kind'], 'field-count')
+                if failure == 'os-error': self.assertEqual(detail['errno'], errno.EIO)
+
+    def test_unknown_group_queries_preserve_real_nonzero_wait_status(self):
+        for failure in ('ps-nonzero', 'malformed-row', 'os-error', 'timeout'):
+            with self.subTest(failure=failure):
+                status, r, _ = self.denied_signals_probe(failure, source='raise SystemExit(7)',
+                                                       timeout=2, expect_live=False)
+                self.assertEqual(status, 7)
+                self.assertEqual(r['wait_status'], 7 << 8)
+                self.assertEqual(r['exit_code'], 7)
+                self.assertFalse(r['timed_out'])
+                self.assertIsNone(r['residual_processes'])
+                self.assertEqual(r['process_group_queries']['residual_processes']['status'], failure)
+
+    def test_owned_signal_denial_does_not_pollute_query_timeout_cleanup(self):
+        real_run, real_kill = subprocess.run, os.kill
+        owner = os.getpid()
+        def slow_query(command, *args, **kwargs):
+            return real_run([sys.executable, '-c', 'import time; time.sleep(.2)'], *args, **kwargs)
+        def deny_owned(pid, sig):
+            if pid == owner: raise PermissionError(errno.EPERM, 'controlled owner denial')
+            return real_kill(pid, sig)
+        for global_denial, expected in ((True, 'os-error'), (False, 'timeout')):
+            diagnostic = {}
+            denial = PermissionError(errno.EPERM, 'controlled global denial') if global_denial else deny_owned
+            with mock.patch.object(runner.subprocess, 'run', side_effect=slow_query), \
+                 mock.patch.object(runner.os, 'kill', side_effect=denial):
+                self.assertIsNone(runner.process_group(owner, timeout=.02, diagnostic=diagnostic))
+            self.assertEqual(diagnostic['status'], expected)
+            if global_denial: self.assertEqual(diagnostic['errno'], errno.EPERM)
+            print(json.dumps(dict(probe='query-timeout-signal-scope', global_denial=global_denial,
+                                  diagnostic=diagnostic)), flush=True)
 
     def test_trapped_alarm_exit_zero_still_fails(self):
         r, _ = self.invoke('import signal,time\nsignal.signal(signal.SIGALRM, lambda a,b: exit(0))\ntime.sleep(20)')

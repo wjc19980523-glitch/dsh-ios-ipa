@@ -355,19 +355,28 @@ class ObserverCleanupTests(unittest.TestCase):
 
     def test_failed_process_group_query_is_unknown(self):
         failed = subprocess.CompletedProcess([], 1, stdout='', stderr='controlled failure')
+        detail = {'token': 'CONTROLLED_PRIVATE_VALUE'}
         with mock.patch.object(runner_module.subprocess, 'run', return_value=failed):
-            self.assertIsNone(runner_module.process_group(42))
+            self.assertIsNone(runner_module.process_group(42, diagnostic=detail))
+        self.assertEqual(detail, dict(status='ps-nonzero', return_code=1, rows_seen=0, matched_rows=0))
+        self.assertNotIn('CONTROLLED_PRIVATE_VALUE', json.dumps(detail))
 
     def test_malformed_process_group_rows_are_unknown(self):
         for text in ('42 1 42\n', '42 1 42 S extra\n', 'notpid 1 42 S\n',
                      '42 notppid 42 S\n', '42 1 notpgid S\n'):
             with self.subTest(text=text), mock.patch.object(runner_module.subprocess, 'run',
                     return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr='')):
-                self.assertIsNone(runner_module.process_group(42))
+                detail = {}
+                self.assertIsNone(runner_module.process_group(42, diagnostic=detail))
+                self.assertEqual(detail['status'], 'malformed-row')
+                self.assertEqual(detail['rows_seen'], 1)
         for text in ('', '\n   \n', '43 1 43 S\n'):
             with self.subTest(text=text), mock.patch.object(runner_module.subprocess, 'run',
                     return_value=subprocess.CompletedProcess([], 0, stdout=text, stderr='')):
-                self.assertEqual(runner_module.process_group(42), [])
+                detail = {}
+                self.assertEqual(runner_module.process_group(42, diagnostic=detail), [])
+                self.assertEqual(detail['status'], 'confirmed')
+                self.assertEqual(detail['matched_rows'], 0)
         with mock.patch.object(runner_module.subprocess, 'run',
                 return_value=subprocess.CompletedProcess([], 0, stdout='42 1 42 S\n', stderr='')):
             self.assertEqual(runner_module.process_group(42), [dict(pid=42, ppid=1, pgid=42, state='S')])

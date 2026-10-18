@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -159,20 +160,41 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(records['host-' + label + '-guest-state']['status'], 'projected')
                 self.assertEqual(json.loads(path.with_name('host-' + label + '-observer.json').read_text())['sample_status'], 'timed-out')
 
+    def assert_fifo_replacement_rejected(self, root):
+        # The exporter canonicalizes its trusted fixture root. Match that same
+        # file when TMPDIR has a system alias such as macOS /var -> /private/var.
+        target = (root / 'result.json').resolve(); target.write_text('{}')
+        real_open = diagnostics.os.open
+        replacement_count = 0
+        def replace(path, flags, *args, **kwargs):
+            nonlocal replacement_count
+            if Path(path) == target:
+                self.assertEqual(replacement_count, 0)
+                self.assertTrue(flags & diagnostics.os.O_NONBLOCK)
+                target.unlink(); diagnostics.os.mkfifo(target)
+                replacement_count += 1
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(diagnostics.os, 'open', side_effect=replace):
+            path = self.export(root, root / 'export')
+        self.assertEqual(replacement_count, 1, 'the real FIFO replacement must occur exactly once')
+        self.assertTrue(stat.S_ISFIFO(target.stat().st_mode))
+        records = {row['role']: row for row in json.loads(path.read_text())['source_roles']}
+        self.assertEqual(records['result']['status'], 'non-regular')
+        self.assertFalse(path.with_name('result.json').exists())
+
     @unittest.skipUnless(hasattr(diagnostics.os, 'mkfifo'), 'requires POSIX named pipes')
     def test_regular_file_replaced_by_fifo_before_open_cannot_block_export(self):
         with tempfile.TemporaryDirectory() as work:
+            self.assert_fifo_replacement_rejected(Path(work))
+
+    @unittest.skipUnless(hasattr(diagnostics.os, 'mkfifo'), 'requires POSIX named pipes')
+    def test_fifo_replacement_through_trusted_root_alias_is_rejected(self):
+        with tempfile.TemporaryDirectory() as work:
             root = Path(work)
-            target = root / 'result.json'; target.write_text('{}')
-            real_open = diagnostics.os.open
-            def replace(path, flags, *args, **kwargs):
-                if Path(path) == target:
-                    target.unlink(); diagnostics.os.mkfifo(target)
-                    self.assertTrue(flags & diagnostics.os.O_NONBLOCK)
-                return real_open(path, flags, *args, **kwargs)
-            with mock.patch.object(diagnostics.os, 'open', side_effect=replace):
-                path = self.export(root, root / 'export')
-            self.assertEqual(json.loads(path.read_text())['source_roles'][0]['status'], 'non-regular')
+            fixture = root / 'fixture'; fixture.mkdir()
+            alias = root / 'system-alias'; alias.symlink_to(fixture, target_is_directory=True)
+            self.assertNotEqual(alias, alias.resolve())
+            self.assert_fifo_replacement_rejected(alias)
 
     def run_probe(self, root, mode, *, export_error=False):
         fixture_names = []

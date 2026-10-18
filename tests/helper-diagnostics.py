@@ -21,6 +21,7 @@ MAX_RUN_BYTES = 16 * 1024 * 1024
 MAX_BUNDLES = 64
 MAX_ROWS = 128
 MAX_FIXTURES = 16
+MAX_JOB_TRACKING_ENTRIES = 16
 OMIT = object()
 
 
@@ -140,7 +141,31 @@ class ExportBudget:
 DEFAULT_BUDGET = ExportBudget()
 
 
-def export_case(source_root, destination_root, bash_version, case_id, invocation, budget=None):
+def job_tracking_subroot(root, expected=None):
+    """Select one owned wrapper directory; never recursively search for JSON."""
+    if expected is not None:
+        expected = Path(expected)
+        if expected.is_absolute() or '..' in expected.parts or not re.fullmatch(
+                r'cilogs-verify/job-tracking\.[A-Za-z0-9]{6}', expected.as_posix()):
+            raise ValueError('invalid-job-tracking-source')
+    container = root / 'cilogs-verify'
+    if container.is_symlink() or not container.is_dir():
+        raise ValueError('invalid-job-tracking-source')
+    candidates = []
+    with os.scandir(container) as entries:
+        for index, entry in enumerate(entries):
+            if index >= MAX_JOB_TRACKING_ENTRIES:
+                raise RuntimeError('job-tracking-source-count-limit')
+            if re.fullmatch(r'job-tracking\.[A-Za-z0-9]{6}', entry.name):
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    raise ValueError('invalid-job-tracking-source')
+                candidates.append(Path('cilogs-verify') / entry.name)
+    if len(candidates) != 1 or (expected is not None and candidates[0] != expected):
+        raise ValueError('job-tracking-source-not-unique-or-changed')
+    return candidates[0]
+
+
+def export_case(source_root, destination_root, bash_version, case_id, invocation, budget=None, *, relative_root=None):
     """Export only known JSON roles; return a manifest path, never source paths.
 
     Per invocation: <=14 sources, 128KiB/source and 1MiB emitted. Per process:
@@ -157,6 +182,10 @@ def export_case(source_root, destination_root, bash_version, case_id, invocation
     # /var -> /private/var alias; normalize that root without rejecting aliases
     # above it. Only components *inside* this fixture must not be symlinks.
     root = Path(source_root).resolve(strict=True)
+    if relative_root is not None:
+        # Keep the outer fixture as the trust anchor. Do not resolve a selected
+        # child root and accidentally accept an internal symlink as trusted.
+        root = root / job_tracking_subroot(root, relative_root)
     roles = [('result', 'result.json', RESULT), ('helper-result', 'guest-diagnostics/wrong-token/result.json', RESULT),
              ('observer', 'observer.json', OBSERVER), ('guest-state', 'guest-state.json', STATE),
              ('sample-observer', 'sample/observer.json', OBSERVER), ('sample-guest-state', 'sample/guest-state.json', STATE)]
@@ -200,6 +229,7 @@ def export_case(source_root, destination_root, bash_version, case_id, invocation
         except (ValueError, UnicodeError, RecursionError): record['status'] = 'invalid-json'
         except OSError as error: record.update(status='read-error', errno=error.errno)
     manifest = dict(schema=1, bash_version=bash_version, case_id=case_id, invocation=invocation,
+        source_layout='job-tracking-wrapper' if relative_root is not None else 'root',
         source_roles=records, excludes=['commands', 'stdin', 'environment', 'output', 'raw-samples', 'symbol-text'])
     files['manifest.json'] = (json.dumps(manifest, indent=2) + '\n').encode()
     total = sum(map(len, files.values()))
@@ -228,6 +258,7 @@ class DiagnosticCaseMixin:
     def setUp(self):
         super().setUp()
         self._diagnostic_fixtures = []
+        self._diagnostic_subroots = {}
         self.addCleanup(self._finish_diagnostics)
 
     @contextmanager
@@ -236,6 +267,15 @@ class DiagnosticCaseMixin:
         fixture = tempfile.TemporaryDirectory(**kwargs)
         self._diagnostic_fixtures.append(fixture)
         yield fixture.name
+
+    def retain_job_tracking_diagnostics(self, fixture_root):
+        """Register the wrapper's one fixed-layout source before assertions."""
+        fixture = next((item for item in self._diagnostic_fixtures
+                        if Path(item.name) == Path(fixture_root)), None)
+        if fixture is None or fixture.name in self._diagnostic_subroots:
+            raise ValueError('unowned-or-already-registered-diagnostic-fixture')
+        relative = job_tracking_subroot(Path(fixture.name).resolve(strict=True))
+        self._diagnostic_subroots[fixture.name] = relative
 
     def _finish_diagnostics(self):
         result = self._outcome.result
@@ -247,7 +287,8 @@ class DiagnosticCaseMixin:
                 for invocation, fixture in enumerate(self._diagnostic_fixtures, 1):
                     try:
                         export_case(fixture.name, self.diagnostics_root, self.diagnostics_bash_version,
-                            self.__class__.__name__ + '.' + self._testMethodName, invocation, self.diagnostics_budget)
+                            self.__class__.__name__ + '.' + self._testMethodName, invocation, self.diagnostics_budget,
+                            relative_root=self._diagnostic_subroots.get(fixture.name))
                     except Exception:
                         # Do not copy arbitrary exception messages/paths or replace
                         # the failure already recorded by unittest.

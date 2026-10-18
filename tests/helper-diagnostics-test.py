@@ -179,6 +179,138 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(records['host-' + label + '-guest-state']['status'], 'projected')
                 self.assertEqual(json.loads(path.with_name('host-' + label + '-observer.json').read_text())['sample_status'], 'timed-out')
 
+    def test_nested_wrapper_failure_is_retained_after_the_helper_returns(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            fixtures = []
+            class Probe(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
+                diagnostics_root = root / 'export'
+                diagnostics_budget = diagnostics.ExportBudget()
+                def test_case(self):
+                    with self.temporary_directory() as source:
+                        fixtures.append(Path(source))
+                        nested = Path(source) / 'cilogs-verify/job-tracking.A1b2C3'
+                        nested.mkdir(parents=True)
+                        (nested / 'result.json').write_text(json.dumps(dict(wait_status=1792,
+                            helper_exit_status=7, residual_processes=None,
+                            process_group_queries=dict(residual_processes=dict(status='malformed-row',
+                                malformed_kind='state-field')), command='private-sentinel')))
+                        self.retain_job_tracking_diagnostics(source)
+                    self.assertTrue(nested.exists())
+                    self.fail('original-nested-failure')
+            result = unittest.TestResult(); Probe('test_case').run(result)
+            self.assertEqual(len(result.failures), 1)
+            self.assertIn('original-nested-failure', result.failures[0][1])
+            self.assertEqual(result.errors, [])
+            paths = list((root / 'export').rglob('manifest.json'))
+            self.assertEqual(len(paths), 1)
+            manifest = json.loads(paths[0].read_text())
+            self.assertEqual(manifest['source_layout'], 'job-tracking-wrapper')
+            value = json.loads(paths[0].with_name('result.json').read_text())
+            self.assertEqual(value['wait_status'], 1792)
+            self.assertEqual(value['helper_exit_status'], 7)
+            self.assertIsNone(value['residual_processes'])
+            self.assertEqual(value['process_group_queries']['residual_processes']['status'], 'malformed-row')
+            self.assertNotIn('private-sentinel', ''.join(path.read_text() for path in paths[0].parent.iterdir()))
+            self.assertTrue(all(not fixture.exists() for fixture in fixtures))
+
+    def test_nested_source_is_owned_unique_and_within_the_scan_limit(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            with self.assertRaises(ValueError): diagnostics.job_tracking_subroot(root)
+            container = root / 'cilogs-verify'; container.mkdir()
+            with self.assertRaises(ValueError): diagnostics.job_tracking_subroot(root)
+            first = container / 'job-tracking.A1b2C3'; first.mkdir()
+            self.assertEqual(diagnostics.job_tracking_subroot(root), Path('cilogs-verify/job-tracking.A1b2C3'))
+            second = container / 'job-tracking.D4e5F6'; second.mkdir()
+            with self.assertRaises(ValueError): diagnostics.job_tracking_subroot(root)
+            second.rmdir()
+            for number in range(diagnostics.MAX_JOB_TRACKING_ENTRIES): (container / str(number)).mkdir()
+            with self.assertRaisesRegex(RuntimeError, 'source-count-limit'): diagnostics.job_tracking_subroot(root)
+
+    def test_nested_source_rejects_absolute_escape_and_unexpected_layouts(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            nested = root / 'cilogs-verify/job-tracking.A1b2C3'; nested.mkdir(parents=True)
+            for relative in ('../private', str(root), 'cilogs-verify/../private',
+                             'cilogs-verify/job-tracking.bad', 'other/job-tracking.A1b2C3'):
+                with self.subTest(relative=relative), self.assertRaises(ValueError):
+                    self.export(root, root / 'export', relative_root=relative)
+            self.assertFalse((root / 'export').exists())
+
+    def test_nested_registration_rejects_unowned_and_duplicate_fixtures_without_exporting_success(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            class Probe(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
+                diagnostics_root = root / 'export'
+                def test_case(self):
+                    with self.temporary_directory() as source:
+                        nested = Path(source) / 'cilogs-verify/job-tracking.A1b2C3'; nested.mkdir(parents=True)
+                        with self.assertRaises(ValueError): self.retain_job_tracking_diagnostics(root)
+                        self.retain_job_tracking_diagnostics(source)
+                        with self.assertRaises(ValueError): self.retain_job_tracking_diagnostics(source)
+            result = unittest.TestResult(); Probe('test_case').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors)
+            self.assertFalse((root / 'export').exists())
+
+    def test_nested_source_parent_alias_is_trusted_but_internal_symlinks_are_not(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            real = root / 'real'; real.mkdir()
+            nested = real / 'cilogs-verify/job-tracking.A1b2C3'; nested.mkdir(parents=True)
+            (nested / 'result.json').write_text('{"wait_status":1792}')
+            alias = root / 'alias'
+            try: alias.symlink_to(real, target_is_directory=True)
+            except OSError: self.skipTest('directory symlink creation unavailable on this platform')
+            relative = diagnostics.job_tracking_subroot(alias.resolve())
+            path = self.export(alias, root / 'export', relative_root=relative)
+            self.assertEqual(json.loads(path.with_name('result.json').read_text())['wait_status'], 1792)
+            nested.rename(real / 'saved')
+            nested.symlink_to(real / 'saved', target_is_directory=True)
+            with self.assertRaises(ValueError): self.export(real, root / 'refused', relative_root=relative)
+            self.assertFalse((root / 'refused').exists())
+            nested.unlink()
+            container = real / 'cilogs-verify'; container.rmdir()
+            container.symlink_to(real / 'saved', target_is_directory=True)
+            with self.assertRaises(ValueError): self.export(real, root / 'refused', relative_root=relative)
+
+    def test_nested_source_is_rechecked_after_registration_without_losing_the_original_failure(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            class Probe(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
+                diagnostics_root = root / 'export'
+                diagnostics_budget = diagnostics.ExportBudget()
+                def test_case(self):
+                    with self.temporary_directory() as source:
+                        container = Path(source) / 'cilogs-verify'
+                        nested = container / 'job-tracking.A1b2C3'; nested.mkdir(parents=True)
+                        (nested / 'result.json').write_text('{"wait_status":1792}')
+                        self.retain_job_tracking_diagnostics(source)
+                        nested.rename(container / 'job-tracking.D4e5F6')
+                    self.fail('original-changed-source-failure')
+            result = unittest.TestResult(); Probe('test_case').run(result)
+            self.assertEqual(len(result.failures), 1)
+            self.assertIn('original-changed-source-failure', result.failures[0][1])
+            self.assertEqual(len(result.errors), 1)
+            self.assertIn('failed-test-diagnostic-export-failed', result.errors[0][1])
+            self.assertFalse((root / 'export').exists())
+
+    def test_nested_file_size_and_run_budget_limits_remain_enforced(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            nested = root / 'cilogs-verify/job-tracking.A1b2C3'; nested.mkdir(parents=True)
+            (nested / 'result.json').write_bytes(b'x' * (diagnostics.MAX_SOURCE_BYTES + 1))
+            relative = diagnostics.job_tracking_subroot(root)
+            path = self.export(root, root / 'export', relative_root=relative)
+            self.assertEqual(json.loads(path.read_text())['source_roles'][0]['status'], 'source-byte-limit')
+            budget = diagnostics.ExportBudget(); budget.bundles = diagnostics.MAX_BUNDLES
+            with self.assertRaisesRegex(RuntimeError, 'diagnostic-count-limit'):
+                self.export(root, root / 'refused', relative_root=relative, budget=budget)
+            budget.bundles = 0; budget.bytes = diagnostics.MAX_RUN_BYTES
+            with self.assertRaisesRegex(RuntimeError, 'diagnostic-byte-limit'):
+                self.export(root, root / 'refused', relative_root=relative, budget=budget)
+            self.assertFalse((root / 'refused').exists())
+
     def assert_fifo_replacement_rejected(self, root):
         # The exporter canonicalizes its trusted fixture root. Match that same
         # file when TMPDIR has a system alias such as macOS /var -> /private/var.

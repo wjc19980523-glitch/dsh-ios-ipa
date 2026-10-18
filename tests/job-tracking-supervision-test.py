@@ -635,6 +635,7 @@ class OwnedProcessTests(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
             environment = os.environ.copy(); environment['PATH'] = str(tools) + os.pathsep + environment['PATH']
             process = subprocess.run(['/bin/bash', str(scripts / 'job-tracking-test.sh')],
                                      env=environment, capture_output=True, text=True, timeout=10)
+            self.retain_job_tracking_diagnostics(work)
             self.assertEqual(process.returncode, 7, process.stdout)
             results = list(root.glob('cilogs-verify/job-tracking.*/result.json'))
             self.assertEqual(len(results), 1)
@@ -643,6 +644,40 @@ class OwnedProcessTests(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
             self.assertEqual(proof['helper_exit_status'], 7)
             self.assertFalse(proof['timed_out'])
             self.assertEqual(proof['residual_processes'], [])
+
+    def test_failed_wrapper_retains_its_nested_unknown_query_receipt(self):
+        with tempfile.TemporaryDirectory(prefix='dsh-wrapper-retention-') as work:
+            root = Path(work)
+            tools = root / 'tools'; tools.mkdir()
+            ps = tools / 'ps'
+            ps.write_text('#!/bin/sh\nprintf "45 1 99 S/private-sentinel\\n"\n')
+            ps.chmod(0o700)
+            class WrapperFailureProbe(OwnedProcessTests):
+                diagnostics_root = root / 'export'
+                diagnostics_budget = diagnostics.ExportBudget()
+            real_run = subprocess.run
+            def controlled_ps(command, *args, **kwargs):
+                if command[0] == '/bin/bash' and Path(command[1]).name == 'job-tracking-test.sh':
+                    environment = kwargs['env'].copy()
+                    environment['PATH'] = str(tools) + os.pathsep + environment['PATH']
+                    kwargs['env'] = environment
+                return real_run(command, *args, **kwargs)
+            result = unittest.TestResult()
+            with mock.patch.object(subprocess, 'run', side_effect=controlled_ps):
+                WrapperFailureProbe('test_wrapper_preserves_primary_failure_when_tee_also_fails').run(result)
+            self.assertEqual(len(result.failures), 1)
+            self.assertIn('None != []', result.failures[0][1])
+            self.assertEqual(result.errors, [])
+            manifests = list((root / 'export').rglob('manifest.json'))
+            self.assertEqual(len(manifests), 1)
+            self.assertEqual(json.loads(manifests[0].read_text())['source_layout'], 'job-tracking-wrapper')
+            proof = json.loads(manifests[0].with_name('result.json').read_text())
+            self.assertEqual(proof['wait_status'], 1792)
+            self.assertEqual(proof['helper_exit_status'], 7)
+            self.assertFalse(proof['timed_out'])
+            self.assertIsNone(proof['residual_processes'])
+            self.assertEqual(proof['process_group_queries']['residual_processes']['malformed_kind'], 'state-field')
+            self.assertNotIn('private-sentinel', ''.join(path.read_text() for path in manifests[0].parent.iterdir()))
 
 
 if __name__ == '__main__':

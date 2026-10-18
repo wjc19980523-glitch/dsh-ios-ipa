@@ -42,7 +42,8 @@ NUM = 'number'
 BOOL = 'bool'
 PROCESS = dict(pid=NUM, ppid=NUM, pgid=NUM, state='process-state')
 QUERY = dict(status=STATUS, rows_seen=NUM, matched_rows=NUM, return_code=NUM, errno=NUM,
-             malformed_kind=enum('field-count', 'numeric-field', 'state-field', 'value-error'))
+             malformed_kind=enum('field-count', 'numeric-field', 'state-field', 'value-error'),
+             state_length=NUM, state_is_ascii=BOOL, state_has_question_mark=BOOL, darwin_unknown_state_rows=NUM)
 TOOL = dict(tool=enum('ps-identity', 'ps-group', 'ps-tree', 'lsof', 'sample', 'lldb'),
     purpose=enum('identity-check', 'initial-identity', 'leader-before-tree', 'leader-after-tree',
         'supervised-group', 'host-descriptors', 'host-all-threads', 'guest-process-tree',
@@ -108,7 +109,8 @@ def project(value, schema, limited):
     if schema == BOOL: return value if type(value) is bool else OMIT
     if isinstance(schema, frozenset): return value if isinstance(value, str) and value in schema else OMIT
     if schema == 'process-state':
-        return value if isinstance(value, str) and re.fullmatch(r'[RSDTtZXxIWKP][<>NlsL+0-9-]{0,15}', value) else OMIT
+        return value if isinstance(value, str) and re.fullmatch(
+            r'(?:[RSDTtZXxIWKP][<>NlsL+0-9-]{0,15}|[RUSITH?](?:<|N)?X?E?V?L?s?\+?)', value) else OMIT
     if schema == 'descriptor':
         return value if isinstance(value, str) and (re.fullmatch(r'(?:p\d{1,12}|f(?:\d{1,12}|cwd|txt|rtd)|a[rwu ])', value)
             or value in {'tREG', 'tDIR', 'tCHR', 'tFIFO', 'tIPv4', 'tIPv6', 'tunix', 'tsock', 'tPIPE',

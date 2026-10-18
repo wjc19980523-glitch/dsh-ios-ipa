@@ -388,6 +388,43 @@ class ObserverCleanupTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess([], 0, stdout='42 1 42 S\n', stderr='')):
             self.assertEqual(runner_module.process_group(42), [dict(pid=42, ppid=1, pgid=42, state='S')])
 
+    def test_darwin_unknown_states_are_rows_and_never_hide_owned_members(self):
+        states = ('?', '?<', '?N', '?X', '?E', '?V', '?L', '?s', '?+', '?NXEVLs+', '?<XEVLs+')
+        for state in states:
+            for group in (42, 99):
+                with self.subTest(state=state, group=group), mock.patch.object(runner_module.subprocess, 'run',
+                        return_value=subprocess.CompletedProcess([], 0, stdout=f'45 1 {group} {state}\n', stderr='')):
+                    detail = {}
+                    actual = runner_module.process_group(42, diagnostic=detail)
+                    self.assertEqual(actual, [dict(pid=45, ppid=1, pgid=42, state=state)] if group == 42 else [])
+                    self.assertEqual(detail['status'], 'confirmed')
+                    self.assertEqual(detail['matched_rows'], int(group == 42))
+                    self.assertEqual(detail['darwin_unknown_state_rows'], 1)
+
+    def test_unsupported_state_forms_keep_the_entire_query_unknown(self):
+        for state in ('S?', '??', '?NN', '?E<', '?NXEVLs++', '?' + 'X' * 32,
+                      '?private-sentinel', '?\u200b', 'S/private-sentinel', 'S\x1b'):
+            # Even malformed rows from another group must prevent a clean result.
+            with self.subTest(state=state), mock.patch.object(runner_module.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, stdout=f'45 1 99 {state}\n', stderr='')):
+                detail = {}
+                self.assertIsNone(runner_module.process_group(42, diagnostic=detail))
+                self.assertEqual(detail['status'], 'malformed-row')
+                self.assertEqual(detail['malformed_kind'], 'state-field')
+                self.assertEqual(detail['state_length'], len(state))
+                self.assertEqual(detail['state_is_ascii'], state.isascii())
+                self.assertEqual(detail['state_has_question_mark'], '?' in state)
+                self.assertNotIn('private-sentinel', json.dumps(detail))
+
+    def test_existing_process_state_forms_keep_their_original_members(self):
+        for state in ('R', 'S', 'Ss+', 'I<', 'D', 'T', 't', 'Z', 'U', 'H', 'R<', 'SN', 'RXEs+'):
+            with self.subTest(state=state), mock.patch.object(runner_module.subprocess, 'run',
+                    return_value=subprocess.CompletedProcess([], 0, stdout=f'42 1 42 {state}\n', stderr='')):
+                detail = {}
+                self.assertEqual(runner_module.process_group(42, diagnostic=detail),
+                                 [dict(pid=42, ppid=1, pgid=42, state=state)])
+                self.assertEqual(detail['status'], 'confirmed')
+
 
 class OwnedProcessTests(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
     diagnostics_root = HERE.parent / 'cilogs-verify' / 'supervision-failures'

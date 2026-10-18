@@ -36,12 +36,21 @@ def process_group(pgid, timeout=1, diagnostic=None):
             parts = line.split()
             if not parts: continue
             details['rows_seen'] += 1
+            # Darwin ps uses '?' when Mach task state is unavailable, with
+            # the same ordered modifiers as its other states. It is still a
+            # real process row, including when it belongs to the owned group.
+            darwin_unknown = len(parts) == 4 and re.fullmatch(r'\?(?:<|N)?X?E?V?L?s?\+?', parts[3])
             malformed = ('field-count' if len(parts) != 4 else
                 'numeric-field' if not all(re.fullmatch(r'[0-9]+', part) for part in parts[:3]) else
-                'state-field' if not re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3]) else None)
+                'state-field' if not (darwin_unknown or re.fullmatch(r'[A-Za-z+<>Nls0-9-]+', parts[3])) else None)
             if malformed:
                 details.update(status='malformed-row', malformed_kind=malformed)
+                if malformed == 'state-field':
+                    details.update(state_length=min(len(parts[3]), 1024),
+                        state_is_ascii=parts[3].isascii(), state_has_question_mark='?' in parts[3])
                 return None
+            if darwin_unknown:
+                details['darwin_unknown_state_rows'] = details.get('darwin_unknown_state_rows', 0) + 1
             if int(parts[2]) == pgid:
                 rows.append(dict(pid=int(parts[0]), ppid=int(parts[1]),
                                  pgid=int(parts[2]), state=parts[3]))

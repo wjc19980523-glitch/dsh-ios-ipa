@@ -59,6 +59,25 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(clean['threads'][0]['wait_objects'][0]['lock']['owner_pthread'], 90)
             self.assertNotIn('private-sentinel', path.read_text())
 
+    def test_darwin_process_states_and_safe_query_classification_survive_export(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            states = ('?', '?NXEVLs+', 'U', 'H', 'Ss+', '?private-sentinel')
+            (root / 'result.json').write_text(json.dumps(dict(
+                residual_processes=[dict(pid=42, state=state) for state in states],
+                process_group_queries=dict(residual_processes=dict(status='malformed-row',
+                    malformed_kind='state-field', state_length=18, state_is_ascii=True,
+                    state_has_question_mark=True, darwin_unknown_state_rows=2, raw_state='private-sentinel')))))
+            path = self.export(root, root / 'export').with_name('result.json')
+            value = json.loads(path.read_text())
+            self.assertEqual([row.get('state') for row in value['residual_processes']], [*states[:-1], None])
+            detail = value['process_group_queries']['residual_processes']
+            self.assertEqual(detail['state_length'], 18)
+            self.assertTrue(detail['state_is_ascii'])
+            self.assertTrue(detail['state_has_question_mark'])
+            self.assertEqual(detail['darwin_unknown_state_rows'], 2)
+            self.assertNotIn('private-sentinel', path.read_text())
+
     def test_fixed_tool_timing_fields_survive_and_arbitrary_timing_text_is_dropped(self):
         with tempfile.TemporaryDirectory() as work:
             root = Path(work)

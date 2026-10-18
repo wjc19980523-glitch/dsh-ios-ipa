@@ -213,8 +213,12 @@ class HostProcessTableTests(unittest.TestCase):
             with self.subTest(identity=identity), \
                  mock.patch.object(observer_module, 'process_identity', return_value=identity) as check, \
                  mock.patch.object(observer_module.subprocess, 'run') as collect:
-                result = observer_module.observe_host_process(row, '/unused', time.monotonic() + 1)
-            check.assert_called_once_with(801)
+                deadline = time.monotonic() + 1
+                result = observer_module.observe_host_process(row, '/unused', deadline)
+            check.assert_called_once()
+            self.assertEqual(check.call_args.args[0], 801)
+            self.assertIs(check.call_args.args[1], result['tool_observations'])
+            self.assertEqual(check.call_args.args[2], deadline)
             collect.assert_not_called()
             self.assertEqual(result['identity_status'], 'changed-or-unavailable')
             self.assertEqual(result['sample_status'], 'skipped-identity-unconfirmed')

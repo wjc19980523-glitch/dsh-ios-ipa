@@ -490,6 +490,23 @@ static struct fiber_block *fiber_lookup(struct asbestos *asbestos, addr_t addr) 
     return NULL;
 }
 
+// The caller holds asbestos->lock. An unlinked jump contains a tagged guest
+// address; a linked jump contains a host code pointer. Comparing only low bits
+// can mistake an existing host link for another guest destination and add the
+// same intrusive list node to two targets. Preserve addr_t's guest width (32-bit
+// x86 wrapping, full ARM64 addresses) after checking the explicit fake-ip tag.
+static bool fiber_block_link_if_matching(struct fiber_block *source, struct fiber_block *target, int i) {
+    if (source->is_jetsam || target->is_jetsam || source->jump_ip[i] == NULL)
+        return false;
+    unsigned long destination = *source->jump_ip[i];
+    const unsigned long guest_tag = 1UL << 63;
+    if (!(destination & guest_tag) || (addr_t)(destination & ~guest_tag) != target->addr)
+        return false;
+    *source->jump_ip[i] = (unsigned long) target->code;
+    list_add(&target->jumps_from[i], &source->jumps_from_links[i]);
+    return true;
+}
+
 static struct fiber_block *fiber_block_compile(addr_t ip, struct tlb *tlb) {
     ISH_SIGNPOST_SCOPE_BEGIN(jit, "block_compile", _bc_spid);
     struct gen_state state;
@@ -876,11 +893,7 @@ static int cpu_step_to_interrupt(struct cpu_state *cpu, struct tlb *tlb) {
                 // and is thus assumed to have no pointers left
                 if (!last_block->is_jetsam && !block->is_jetsam) {
                     for (int i = 0; i <= 1; i++) {
-                        if (last_block->jump_ip[i] != NULL &&
-                                (*last_block->jump_ip[i] & 0xffffffff) == block->addr) {
-                            *last_block->jump_ip[i] = (unsigned long) block->code;
-                            list_add(&block->jumps_from[i], &last_block->jumps_from_links[i]);
-                        }
+                        fiber_block_link_if_matching(last_block, block, i);
                     }
                 }
                 unlock(&asbestos->lock);

@@ -57,6 +57,7 @@ run: install
 test: test-emu test-rootfs test-sim
 
 test-emu: emulator
+	bash tests/asbestos-block-links-test.sh
 	tests/emu-test.sh
 	tests/scripts-test.sh
 

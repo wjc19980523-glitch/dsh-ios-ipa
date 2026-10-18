@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BASH = os.environ.get("DSH_TEST_BASH", "/bin/bash")
 NATIVE_NAMES = (
+    "asbestos-block-links-test.sh",
     "lifecycle-test.sh", "fakefs-db-failure-test.sh",
     "legacy-fakefs-wrapper-test.sh", "fakefs-quiesce-test.sh",
     "sockrestart-test.sh", "guest-exit-test.sh",

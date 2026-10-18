@@ -189,10 +189,14 @@ from pathlib import Path
 workflow = Path('.github/workflows/build-ipa.yml').read_text()
 build_input = workflow.split('      build_ipa:', 1)[1].split('      force_rootfs:', 1)[0]
 assert 'type: boolean' in build_input and 'default: false' in build_input
-gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}"
+gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}"
 for name in ('Archive app (unsigned)', 'Package unsigned IPA', 'Verify IPA contents', 'Upload IPA'):
     step = workflow.split('      - name: ' + name + '\n', 1)[1].split('      - name:', 1)[0]
-    assert gate in step, name + ' lacks the explicit manual IPA gate'
+    assert gate in step, name + ' lacks the manual and same-attempt verification IPA gates'
+step = workflow.split("      - name: Require this attempt's guest verification before IPA\n", 1)[1].split('      - name:', 1)[0]
+assert 'id: verification_gate' in step and 'python3 scripts/check-verification-gate.py' in step
+assert "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}" in step
+assert 'python3 tests/verification-gate-test.py' in workflow
 PY
 
 printf 'ok  scripts: CI executes and counts XCTest; IPA requires explicit dispatch\n'

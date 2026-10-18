@@ -56,6 +56,7 @@ on:
       - "tests/stub-bridge.mjs"
       - "tests/mock-deepseek.mjs"
       - "tests/emu-test.sh"
+      - "tests/asbestos-block-links-test.*"
       - "tests/scripts-test.sh"
       - "tests/DSHTests/**"
       - "tests/DSHUITests/**"
@@ -66,6 +67,8 @@ on:
       - "scripts/run-xctests.sh"
       - "scripts/select-xcode.py"
       - "scripts/report-xctests.py"
+      - "scripts/check-verification-gate.py"
+      - "tests/verification-gate-test.py"
       - "tests/lifecycle-test.sh"
       - "tests/native-runner-test.py"
       - "tests/session-*"
@@ -129,6 +132,9 @@ jobs:
     name: Test DSH (optional IPA) (${{ github.event.inputs.runner_label || 'xcode-27' }})
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
     env:
       INPUT_XCODE_PATH: ${{ github.event.inputs.xcode_path }}
       INPUT_FORCE_ROOTFS: ${{ github.event.inputs.force_rootfs }}
@@ -274,8 +280,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Archive app (unsigned)
+      - name: Require this attempt's guest verification before IPA
+        id: verification_gate
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
+        timeout-minutes: 12
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERIFY_JOB_NAME: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
+        run: |
+          set -euo pipefail
+          python3 scripts/check-verification-gate.py 2>&1 | tee cilogs/verification-gate.log
+
+      - name: Archive app (unsigned)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
         run: |
           set -euo pipefail
           mkdir -p cilogs
@@ -297,7 +314,7 @@ jobs:
             archive 2>&1 | tee cilogs/04-archive.log
 
       - name: Package unsigned IPA
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
         id: package
         run: |
           set -euo pipefail
@@ -326,7 +343,7 @@ jobs:
           echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Verify IPA contents
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
         run: |
           set -euo pipefail
           IPA="build/ipa/Payload"
@@ -353,7 +370,7 @@ jobs:
           ls "$IPA/DSH.app" | head -40
 
       - name: Upload IPA
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: DSH-unsigned-ipa
@@ -464,6 +481,14 @@ jobs:
 
       - name: Native lifecycle regression tests
         run: bash tests/lifecycle-test.sh
+
+      - name: IPA verification gate regressions
+        run: python3 tests/verification-gate-test.py
+
+      - name: Production JIT block link ownership (positive and old-code negative control, ASan + UBSan)
+        run: |
+          set -euo pipefail
+          bash tests/asbestos-block-links-test.sh 2>&1 | tee cilogs-verify/asbestos-block-links.log
 
       - name: Production flock identity, privacy and release regressions (ASan + UBSan)
         run: bash tests/flock-diagnostics-test.sh

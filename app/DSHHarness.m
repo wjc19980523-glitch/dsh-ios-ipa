@@ -16,7 +16,9 @@
 // Both exported to match DSHHarness.h: DSHTests reads the state name and
 // observes the notification through the app's own symbol, not a copy.
 DSH_EXPORTED NSNotificationName const DSHHarnessStateDidChangeNotification = @"DSHHarnessStateDidChangeNotification";
-static NSString *const kExpectedStartupKey = @"DSHExpectedStartupDuration";
+// Older samples measured only the HTTP probe after token announcement. Keep
+// those short samples out of the whole foreground-active startup estimate.
+static NSString *const kExpectedStartupKey = @"DSHExpectedActiveStartupDuration.1";
 // Only seeds the progress overlay's estimate before the first successful boot
 // has been measured; -expectedStartupDuration replaces it with a smoothed real
 // sample afterwards. dsh 0.2.x takes about three minutes on an emulated CPU,
@@ -111,6 +113,7 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
 - (void)invalidateHealthCheckDeliveringFailure:(BOOL)deliver;
 - (void)schedulePendingRelaunch;
 - (NSTimeInterval)remainingStartupBudget;
+- (DSHReadinessProbe *)readinessProbeForURL:(NSURL *)url interval:(NSTimeInterval)interval timeout:(NSTimeInterval)timeout;
 /// Shared body of the two public entry points; see DSHHarness.h for what
 /// `trustCachedAnswer` means.
 - (void)verifyAliveWithCachedAnswer:(BOOL)trustCachedAnswer completion:(void (^)(BOOL))completion;
@@ -452,10 +455,18 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     }
 }
 
-- (NSTimeInterval)remainingStartupBudget {
+- (NSTimeInterval)activeStartupDuration {
     NSTimeInterval elapsed = self.startupElapsedBeforePause;
     if (!self.appBackgrounded) elapsed += MAX(0, self.clock() - self.startupActiveStartedAt);
-    return self.startupTimeout - elapsed;
+    return elapsed;
+}
+
+- (NSTimeInterval)remainingStartupBudget {
+    return self.startupTimeout - [self activeStartupDuration];
+}
+
+- (DSHReadinessProbe *)readinessProbeForURL:(NSURL *)url interval:(NSTimeInterval)interval timeout:(NSTimeInterval)timeout {
+    return [[DSHReadinessProbe alloc] initWithURL:url interval:interval timeout:timeout];
 }
 
 /// There is no readiness poll until there is an authenticated URL to poll.
@@ -481,21 +492,25 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     __weak typeof(self) weakSelf = self;
     // A shorter interval trims up to 250 ms from the visible startup tail
     // without adding meaningful work during the multi-minute guest boot.
-    self.probe = [[DSHReadinessProbe alloc] initWithURL:url interval:0.25 timeout:remaining];
-    [self.probe startWithHandler:^(BOOL ready, NSTimeInterval elapsed) {
+    self.probe = [self readinessProbeForURL:url interval:0.25 timeout:remaining];
+    [self.probe startWithHandler:^(BOOL ready, __unused NSTimeInterval probeElapsed) {
         typeof(self) self = weakSelf;
         if (self == nil || generation != self.launchGeneration ||
             supervisorGeneration != self.startupSupervisorGeneration || self.appBackgrounded)
             return;
         if (ready) {
-            self.lastStartupDuration = elapsed;
+            // The probe starts only after the guest announces its token, often
+            // a minute into boot. Reuse the existing monotonic foreground
+            // accumulator so the ETA includes that work and excludes suspension.
+            NSTimeInterval startupDuration = [self activeStartupDuration];
+            self.lastStartupDuration = startupDuration;
             // Smooth the estimate for next time (EMA, weight on the new sample).
             double prev = [NSUserDefaults.standardUserDefaults doubleForKey:kExpectedStartupKey];
-            double next = prev > 1 ? prev * 0.5 + elapsed * 0.5 : elapsed;
+            double next = prev > 1 ? prev * 0.5 + startupDuration * 0.5 : startupDuration;
             [NSUserDefaults.standardUserDefaults setDouble:next forKey:kExpectedStartupKey];
             self.consecutiveCrashes = 0;
             [self clearPersistentFailures];
-            [self.log append:[NSString stringWithFormat:@"[dsh-ios] server answered after %.1fs", elapsed]];
+            [self.log append:[NSString stringWithFormat:@"[dsh-ios] server answered after %.1fs of active startup", startupDuration]];
             [DSHStartupMetrics.shared mark:@"harness_ready"];
             self.state = DSHHarnessStateReady;
         } else if (self.state == DSHHarnessStateStarting) {

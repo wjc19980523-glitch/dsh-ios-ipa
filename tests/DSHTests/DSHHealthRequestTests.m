@@ -92,6 +92,128 @@
 }
 @end
 
+@interface DSHHarness (StartupDurationFixture)
+- (DSHReadinessProbe *)readinessProbeForURL:(NSURL *)url interval:(NSTimeInterval)interval timeout:(NSTimeInterval)timeout;
+@end
+
+/// Deliver the actual Harness readiness callback with independently controlled
+/// probe elapsed/monotonic time, including an already queued stale response.
+@interface DSHManualStartupProbe : DSHReadinessProbe
+@property (nonatomic, copy) DSHReadinessHandler fixtureHandler;
+@property (nonatomic) NSTimeInterval fixtureTimeout;
+@property (nonatomic) NSTimeInterval fixtureInterval;
+@property (nonatomic) BOOL fixtureCancelled;
+- (void)answerReadyWithProbeElapsed:(NSTimeInterval)elapsed;
+@end
+@implementation DSHManualStartupProbe
+- (void)startWithHandler:(DSHReadinessHandler)handler { self.fixtureHandler = handler; }
+- (void)cancel { self.fixtureCancelled = YES; }
+- (void)answerReadyWithProbeElapsed:(NSTimeInterval)elapsed { self.fixtureHandler(YES, elapsed); }
+@end
+
+@interface DSHStartupDurationFixtureHarness : DSHHarness
+@property (nonatomic) NSMutableArray<DSHManualStartupProbe *> *startupProbes;
+@end
+@implementation DSHStartupDurationFixtureHarness
+- (DSHReadinessProbe *)readinessProbeForURL:(NSURL *)url interval:(NSTimeInterval)interval timeout:(NSTimeInterval)timeout {
+    if (!self.startupProbes) self.startupProbes = [NSMutableArray array];
+    DSHManualStartupProbe *probe = [[DSHManualStartupProbe alloc] initWithURL:url interval:interval timeout:timeout];
+    probe.fixtureTimeout = timeout; probe.fixtureInterval = interval;
+    [self.startupProbes addObject:probe];
+    return probe;
+}
+@end
+
+@interface DSHStartupDurationTests : XCTestCase
+@property (nonatomic) DSHManualHealthClock *clock;
+@property (nonatomic) DSHManualHealthLauncher *launcher;
+@property (nonatomic) DSHStartupDurationFixtureHarness *harness;
+@property (nonatomic) id priorActiveEstimate;
+@property (nonatomic) id priorLegacyEstimate;
+@end
+@implementation DSHStartupDurationTests
+- (void)setUp {
+    [super setUp]; XCTAssertTrue(NSThread.isMainThread);
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    self.priorActiveEstimate = [defaults objectForKey:@"DSHExpectedActiveStartupDuration.1"];
+    self.priorLegacyEstimate = [defaults objectForKey:@"DSHExpectedStartupDuration"];
+    [defaults removeObjectForKey:@"DSHExpectedActiveStartupDuration.1"];
+    [defaults setDouble:2.8 forKey:@"DSHExpectedStartupDuration"];
+    self.clock = [DSHManualHealthClock new]; self.launcher = [DSHManualHealthLauncher new];
+    self.launcher.emitsToken = NO;
+    DSHManualHealthClock *clock = self.clock;
+    self.harness = [[DSHStartupDurationFixtureHarness alloc] initWithLauncher:self.launcher
+        healthProbeFactory:^id<DSHProbeRequest>(NSURL *url, NSTimeInterval timeout, void (^completion)(DSHProbeResult *)) {
+            DSHManualHealthRequest *request = [DSHManualHealthRequest new]; request.completion = completion; return request;
+        } scheduler:^(NSTimeInterval delay, dispatch_block_t action) { [clock schedule:delay action:action]; }
+        clock:^{ return clock.now; }];
+    self.harness.startupTimeout = 600;
+}
+- (void)tearDown {
+    [self.harness stop]; self.harness = nil;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (self.priorActiveEstimate) [defaults setObject:self.priorActiveEstimate forKey:@"DSHExpectedActiveStartupDuration.1"];
+    else [defaults removeObjectForKey:@"DSHExpectedActiveStartupDuration.1"];
+    if (self.priorLegacyEstimate) [defaults setObject:self.priorLegacyEstimate forKey:@"DSHExpectedStartupDuration"];
+    else [defaults removeObjectForKey:@"DSHExpectedStartupDuration"];
+    [super tearDown];
+}
+- (void)announceToken:(NSString *)token {
+    [self.harness ingestServerLineForTesting:[NSString stringWithFormat:
+        @"dsh web: http://127.0.0.1:%u/?token=%@", self.harness.port, token]];
+}
+- (void)testActiveStartupIncludesTheWaitBeforeTokenAndDiscardsLegacyProbeEstimates {
+    XCTAssertEqualWithAccuracy(self.harness.expectedStartupDuration, 180, 0.001);
+    [self.harness start]; [self.clock advance:60];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateStarting);
+    XCTAssertEqual(self.harness.startupProbes.count, 0u, @"Token gating is unchanged");
+    [self announceToken:@"duration-token-1"];
+    DSHManualStartupProbe *probe = self.harness.startupProbes.lastObject;
+    XCTAssertEqualWithAccuracy(probe.fixtureTimeout, 540, 0.001);
+    XCTAssertEqualWithAccuracy(probe.fixtureInterval, 0.25, 0.001);
+    [self.clock advance:3]; [probe answerReadyWithProbeElapsed:3];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateReady);
+    XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 63, 0.001);
+    XCTAssertEqualWithAccuracy(self.harness.expectedStartupDuration, 63, 0.001);
+    XCTAssertTrue([[self.harness.log tail:20] containsString:@"63.0s of active startup"]);
+}
+- (void)testActiveStartupExcludesBackgroundAndIgnoresTheCancelledProbe {
+    [self.harness start]; [self.clock advance:40]; [self announceToken:@"duration-token-pause"];
+    DSHManualStartupProbe *old = self.harness.startupProbes.lastObject;
+    [self.clock advance:2]; [self.harness handleAppBackground]; [self.clock advance:300];
+    XCTAssertTrue(old.fixtureCancelled);
+    [self.harness handleAppResume];
+    DSHManualStartupProbe *current = self.harness.startupProbes.lastObject;
+    XCTAssertNotEqual(old, current);
+    XCTAssertEqualWithAccuracy(current.fixtureTimeout, 558, 0.001, @"Background time cannot consume the existing startup budget");
+    [old answerReadyWithProbeElapsed:2];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateStarting);
+    XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 0, 0.001);
+    [self.clock advance:3]; [current answerReadyWithProbeElapsed:3];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateReady);
+    XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 45, 0.001);
+    XCTAssertEqualWithAccuracy(self.harness.expectedStartupDuration, 45, 0.001);
+    XCTAssertEqual(self.launcher.launches, 1u); XCTAssertEqual(self.launcher.kills, 0u);
+}
+- (void)testReplacementGuestStartsANewMeasurementAndSmoothsOnlyActiveSamples {
+    [self.harness start]; [self.clock advance:60]; [self announceToken:@"duration-token-first"];
+    DSHManualStartupProbe *old = self.harness.startupProbes.lastObject;
+    [self.clock advance:3]; [old answerReadyWithProbeElapsed:3];
+    [self.harness restart]; [self.clock advance:0.5];
+    XCTAssertEqual(self.launcher.launches, 2u);
+    [self.clock advance:10]; [self announceToken:@"duration-token-second"];
+    DSHManualStartupProbe *current = self.harness.startupProbes.lastObject;
+    XCTAssertNotEqual(old, current); XCTAssertEqualWithAccuracy(current.fixtureTimeout, 590, 0.001);
+    [old answerReadyWithProbeElapsed:3];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateStarting);
+    XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 63, 0.001);
+    [self.clock advance:2]; [current answerReadyWithProbeElapsed:2];
+    XCTAssertEqual(self.harness.state, DSHHarnessStateReady);
+    XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 12, 0.001);
+    XCTAssertEqualWithAccuracy(self.harness.expectedStartupDuration, 37.5, 0.001);
+}
+@end
+
 @interface DSHHealthRequestTests : XCTestCase
 @property (nonatomic) DSHManualHealthClock *clock;
 @property (nonatomic) DSHManualHealthLauncher *launcher;

@@ -1,5 +1,9 @@
 /* Production diagnostic core, real pthread admission/cancellation and a real
  * host flock. No guest task/FD scans or user files are needed. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+// flock is a BSD extension hidden by the runner's strict POSIX feature level.
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "fs/dsh-lifecycle.h"
 #include <assert.h>
 #include <errno.h>

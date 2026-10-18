@@ -6,6 +6,21 @@
 
 @interface DSHLifecycleDiagnosticsTests : XCTestCase @end
 @implementation DSHLifecycleDiagnosticsTests
+- (void)testWebCompletionHasNoInventedDurationAndLegacyPerformanceLogsStillParse {
+    NSDictionary *web = [DSHLifecycleDiagnostics safeEventFromLogLine:@"[perf] web interface loaded"];
+    XCTAssertEqualObjects(web, (@{@"event": @"webInterfaceLoaded"}));
+    NSDictionary *legacyWeb = [DSHLifecycleDiagnostics safeEventFromLogLine:@"[perf] web interface loaded (harness 2.893s)"];
+    XCTAssertEqualObjects(legacyWeb[@"event"], @"webInterfaceLoaded");
+    XCTAssertEqualWithAccuracy([legacyWeb[@"duration_seconds"] doubleValue], 2.893, 0.0001);
+    NSDictionary *active = [DSHLifecycleDiagnostics safeEventFromLogLine:@"[dsh-ios] server answered after 63.0s of active startup"];
+    XCTAssertEqualObjects(active[@"event"], @"harnessAnswered");
+    XCTAssertEqualObjects(active[@"stage"], @"active_startup");
+    XCTAssertEqualObjects(active[@"duration_seconds"], @63);
+    NSDictionary *legacy = [DSHLifecycleDiagnostics safeEventFromLogLine:@"[dsh-ios] server answered after 2.8s"];
+    XCTAssertEqualObjects(legacy[@"event"], @"harnessAnswered");
+    XCTAssertNil(legacy[@"stage"], @"Legacy probe samples must not acquire the new active-startup label");
+    XCTAssertEqualWithAccuracy([legacy[@"duration_seconds"] doubleValue], 2.8, 0.0001);
+}
 - (void)testLaunchIdentityAndProcessTimestampAreStable {
     XCTAssertGreaterThan(DSHLogBuffer.hostLaunchID.length, 20u);
     XCTAssertEqualObjects(DSHLogBuffer.hostLaunchID, DSHLogBuffer.hostLaunchID);

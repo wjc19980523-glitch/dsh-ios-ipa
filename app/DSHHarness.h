@@ -90,9 +90,11 @@ typedef NSTimeInterval (^DSHHarnessClock)(void);
 @property (nonatomic, readonly) NSUInteger restartCount;
 @property (nonatomic, readonly, nullable) NSString *lastError;
 @property (nonatomic, readonly) int guestPid;
+/// Foreground-active seconds from the current guest launch to its first HTTP
+/// answer, including time spent waiting for its token. Background time is excluded.
 @property (nonatomic, readonly) NSTimeInterval lastStartupDuration;
-/// Expected time from launch to first HTTP answer, from previous runs on this
-/// device (180 s until measured once). Used for the startup progress estimate.
+/// Expected active startup duration from previous runs on this device (180 s
+/// until measured once). Separate from StartupMetrics' wall-clock stage offsets.
 @property (nonatomic, readonly) NSTimeInterval expectedStartupDuration;
 /// When the current launch started (nil when not starting).
 @property (nonatomic, readonly, nullable) NSDate *launchStartedAt;

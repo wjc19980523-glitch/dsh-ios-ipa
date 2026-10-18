@@ -71,7 +71,7 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"ui_phase": @[@"started", @"state", @"pointerdown", @"pointerup", @"pointercancel", @"touchstart", @"touchend", @"touchcancel", @"click_capture", @"click_bubble", @"after_event", @"finished"],
             @"type": @[@"LOCK_SH", @"LOCK_EX"],
             @"host_start_source": @[@"first_observation_sysctl_unavailable", @"kernel_process_start"],
-            @"stage": @[@"image_preparation", @"guest_kernel_boot", @"web_interface_loaded"],
+            @"stage": @[@"image_preparation", @"guest_kernel_boot", @"web_interface_loaded", @"active_startup"],
             @"web_result": @[@"success", @"failure"],
             @"web_error": @[@"none", @"invalid_url", @"blocked_url", @"redirect_blocked", @"unsupported_content", @"too_large", @"timeout", @"aborted", @"dns", @"tls", @"connection_refused", @"proxy", @"other"],
             @"phase": @[@"open", @"close_failed", @"sql_profile", @"finalize", @"step", @"step_timeout", @"retry_reset", @"retry_timeout", @"step_result", @"reset", @"prepare_failed", @"prepare_timeout", @"finalize_failed", @"begin_read", @"begin_write", @"commit", @"rollback", @"bind", @"invalid_stat", @"missing_inode", @"missing_link_source"]};
@@ -310,6 +310,7 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         @"[dsh-ios] giving up after repeated failures": @"healthRestartLimit",
         @"[dsh-ios] persistent crash-loop fuse is open": @"healthRestartLimit",
         @"[perf] app boot coordinator started": @"hostBootStarted",
+        @"[perf] web interface loaded": @"webInterfaceLoaded",
         @"[dsh-ios] lifecycle: foreground supervision paused": @"supervisionPaused",
         @"[dsh-ios] lifecycle: foreground supervision resumed": @"supervisionResumed",
         @"[lifecycle] session patch verified": @"sessionPatchVerified"};
@@ -325,6 +326,7 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         @[@"^\\[perf\\] image preparation ([0-9.]+)s$", @"startupPerformance", @"duration_seconds"],
         @[@"^\\[perf\\] guest kernel boot ([0-9.]+)s$", @"startupPerformance", @"duration_seconds"],
         @[@"^\\[dsh-ios\\] server answered after ([0-9.]+)s$", @"harnessAnswered", @"duration_seconds"],
+        @[@"^\\[dsh-ios\\] server answered after ([0-9.]+)s of active startup$", @"harnessAnswered", @"duration_seconds"],
         @[@"^\\[dsh-ios\\] The harness did not (?:answer|announce its web URL) within ([0-9]+) seconds\\.$", @"harnessStartupTimedOut", @"duration_seconds"],
         @[@"^\\[dsh-ios\\] harness announced its web URL on port ([0-9]+); authentication token captured$", @"harnessAuthenticationReady", @"port"],
         @[@"^\\[dsh-ios\\] launching [^\\r\\n]+ on port ([0-9]+)$", @"harnessLaunchRequested", @"port"],
@@ -339,6 +341,7 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         }
         if ([line hasPrefix:@"[perf] image preparation"]) event[@"stage"] = @"image_preparation";
         if ([line hasPrefix:@"[perf] guest kernel boot"]) event[@"stage"] = @"guest_kernel_boot";
+        if ([line hasSuffix:@"s of active startup"]) event[@"stage"] = @"active_startup";
         return event;
     }
     return nil;

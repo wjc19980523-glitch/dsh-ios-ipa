@@ -25,6 +25,9 @@ observer_spec.loader.exec_module(observer_module)
 runner_spec = importlib.util.spec_from_file_location('job_runner', HERE / 'guest-runner.py')
 runner_module = importlib.util.module_from_spec(runner_spec)
 runner_spec.loader.exec_module(runner_module)
+diagnostic_spec = importlib.util.spec_from_file_location('supervision_diagnostics', HERE / 'helper-diagnostics.py')
+diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+diagnostic_spec.loader.exec_module(diagnostics)
 
 
 def complete_result():
@@ -382,11 +385,14 @@ class ObserverCleanupTests(unittest.TestCase):
             self.assertEqual(runner_module.process_group(42), [dict(pid=42, ppid=1, pgid=42, state='S')])
 
 
-class OwnedProcessTests(unittest.TestCase):
+class OwnedProcessTests(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
+    diagnostics_root = HERE.parent / 'cilogs-verify' / 'supervision-failures'
+    diagnostics_bash_version = 'not-applicable'
+    diagnostics_budget = diagnostics.ExportBudget()
     def probe(self, source, *, timeout=2, sample_after=0, test=False, trace=True):
         node = shutil.which('node')
         self.assertIsNotNone(node, 'Node is required; this evidence test must really run')
-        with tempfile.TemporaryDirectory(prefix='dsh-job-supervision-') as work:
+        with self.temporary_directory(prefix='dsh-job-supervision-') as work:
             root = Path(work)
             script = root / 'fixture.mjs'; script.write_text(source)
             result = root / 'result.json'; events = root / 'phases.jsonl'; events.write_text('')
@@ -473,7 +479,7 @@ class OwnedProcessTests(unittest.TestCase):
     def test_host_observer_keeps_bash_parent_and_samples_only_owned_node(self):
         from types import SimpleNamespace
         node = shutil.which('node'); self.assertIsNotNone(node)
-        with tempfile.TemporaryDirectory(prefix='dsh-job-tree-') as work:
+        with self.temporary_directory(prefix='dsh-job-tree-') as work:
             root = Path(work); events = root / 'events.jsonl'; events.write_text('')
             child = subprocess.Popen(['/bin/bash', '-c',
                 '"$@" & child=$!; trap \'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 0\' TERM; wait "$child"',
@@ -539,7 +545,7 @@ class OwnedProcessTests(unittest.TestCase):
         # /tmp alone misses the reproduced WSL /mnt/d shared-append corruption.
         node = shutil.which('node'); self.assertIsNotNone(node)
         diagnostics = HERE.parent / 'cilogs-verify'; diagnostics.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='trace-integrity.', dir=diagnostics) as work:
+        with self.temporary_directory(prefix='trace-integrity.', dir=diagnostics) as work:
             root = Path(work); events = root / 'phases.jsonl'; barrier = root / 'ready'
             shell = dict(schema=1, phase='job-tracking', fileTag='shell', event='suite:start', pid=os.getpid())
             events.write_text(json.dumps(shell) + '\n')
@@ -575,7 +581,7 @@ class OwnedProcessTests(unittest.TestCase):
 
     def test_wrapper_preserves_primary_failure_when_tee_also_fails(self):
         # Negative infrastructure fixture, not a substitute for real Node tests.
-        with tempfile.TemporaryDirectory(prefix='dsh-job-pipeline-') as work:
+        with self.temporary_directory(prefix='dsh-job-pipeline-') as work:
             root = Path(work); scripts = root / 'tests'; scripts.mkdir()
             for name in ('job-tracking-test.sh', 'guest-runner.py', 'guest-observer.py',
                          'check-job-tracking-result.py', 'job-tracking-trace.mjs'):

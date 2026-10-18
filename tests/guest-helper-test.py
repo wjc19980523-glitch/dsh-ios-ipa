@@ -11,7 +11,6 @@ import socket
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from unittest import mock
@@ -19,6 +18,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 p = argparse.ArgumentParser()
 p.add_argument('--bash', required=True)
+p.add_argument('--diagnostics-dir', type=Path, default=Path('cilogs-verify/helper-failures'))
 args, remaining = p.parse_known_args()
 spec = importlib.util.spec_from_file_location('refusal', HERE / 'check-bridge-refusal.py')
 refusal = importlib.util.module_from_spec(spec)
@@ -26,6 +26,9 @@ spec.loader.exec_module(refusal)
 runner_spec = importlib.util.spec_from_file_location('guest_runner', HERE / 'guest-runner.py')
 runner = importlib.util.module_from_spec(runner_spec)
 runner_spec.loader.exec_module(runner)
+diagnostic_spec = importlib.util.spec_from_file_location('helper_diagnostics', HERE / 'helper-diagnostics.py')
+diagnostics = importlib.util.module_from_spec(diagnostic_spec)
+diagnostic_spec.loader.exec_module(diagnostics)
 TEXT = 'TOOL-RESULT-BEGIN Error: missing or wrong bridge token [unauthorized] TOOL-RESULT-END'
 EVENTS = [dict(phase='wrong-token', service='bridge', kind='request', request_id='1', route='/v1/shortcut/run', method='POST'),
           dict(phase='wrong-token', service='bridge', kind='response_finished', request_id='1', status=401, unauthorized=True),
@@ -33,9 +36,11 @@ EVENTS = [dict(phase='wrong-token', service='bridge', kind='request', request_id
           dict(phase='wrong-token', service='mock', kind='tool_result', unauthorized=True)]
 
 
-class HelperTest(unittest.TestCase):
+class HelperTest(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
+    diagnostics_root = args.diagnostics_dir
+    diagnostics_budget = diagnostics.ExportBudget()
     def invoke(self, code, timeout=0.5, tee=False, sample=0, initial=0, ps_delay=False, stdin=None, missing_stdin=False):
-        with tempfile.TemporaryDirectory(prefix='dsh-helper-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-helper-test-') as tmp:
             root = Path(tmp)
             ish = root / 'ish'
             # The fixture ignores emulator args; the supervisor is unchanged.
@@ -102,7 +107,7 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(output, '')
 
     def test_prepared_session_installer_uses_a_short_launcher(self):
-        with tempfile.TemporaryDirectory(prefix='dsh-installer-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-installer-test-') as tmp:
             output = Path(tmp) / 'installer.mjs'
             command = subprocess.check_output([sys.executable, str(HERE / 'session-lease-prepare.py'),
                 '--output', str(output), '--include-guest-test'], text=True).strip()
@@ -120,7 +125,7 @@ class HelperTest(unittest.TestCase):
 
     def test_prelaunch_setup_errors_update_the_actual_helper_status(self):
         for failure in ('diagnostic-directory', 'phase-file'):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix='dsh-helper-setup-') as tmp:
+            with self.subTest(failure=failure), self.temporary_directory(prefix='dsh-helper-setup-') as tmp:
                 root = Path(tmp)
                 if failure == 'diagnostic-directory':
                     (root / 'guest-diagnostics').write_text('not a directory')
@@ -137,7 +142,7 @@ class HelperTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_parent_input_close_error_keeps_supervising_the_real_child(self):
-        with tempfile.TemporaryDirectory(prefix='dsh-input-close-') as tmp:
+        with self.temporary_directory(prefix='dsh-input-close-') as tmp:
             root = Path(tmp)
             input_path = root / 'input'
             input_path.write_bytes(b'input')
@@ -206,7 +211,7 @@ class HelperTest(unittest.TestCase):
         self.assertTrue(r['timed_out'])
 
     def test_group_signal_denial_keeps_real_wait_status(self):
-        with tempfile.TemporaryDirectory(prefix='dsh-signal-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-signal-test-') as tmp:
             result = Path(tmp) / 'result.json'
             options = argparse.Namespace(result=result, phase='signal-test', events=Path(tmp) / 'events',
                 timeout=0.5, sample_after=0, initial_sample_after=0,
@@ -223,7 +228,7 @@ class HelperTest(unittest.TestCase):
 
     def denied_signals_probe(self, query_failure=None, *, source='import time; time.sleep(20)',
                              timeout=0.1, expect_live=True):
-        with tempfile.TemporaryDirectory(prefix='dsh-signal-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-signal-test-') as tmp:
             result = Path(tmp) / 'result.json'
             options = argparse.Namespace(result=result, phase='signal-test', events=Path(tmp) / 'events',
                 timeout=timeout, sample_after=0, initial_sample_after=0, command=[sys.executable, '-c', source])
@@ -459,7 +464,7 @@ class HelperTest(unittest.TestCase):
         self.assertFalse(r['pipe_eof'])
 
     def test_bridge_receipts_and_partial_tcp_are_redacted(self):
-        with tempfile.TemporaryDirectory(prefix='dsh-service-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-service-test-') as tmp:
             root = Path(tmp)
             events = root / 'events.jsonl'
             events.write_text('')
@@ -519,7 +524,7 @@ class HelperTest(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'darwin', 'requires real macOS sample/LLDB; run in CI')
     def test_real_macos_sample_and_read_only_lldb(self):
-        with tempfile.TemporaryDirectory(prefix='dsh-observer-test-') as tmp:
+        with self.temporary_directory(prefix='dsh-observer-test-') as tmp:
             root = Path(tmp)
             source = root / 'observer.c'
             source.write_text('#include <unistd.h>\n#include <pthread.h>\n'
@@ -552,5 +557,9 @@ class HelperTest(unittest.TestCase):
 
 if __name__ == '__main__':
     version = subprocess.check_output([args.bash, '-c', 'printf "%s" "$BASH_VERSION"'], text=True)
-    print('Actual helper tests under Bash', version, flush=True)
+    import re
+    match = re.fullmatch(r'(\d{1,4}(?:\.\d{1,4}){1,3})(?:\(\d+\)-release)?', version)
+    if not match: raise SystemExit('Unrecognized numeric Bash version')
+    HelperTest.diagnostics_bash_version = match[1]
+    print('Actual helper tests under Bash', match[1], flush=True)
     unittest.main(argv=[__file__] + remaining, verbosity=2)

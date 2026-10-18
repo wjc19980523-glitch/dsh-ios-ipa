@@ -446,15 +446,16 @@ jobs:
       - name: Native runner execution and failure-propagation regressions
         run: |
           set -euo pipefail
-          python3 tests/native-runner-test.py
-          python3 tests/job-tracking-supervision-test.py
+          python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
+          python3 tests/native-runner-test.py 2>&1 | tee cilogs-verify/native-runner.log
+          python3 tests/job-tracking-supervision-test.py 2>&1 | tee cilogs-verify/job-tracking-supervision.log
           python3 tests/job-tracking-cleanup-test.py 2>&1 | tee cilogs-verify/job-tracking-cleanup.log
 
       - name: Guest helper real wait-status regressions (Bash 3.2 and Bash 5)
         run: |
           set -euo pipefail
-          python3 tests/guest-helper-test.py --bash /bin/bash 2>&1 | tee cilogs-verify/helper-bash32.log
-          python3 tests/guest-helper-test.py --bash "$(brew --prefix bash)/bin/bash" 2>&1 | tee cilogs-verify/helper-bash5.log
+          python3 tests/guest-helper-test.py --bash /bin/bash --diagnostics-dir cilogs-verify/helper-failures 2>&1 | tee cilogs-verify/helper-bash32.log
+          python3 tests/guest-helper-test.py --bash "$(brew --prefix bash)/bin/bash" --diagnostics-dir cilogs-verify/helper-failures 2>&1 | tee cilogs-verify/helper-bash5.log
 
       - name: Native lifecycle regression tests
         run: bash tests/lifecycle-test.sh

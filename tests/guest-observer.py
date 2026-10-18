@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -75,15 +76,54 @@ def process_identity(pid, observations=None, deadline=None, purpose='identity-ch
     except (OSError, subprocess.SubprocessError): return None
 
 
-def sample_frames(raw):
+def parse_sample_frames(text):
     frames = []
-    for line in raw.read_text(errors='replace').splitlines():
+    for line in text.splitlines():
         # Keep call-stack lines, discard all headers and binary/path sections.
         m = re.match(r'\s*[+!:| ]*\d+ ([a-zA-Z_][a-zA-Z0-9_:$<>~.* ()+,-]*?)\s+\(in ([a-zA-Z0-9_.-]+)\)(.*)', line)
         if m: frames.append(dict(function=m[1], image=m[2]))
         elif re.match(r'\s*\d+ Thread_\d+', line):
             frames.append(dict(thread=re.search(r'Thread_\d+', line)[0]))
     return frames
+
+
+def sample_frames(raw):
+    return parse_sample_frames(raw.read_text(errors='replace'))
+
+
+def timeout_file_evidence(path, kind, deadline):
+    """Only bounded counts/hints after the timed-out direct tool has returned."""
+    result = dict(status='budget-exhausted')
+    if time.monotonic() >= deadline: return result
+    limit = 64 * 1024
+    try:
+        if path.is_symlink(): return dict(status='non-regular')
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode): return dict(status='non-regular')
+            result['source_bytes'] = info.st_size
+            if time.monotonic() >= deadline: return result
+            data = stream.read(limit + 1)
+        result['read_bytes'] = len(data)
+        if time.monotonic() >= deadline: return result
+        if len(data) > limit:
+            result['status'] = 'byte-limit'
+            return result
+        text = data.decode('utf-8', errors='replace')
+        if time.monotonic() >= deadline: return result
+        if kind == 'report':
+            frames = parse_sample_frames(text)
+            parsed = dict(frame_count=len(frames), function_frame_count=sum('function' in frame for frame in frames))
+        else:
+            parsed = dict(permission_hint=bool(re.search(
+                r'permission|not permitted|access denied|unable to attach|cannot attach|task_for_pid|must be root',
+                text, re.IGNORECASE)))
+        if time.monotonic() >= deadline: return result
+        result.update(status='observed', **parsed)
+    except FileNotFoundError: result['status'] = 'missing'
+    except OSError as error: result.update(status='read-error', errno=error.errno)
+    return result
 
 
 def host_processes(pgid, observations=None, deadline=None):
@@ -122,8 +162,11 @@ def host_processes(pgid, observations=None, deadline=None):
     return rows, non_nodes, skipped
 
 
-def observe_host_process(row, private, deadline):
-    result = dict(row, descriptor_status='not-collected', sample_status='not-collected', tool_observations=[])
+def observe_host_process(row, private, deadline, sample_policy='may-exit'):
+    if sample_policy not in ('may-exit', 'owned-stable-fixture'):
+        raise ValueError('invalid-host-sample-policy')
+    result = dict(row, descriptor_status='not-collected', sample_status='not-collected',
+                  sample_policy=sample_policy, tool_observations=[])
     result.pop('is_node', None)
     def same_process():
         return process_identity(row['pid'], result['tool_observations'], deadline) == row['start_identity']
@@ -169,9 +212,14 @@ def observe_host_process(row, private, deadline):
         raw, errors = Path(private) / f"{row['pid']}.sample", Path(private) / f"{row['pid']}.errors"
         try:
             # sample includes every thread. Its raw output never leaves 0700 storage.
+            command = ['/usr/bin/sample', str(row['pid']), '1', '10']
+            # The stable test fixture stays alive until collect returns; symbol
+            # lookup can occur after sampling. Transient targets keep -mayDie.
+            if sample_policy == 'may-exit': command.append('-mayDie')
+            command += ['-file', str(raw)]
             with errors.open('wb') as error_file:
                 sample = run_tool('sample', 'host-all-threads',
-                                  ['/usr/bin/sample', str(row['pid']), '1', '10', '-mayDie', '-file', str(raw)],
+                                  command,
                                   observations=result['tool_observations'], limit=3, deadline=deadline,
                                   pid=row['pid'], stdout=error_file, stderr=subprocess.STDOUT)
             result['sample_exit_status'] = sample.returncode
@@ -195,6 +243,11 @@ def observe_host_process(row, private, deadline):
             result['sample_status'] = 'permission-denied'
         except subprocess.TimeoutExpired:
             result['sample_status'] = 'timed-out'
+            # run() has returned after stopping/waiting for its direct child.
+            # Partial output is evidence only; no exit code or success is inferred.
+            result['sample_timeout_evidence'] = dict(
+                report=timeout_file_evidence(raw, 'report', deadline),
+                errors=timeout_file_evidence(errors, 'errors', deadline))
         except OSError:
             result['sample_status'] = 'os-error'
         if not same_process(): return skip_changed()
@@ -334,7 +387,11 @@ def host_events(a, result):
 def collect_host(a, result, identity, save):
     start = time.monotonic()
     deadline = start + 8
+    sample_policy = getattr(a, 'host_sample_policy', 'may-exit')
+    if sample_policy not in ('may-exit', 'owned-stable-fixture'):
+        raise ValueError('invalid-host-sample-policy')
     result.update(mode='host-only', process_tree_status='not-collected', sample_budget_seconds=8,
+                  sample_policy=sample_policy,
                   observation_started_monotonic_seconds=start,
                   observation_deadline_monotonic_seconds=deadline)
     host_events(a, result)
@@ -380,7 +437,8 @@ def collect_host(a, result, identity, save):
     with tempfile.TemporaryDirectory(prefix='dsh-private-host-sample-') as private:
         os.chmod(private, 0o700)
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(observe_host_process, row, private, deadline): row for row in candidates}
+            futures = {(pool.submit(observe_host_process, row, private, deadline) if sample_policy == 'may-exit'
+                        else pool.submit(observe_host_process, row, private, deadline, sample_policy)): row for row in candidates}
             for future in as_completed(futures):
                 try: observation = future.result()
                 except Exception as error:

@@ -3,9 +3,12 @@
 import errno
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -114,14 +117,20 @@ class ToolTimingTests(unittest.TestCase):
 class HostObservationTimingTests(unittest.TestCase):
     row = dict(pid=43, ppid=42, pgid=42, state='S', start_identity='42 Fri Oct 16 00:38:36 2026', is_node=True)
 
-    def run_observation(self, mode, *, deadline=18, identity_changes=False):
+    def run_observation(self, mode, *, deadline=18, identity_changes=False, policy='may-exit'):
         clock = Clock()
         def tool(command, **kwargs):
             if command[0] == 'lsof':
                 return subprocess.CompletedProcess(command, 0, stdout='p43\nf1\ntPIPE\nSYNTHETIC_SECRET', stderr='')
             self.assertEqual(command[0], '/usr/bin/sample')
+            self.assertEqual(command[2:4], ['1', '10'])
+            self.assertEqual('-mayDie' in command, policy == 'may-exit')
             self.assertLessEqual(kwargs['timeout'], 3)
-            if mode == 'timeout':
+            if mode in ('timeout', 'partial-timeout'):
+                if mode == 'partial-timeout':
+                    Path(command[command.index('-file') + 1]).write_text('SYNTHETIC_SECRET\n + 2 uv_run (in node)\n')
+                    kwargs['stdout'].write(b'permission denied SYNTHETIC_SECRET')
+                    kwargs['stdout'].flush()
                 clock.advance(kwargs['timeout'])
                 raise subprocess.TimeoutExpired(command, kwargs['timeout'])
             if mode == 'permission':
@@ -138,7 +147,112 @@ class HostObservationTimingTests(unittest.TestCase):
              mock.patch.object(observer.time, 'monotonic', clock), \
              mock.patch.object(observer, 'process_identity', side_effect=identities), \
              mock.patch.object(observer.subprocess, 'run', side_effect=tool):
-            return observer.observe_host_process(self.row, private, deadline)
+            return observer.observe_host_process(self.row, private, deadline, policy)
+
+    def test_owned_stable_fixture_defers_symbol_lookup_and_keeps_strict_sample_success(self):
+        for policy in ('may-exit', 'owned-stable-fixture'):
+            with self.subTest(policy=policy):
+                result = self.run_observation('frames', policy=policy)
+                self.assertEqual(result['sample_policy'], policy)
+                self.assertEqual(result['sample_status'], 'completed')
+                self.assertEqual(result['sample_exit_status'], 0)
+                self.assertTrue(any('function' in frame for frame in result['sample_frames']))
+                self.assertEqual(result['tool_observations'][-1]['limit_seconds'], 3)
+                self.assertEqual(result['tool_observations'][-1]['allocated_timeout_seconds'], 3)
+
+    def test_partial_frames_and_permission_hint_do_not_turn_timeout_into_success(self):
+        result = self.run_observation('partial-timeout', policy='owned-stable-fixture')
+        self.assertEqual(result['sample_status'], 'timed-out')
+        self.assertEqual(result['tool_observations'][-1]['status'], 'timed-out')
+        self.assertEqual(result['sample_timeout_evidence']['report']['function_frame_count'], 1)
+        self.assertTrue(result['sample_timeout_evidence']['errors']['permission_hint'])
+        self.assertNotIn('sample_frames', result)
+        self.assertNotIn('sample_exit_status', result)
+        self.assertNotIn('SYNTHETIC_SECRET', json.dumps(result))
+
+    def test_invalid_sample_policy_never_starts_tools(self):
+        with mock.patch.object(observer.subprocess, 'run') as tool:
+            with self.assertRaises(ValueError): observer.observe_host_process(self.row, '/unused', 18, 'unknown')
+        tool.assert_not_called()
+
+    def test_partial_evidence_stops_at_budget_and_byte_limits(self):
+        with tempfile.TemporaryDirectory() as private:
+            path = Path(private) / 'report'
+            with mock.patch.object(observer.time, 'monotonic', return_value=10), \
+                 mock.patch.object(observer.os, 'open') as opened:
+                self.assertEqual(observer.timeout_file_evidence(path, 'report', 9), dict(status='budget-exhausted'))
+            opened.assert_not_called()
+            self.assertEqual(observer.timeout_file_evidence(path, 'report', time.monotonic() + 8)['status'], 'missing')
+            path.write_bytes(b'x' * (64 * 1024 + 100))
+            value = observer.timeout_file_evidence(path, 'report', time.monotonic() + 8)
+            self.assertEqual(value['status'], 'byte-limit')
+            self.assertEqual(value['read_bytes'], 64 * 1024 + 1)
+            self.assertNotIn('frame_count', value)
+
+    def test_partial_evidence_discards_work_when_budget_expires_during_stat_read_or_parse(self):
+        real_fdopen, real_fstat, real_parse = observer.os.fdopen, observer.os.fstat, observer.parse_sample_frames
+        with tempfile.TemporaryDirectory() as private:
+            path = Path(private) / 'report'; path.write_text(' + 2 uv_run (in node)\n')
+            for stage in ('stat', 'read', 'parse'):
+                with self.subTest(stage=stage):
+                    clock, reads = Clock(), []
+                    class TimedFile:
+                        def __init__(self, fd, mode): self.stream = real_fdopen(fd, mode)
+                        def __enter__(self): return self
+                        def __exit__(self, *args): return self.stream.__exit__(*args)
+                        def fileno(self): return self.stream.fileno()
+                        def read(self, size):
+                            reads.append(size)
+                            data = self.stream.read(size)
+                            if stage == 'read': clock.advance(9)
+                            return data
+                    def fstat(fd):
+                        info = real_fstat(fd)
+                        if stage == 'stat': clock.advance(9)
+                        return info
+                    def parse(text):
+                        frames = real_parse(text)
+                        if stage == 'parse': clock.advance(9)
+                        return frames
+                    with mock.patch.object(observer.time, 'monotonic', clock), \
+                         mock.patch.object(observer.os, 'fdopen', side_effect=TimedFile), \
+                         mock.patch.object(observer.os, 'fstat', side_effect=fstat), \
+                         mock.patch.object(observer, 'parse_sample_frames', side_effect=parse) as parser:
+                        result = observer.timeout_file_evidence(path, 'report', 18)
+                    self.assertEqual(result['status'], 'budget-exhausted')
+                    self.assertNotIn('frame_count', result)
+                    self.assertNotIn('function_frame_count', result)
+                    if stage == 'stat': self.assertEqual(reads, [])
+                    else: self.assertEqual(result['read_bytes'], path.stat().st_size)
+                    if stage != 'parse': parser.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process identity and named pipes')
+    def test_partial_evidence_refuses_links_and_pipes(self):
+        with tempfile.TemporaryDirectory() as private:
+            root = Path(private)
+            target = root / 'private'; target.write_text('SYNTHETIC_SECRET')
+            link = root / 'report'; link.symlink_to(target)
+            self.assertEqual(observer.timeout_file_evidence(link, 'report', time.monotonic() + 8)['status'], 'non-regular')
+            fifo = root / 'pipe'; os.mkfifo(fifo)
+            self.assertEqual(observer.timeout_file_evidence(fifo, 'report', time.monotonic() + 8)['status'], 'non-regular')
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process identity')
+    def test_real_timed_out_tool_is_reaped_before_bounded_partial_evidence(self):
+        with tempfile.TemporaryDirectory() as private:
+            root = Path(private); report = root / 'report'; pid_file = root / 'pid'
+            source = ('import os,time; from pathlib import Path; '
+                f'Path({str(pid_file)!r}).write_text(str(os.getpid())); '
+                f'Path({str(report)!r}).write_text(" + 2 uv_run (in node)\\n"); time.sleep(10)')
+            rows = []
+            with self.assertRaises(subprocess.TimeoutExpired):
+                observer.run_tool('sample', 'host-all-threads', [sys.executable, '-c', source],
+                    observations=rows, limit=.5, deadline=time.monotonic() + 8,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual(rows[0]['status'], 'timed-out')
+            self.assertNotIn('return_code', rows[0])
+            with self.assertRaises(ProcessLookupError): os.kill(int(pid_file.read_text()), 0)
+            value = observer.timeout_file_evidence(report, 'report', time.monotonic() + 8)
+            self.assertEqual(value['function_frame_count'], 1)
 
     def test_matched_identity_does_not_turn_timeout_into_completed_sample(self):
         result = self.run_observation('timeout')

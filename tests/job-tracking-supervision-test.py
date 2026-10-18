@@ -531,14 +531,17 @@ class OwnedProcessTests(diagnostics.DiagnosticCaseMixin, unittest.TestCase):
                 time.sleep(.1)
                 observer_module.collect(SimpleNamespace(pid=child.pid, phase='job-tracking',
                     output=root / 'sample', events=events, host_only=True,
+                    host_sample_policy='owned-stable-fixture',
                     start_identity=observer_module.process_identity(child.pid)))
                 proof = json.loads((root / 'sample/observer.json').read_text())
                 self.assertEqual(proof['process_tree_status'], 'completed', proof)
+                self.assertEqual(proof['sample_policy'], 'owned-stable-fixture')
                 self.assertTrue(any(row['pid'] == child.pid for row in proof['process_tree']))
                 self.assertTrue(any(row['pid'] != child.pid and row['ppid'] == child.pid for row in proof['process_tree']))
                 self.assertTrue(proof['host_processes'], proof)
                 self.assertTrue(all(row['pid'] != child.pid and row['pgid'] == child.pid for row in proof['host_processes']))
                 self.assertTrue(all(row['identity_status'] == 'matched' for row in proof['host_processes']))
+                self.assertTrue(all(row['sample_policy'] == 'owned-stable-fixture' for row in proof['host_processes']))
                 if sys.platform == 'darwin':
                     self.assertTrue(all(row['sample_status'] == 'completed' for row in proof['host_processes']), proof)
                     self.assertTrue(all(row['sample_exit_status'] == 0 for row in proof['host_processes']), proof)

@@ -67,10 +67,15 @@ RESULT = dict(host_pid=NUM, wait_status=NUM, exit_kind=enum('exited', 'signaled'
     process_group_queries=dict(descendants_at_exit=QUERY, before_cleanup=QUERY, residual_processes=QUERY),
     observer_wait_interruptions=NUM, signal_errors=[dict(target=enum('group', 'leader'), signal=NUM, errno=NUM)],
     samples=[SAMPLE])
+SAMPLE_POLICY = enum('may-exit', 'owned-stable-fixture')
+TIMEOUT_FILE = dict(status=enum('budget-exhausted', 'non-regular', 'observed', 'byte-limit', 'missing', 'read-error'),
+    source_bytes=NUM, read_bytes=NUM, frame_count=NUM, function_frame_count=NUM, permission_hint=BOOL, errno=NUM)
 HOST_PROCESS = dict(**PROCESS, identity_status=STATUS, descriptor_status=STATUS,
     descriptor_exit_status=NUM, sample_status=STATUS, sample_exit_status=NUM, observer_error=ERROR,
+    sample_policy=SAMPLE_POLICY, sample_timeout_evidence=dict(report=TIMEOUT_FILE, errors=TIMEOUT_FILE),
     descriptors=['descriptor'], **TIMING)
 OBSERVER = dict(host_pid=NUM, host_pgid=NUM, sample_exit_status=NUM, sample_error=ERROR,
+    sample_policy=SAMPLE_POLICY,
     lldb_exit_status=NUM, lldb_error=ERROR, host_processes=[HOST_PROCESS],
     mode=enum('host-only'),
     sample_status=STATUS, process_tree_status=STATUS, process_tree=[PROCESS], process_tree_error=ERROR,

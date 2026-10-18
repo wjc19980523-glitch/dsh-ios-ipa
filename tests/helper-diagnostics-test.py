@@ -96,6 +96,25 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(clean['function_frame_count'], 1)
             self.assertNotIn('private-sentinel', path.read_text())
 
+    def test_sample_timeout_policy_and_counts_survive_without_raw_partial_text(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            evidence = dict(report=dict(status='observed', source_bytes=100, read_bytes=100,
+                frame_count=2, function_frame_count=1, text='private-sentinel'),
+                errors=dict(status='observed', permission_hint=True, text='private-sentinel'))
+            (root / 'observer.json').write_text(json.dumps(dict(sample_policy='owned-stable-fixture',
+                host_processes=[dict(pid=42, sample_policy='owned-stable-fixture', sample_status='timed-out',
+                    sample_timeout_evidence=evidence)], command='private-sentinel')))
+            path = self.export(root, root / 'export').with_name('observer.json')
+            value = json.loads(path.read_text())
+            self.assertEqual(value['sample_policy'], 'owned-stable-fixture')
+            host = value['host_processes'][0]
+            self.assertEqual(host['sample_status'], 'timed-out')
+            self.assertEqual(host['sample_timeout_evidence']['report']['function_frame_count'], 1)
+            self.assertTrue(host['sample_timeout_evidence']['errors']['permission_hint'])
+            self.assertNotIn('sample_exit_status', host)
+            self.assertNotIn('private-sentinel', path.read_text())
+
     def test_size_shape_and_invalid_json_are_reported_without_copying_raw_bytes(self):
         with tempfile.TemporaryDirectory() as work:
             root = Path(work)

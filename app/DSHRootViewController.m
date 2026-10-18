@@ -23,6 +23,14 @@
 
 static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 
+#if TARGET_OS_SIMULATOR
+static BOOL DSHUsesOptionalCancelTouchFixture(void) {
+    NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+    return [environment[@"DSH_TEST_HOST"] isEqualToString:@"1"] &&
+           [environment[@"DSH_UI_OPTIONAL_CANCEL_FIXTURE"] isEqualToString:@"1"];
+}
+#endif
+
 // Read-only observation in explicitly opted-in simulator UI tests. Never click,
 // read inputs, change the DOM, or relax an onboarding success assertion.
 #if TARGET_OS_SIMULATOR
@@ -196,6 +204,9 @@ static NSString *const DSHGuestDialogObservationScript =
 @property (nonatomic) NSUInteger loadedAuthGeneration;
 @property (nonatomic) BOOL sawHarnessContent;
 @property (nonatomic) NSMutableDictionary<NSValue *, NSURL *> *downloadDestinations;
+#if TARGET_OS_SIMULATOR
+- (void)loadOptionalCancelTouchFixture;
+#endif
 @end
 
 @implementation DSHRootViewController
@@ -205,6 +216,12 @@ static NSString *const DSHGuestDialogObservationScript =
     self.view.backgroundColor = [UIColor colorNamed:@"DSHBackground"] ?: UIColor.systemBackgroundColor;
     self.downloadDestinations = [NSMutableDictionary dictionary];
 
+#if TARGET_OS_SIMULATOR
+    if (DSHUsesOptionalCancelTouchFixture()) {
+        [self loadOptionalCancelTouchFixture];
+        return;
+    }
+#endif
     [self buildWebView];
     [self buildControlBar];
     [self buildOverlay];
@@ -227,6 +244,100 @@ static NSString *const DSHGuestDialogObservationScript =
 }
 
 #pragma mark - Building the view
+
+#if TARGET_OS_SIMULATOR
+/// A deterministic compatibility-click suppression boundary, isolated from
+/// guest boot. Read the actual shipped binder instead of maintaining a test
+/// copy. This does not identify why the guest's intermittent click was absent.
+- (void)loadOptionalCancelTouchFixture {
+    NSString *path = [NSBundle.mainBundle pathForResource:@"manifest" ofType:@"json"
+                                            inDirectory:@"OnboardingInteraction.bundle"];
+    NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+    NSDictionary *manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSString *beginMarker = @"// BEGIN DSH_OPTIONAL_CANCEL_TOUCH_BINDER";
+    NSString *endMarker = @"// END DSH_OPTIONAL_CANCEL_TOUCH_BINDER";
+    NSString *binder;
+    NSUInteger matches = 0;
+    if ([manifest isKindOfClass:NSDictionary.class] && [manifest[@"patches"] isKindOfClass:NSArray.class]) {
+        for (id patch in manifest[@"patches"]) {
+            if (![patch isKindOfClass:NSDictionary.class] || ![patch[@"replacements"] isKindOfClass:NSArray.class]) continue;
+            for (id replacement in patch[@"replacements"]) {
+                if (![replacement isKindOfClass:NSDictionary.class]) continue;
+                NSString *source = replacement[@"replace"];
+                if (![source isKindOfClass:NSString.class]) continue;
+                NSRange begin = [source rangeOfString:beginMarker];
+                NSRange end = [source rangeOfString:endMarker];
+                if (begin.location == NSNotFound && end.location == NSNotFound) continue;
+                matches++;
+                if (begin.location == NSNotFound || end.location == NSNotFound || NSMaxRange(begin) >= end.location) continue;
+                NSRange afterBegin = NSMakeRange(NSMaxRange(begin), source.length - NSMaxRange(begin));
+                NSRange afterEnd = NSMakeRange(NSMaxRange(end), source.length - NSMaxRange(end));
+                if ([source rangeOfString:beginMarker options:0 range:afterBegin].location != NSNotFound ||
+                    [source rangeOfString:endMarker options:0 range:afterEnd].location != NSNotFound) continue;
+                binder = [source substringWithRange:NSMakeRange(NSMaxRange(begin), end.location - NSMaxRange(begin))];
+            }
+        }
+    }
+    if (matches != 1 || !binder.length || [binder rangeOfString:@"</script" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        UILabel *failure = [UILabel new];
+        failure.text = @"Optional cancel fixture: unique shipped binder is missing";
+        failure.accessibilityIdentifier = @"dsh.optionalCancelTouchFixture.error";
+        failure.numberOfLines = 0;
+        failure.frame = self.view.bounds;
+        failure.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self.view addSubview:failure];
+        return;
+    }
+
+    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
+    self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
+    self.webView.accessibilityIdentifier = @"dsh.optionalCancelTouchFixture";
+    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.webView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.webView.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.webView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [self.webView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.webView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    ]];
+    NSString *header = @"<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>body{font:17px system-ui;margin:16px;background:white;color:black}"
+        "h1{font-size:20px}section{position:relative;width:min(320px,90vw);height:64px;margin:12px auto}"
+        "button{position:absolute;inset:0;font:inherit;touch-action:manipulation}"
+        ".upper{z-index:2;background:#ddd}.under{z-index:1}#drag{touch-action:none}"
+        "pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}</style></head><body>"
+        "<main role='dialog' aria-modal='true' aria-label='Optional cancel touch fixture'><h1>Optional cancel real touch fixture</h1>"
+        "<section><button class='under'>Underlying original control</button><button id='original' class='upper'>Original optional cancel</button></section>"
+        "<section><button class='under'>Underlying bound control</button><button id='bound' class='upper'>Bound optional cancel</button></section>"
+        "<section><button class='under'>Underlying drag control</button><button id='drag' class='upper'>Drag guarded optional cancel</button></section>"
+        "<section><button class='under'>Underlying cleaned control</button><button id='cleaned' class='upper'>Cleaned optional cancel</button></section>"
+        "<pre id='receipt' aria-live='polite'></pre></main><script>\n'use strict';\n";
+    NSString *footer = @"\n(() => {\n"
+        "const counts={original:0,bound:0,drag:0,cleaned:0,beneath:0,blockedOriginalClicks:0,trustedEnds:0,dragObserved:false,settled:0};\n"
+        "const receipt=document.getElementById('receipt');\n"
+        "const render=()=>{receipt.textContent='DSH touch fixture receipt '+JSON.stringify(counts);};\n"
+        "const original=document.getElementById('original'),bound=document.getElementById('bound'),drag=document.getElementById('drag'),cleaned=document.getElementById('cleaned');\n"
+        "const upper=[original,bound,drag,cleaned];\n"
+        "for(const button of document.querySelectorAll('.under'))button.onclick=()=>{counts.beneath++;render();};\n"
+        "original.onclick=()=>{counts.original++;render();};\n"
+        "let boundCleanup=()=>{};const finishBound=()=>{counts.bound++;boundCleanup();bound.remove();render();};\n"
+        "bound.onclick=finishBound;boundCleanup=dshBindOptionalCancelTouch(bound,finishBound);\n"
+        "const finishDrag=()=>{counts.drag++;render();};drag.onclick=finishDrag;dshBindOptionalCancelTouch(drag,finishDrag);\n"
+        "const finishCleaned=()=>{counts.cleaned++;render();};cleaned.onclick=finishCleaned;dshBindOptionalCancelTouch(cleaned,finishCleaned)();\n"
+        "// Block only the explicit upper target. A retargeted ghost click on an underlying control remains observable.\n"
+        "window.addEventListener('click',event=>{const target=event.target;if(!(target instanceof Node)||!upper.some(button=>button===target||button.contains(target)))return;"
+        "if(original===target||original.contains(target))counts.blockedOriginalClicks++;event.preventDefault();event.stopImmediatePropagation();render();},true);\n"
+        "let active=null;window.addEventListener('touchstart',event=>{if(!event.isTrusted)return;active=upper.find(button=>event.composedPath().includes(button))||null;},{capture:true,passive:true});\n"
+        "window.addEventListener('touchmove',event=>{if(event.isTrusted&&active===drag)counts.dragObserved=true;},{capture:true,passive:true});\n"
+        "const settle=event=>{if(!event.isTrusted||!active)return;if(event.type==='touchend')counts.trustedEnds++;"
+        "if(event.type==='touchcancel'&&active===drag)counts.dragObserved=true;active=null;setTimeout(()=>{counts.settled++;render();},650);};\n"
+        "window.addEventListener('touchend',settle,{capture:true,passive:true});window.addEventListener('touchcancel',settle,{capture:true,passive:true});\n"
+        "render();\n})();\n</script></body></html>";
+    [self.webView loadHTMLString:[[header stringByAppendingString:binder] stringByAppendingString:footer] baseURL:nil];
+}
+#endif
 
 - (void)buildWebView {
     WKWebViewConfiguration *config = [WKWebViewConfiguration new];

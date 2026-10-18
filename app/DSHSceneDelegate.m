@@ -25,7 +25,14 @@ static BOOL DSHSceneIsXCTestHost(void) {
     // Hosted tests must not boot the guest or observe fake harness instances.
     if (DSHSceneIsXCTestHost()) {
         self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+#if TARGET_OS_SIMULATOR
+        // A dedicated local WK fixture shares the hosted-test isolation: no
+        // guest boots, and no fixture exists in a device build.
+        BOOL optionalCancelFixture = [NSProcessInfo.processInfo.environment[@"DSH_UI_OPTIONAL_CANCEL_FIXTURE"] isEqualToString:@"1"];
+        self.window.rootViewController = optionalCancelFixture ? [[DSHRootViewController alloc] init] : [UIViewController new];
+#else
         self.window.rootViewController = [UIViewController new];
+#endif
         [self.window makeKeyAndVisible];
         return;
     }

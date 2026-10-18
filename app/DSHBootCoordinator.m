@@ -159,6 +159,17 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
             return;
         }
 
+        NSError *onboardingInstallError = nil;
+        if (![DSHSessionLifecycleInstaller installBundledOnboardingPatchWithError:&onboardingInstallError]) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:
+                @"[dsh-ios] onboarding interaction install failed code=%ld operation=%@",
+                (long)onboardingInstallError.code, onboardingInstallError.userInfo[@"operation"] ?: @"unknown"]];
+            [DSHHarness.shared.log synchronizePersistentDiagnostics];
+            [self setPhase:DSHBootPhaseFailed message:@"The onboarding interaction update could not be installed. Your data has been preserved." progress:-1];
+            return;
+        }
+        [DSHHarness.shared.log append:@"[dsh-ios] onboarding interaction patch verified"];
+
         // 3. Migrate user data from a previous root, then let the harness run.
         dispatch_async(dispatch_get_main_queue(), ^{
             [DSHAppLifecycle.sharedCoordinator performWhenRunning:^{

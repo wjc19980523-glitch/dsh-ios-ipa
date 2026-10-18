@@ -11,6 +11,7 @@ __attribute__((visibility("default"))) NSErrorDomain const DSHSessionLifecycleIn
 static NSString *const DSHSessionPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
 static NSString *const DSHWebFetchPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
 static NSString *const DSHJobTrackingPackagePath = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
+static NSString *const DSHOnboardingPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js";
 static NSUInteger const DSHSessionMaximumFileSize = 4 * 1024 * 1024;
 
 @implementation DSHSessionLifecycleFileInfo
@@ -160,10 +161,14 @@ static BOOL DSHPreviousHashesAreValid(id value) {
 + (BOOL)installBundledJobTrackingPatchWithError:(NSError **)error {
     return [self installBundledPackage:DSHVerifiedSystemPackageJobTracking error:error];
 }
++ (BOOL)installBundledOnboardingPatchWithError:(NSError **)error {
+    return [self installBundledPackage:DSHVerifiedSystemPackageOnboardingInteraction error:error];
+}
 + (BOOL)installBundledPackage:(DSHVerifiedSystemPackage)package error:(NSError **)error {
     BOOL session = package == DSHVerifiedSystemPackageSession;
     BOOL jobs = package == DSHVerifiedSystemPackageJobTracking;
-    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : jobs ? @"JobTracking" : @"WebFetchTransport" withExtension:@"bundle"];
+    BOOL onboarding = package == DSHVerifiedSystemPackageOnboardingInteraction;
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : jobs ? @"JobTracking" : onboarding ? @"OnboardingInteraction" : @"WebFetchTransport" withExtension:@"bundle"];
     NSError *underlying = nil;
     NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]
         options:0 error:&underlying] : nil;
@@ -173,7 +178,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs"] : @[@"web-fetch-transport.mjs"];
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs"] : onboarding ? @[] : @[@"web-fetch-transport.mjs"];
     for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
@@ -286,14 +291,20 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     if (error) *error = nil;
     if (![self.manifest isKindOfClass:NSDictionary.class] || ![self.resources isKindOfClass:NSDictionary.class] || !self.filesystem)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"installer inputs", nil, nil);
-    if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch && self.package != DSHVerifiedSystemPackageJobTracking)
+    if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch &&
+        self.package != DSHVerifiedSystemPackageJobTracking && self.package != DSHVerifiedSystemPackageOnboardingInteraction)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package kind", nil, nil);
     BOOL session = self.package == DSHVerifiedSystemPackageSession;
     BOOL jobs = self.package == DSHVerifiedSystemPackageJobTracking;
-    NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : DSHWebFetchPackagePath;
+    BOOL onboarding = self.package == DSHVerifiedSystemPackageOnboardingInteraction;
+    // The onboarding helper is inline in this one module; it may not install
+    // additional guest files or use bundle resources as an upgrade base.
+    if (onboarding && self.resources.count != 0)
+        return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"resource whitelist", nil, nil);
+    NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : onboarding ? DSHOnboardingPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
-        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : jobs ? 3 : 1))
+        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : jobs ? 3 : onboarding ? 0 : 1))
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"schema", nil, nil);
     NSDictionary *allowed = session ? @{
         @"session-lifecycle.mjs": @"/usr/local/share/dsh/session-lifecycle.mjs",
@@ -303,7 +314,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         @"development-tools.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs",
         @"job-tracking.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
         @"job-ledger.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
-    } : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
+    } : onboarding ? @{} : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *resourcePlans = [NSMutableArray array];
     // Complete all bundle, target and original-source validation before writes.

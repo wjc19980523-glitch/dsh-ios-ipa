@@ -197,6 +197,8 @@ step = workflow.split("      - name: Require this attempt's guest verification b
 assert 'id: verification_gate' in step and 'python3 scripts/check-verification-gate.py' in step
 assert "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}" in step
 assert 'python3 tests/verification-gate-test.py' in workflow
+assert 'node --test tests/onboarding-touch-test.mjs' in workflow
+assert 'OnboardingInteraction.bundle' in Path('DSH.xcodeproj/project.pbxproj').read_text()
 PY
 
 printf 'ok  scripts: CI executes and counts XCTest; IPA requires explicit dispatch\n'

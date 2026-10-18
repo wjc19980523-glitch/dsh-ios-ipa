@@ -257,6 +257,9 @@ attrs[uitests.uuid] = { 'TestTargetID' => dsh.uuid }
 # scheme identifiers stay stable when a bundle is added.
 job_tracking_ref = app_group.new_file('JobTracking.bundle')
 dsh.resources_build_phase.add_file_reference(job_tracking_ref)
+onboarding_ref = app_group.new_file('OnboardingInteraction.bundle')
+onboarding_ref.last_known_file_type = 'wrapper.plug-in'
+dsh.resources_build_phase.add_file_reference(onboarding_ref)
 project.save
 
 # --- scheme -------------------------------------------------------------------

@@ -21,6 +21,13 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
 - (void)setUp {
     self.continueAfterFailure = NO;
     self.app = [[XCUIApplication alloc] init];
+#if TARGET_OS_SIMULATOR
+    if ([self.name containsString:@"testOptionalCancelTouchSurvivesSuppressedCompatibilityClick"]) {
+        self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"1", @"DSH_UI_OPTIONAL_CANCEL_FIXTURE": @"1" };
+        [self.app launch];
+        return;
+    }
+#endif
     // Hosted unit tests use a blank scene; UI tests must launch the real app.
     // Required UI acceptance follows the production input path. Opt in only
     // for a diagnostic run; geometry observation can itself affect WebKit.
@@ -440,5 +447,94 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     [self waitForExpectations:@[dismissed, bar] timeout:20];
     XCTAssertTrue(self.app.webViews.firstMatch.exists);
 }
+
+#if TARGET_OS_SIMULATOR
+/// Exercise the shipped binder using real UIKit touches. The local fixture
+/// deliberately withholds compatibility click; this tests that boundary and
+/// does not attribute the intermittent guest failure to a WebKit heuristic.
+- (NSDictionary *)optionalCancelFixtureReceipt:(XCUIElement *)web settled:(NSUInteger)settled {
+    NSString *prefix = @"DSH touch fixture receipt ";
+    XCUIElement *receipt = [web.staticTexts matchingPredicate:
+                           [NSPredicate predicateWithFormat:@"label BEGINSWITH %@", prefix]].firstMatch;
+    __block NSDictionary *observed;
+    NSPredicate *ready = [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+        (void)bindings;
+        XCUIElement *element = object;
+        if (!element.exists || ![element.label hasPrefix:prefix]) return NO;
+        NSString *json = [element.label substringFromIndex:prefix.length];
+        id parsed = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding]
+                                                   options:0 error:nil];
+        if (![parsed isKindOfClass:NSDictionary.class]) return NO;
+        for (NSString *key in @[@"original", @"bound", @"drag", @"cleaned", @"beneath",
+              @"blockedOriginalClicks", @"trustedEnds", @"dragObserved", @"settled"]) {
+            if (![parsed[key] isKindOfClass:NSNumber.class]) return NO;
+        }
+        observed = parsed;
+        return [observed[@"settled"] unsignedIntegerValue] >= settled;
+    }];
+    XCTNSPredicateExpectation *complete = [[XCTNSPredicateExpectation alloc] initWithPredicate:ready object:receipt];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[complete] timeout:5], XCTWaiterResultCompleted,
+                   @"real touch receipt must settle without a retry tap: %@", observed);
+    if (observed) {
+        NSData *data = [NSJSONSerialization dataWithJSONObject:observed options:NSJSONWritingSortedKeys error:nil];
+        XCTAttachment *attachment = [XCTAttachment attachmentWithData:data uniformTypeIdentifier:@"public.json"];
+        attachment.name = [NSString stringWithFormat:@"optional-cancel-touch-receipt-%lu", (unsigned long)settled];
+        attachment.lifetime = XCTAttachmentLifetimeKeepAlways;
+        [self addAttachment:attachment];
+        NSLog(@"[optional-cancel-fixture] %@", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+    }
+    return observed ?: @{};
+}
+
+- (void)testOptionalCancelTouchSurvivesSuppressedCompatibilityClick {
+    XCUIElement *web = self.app.webViews[@"dsh.optionalCancelTouchFixture"];
+    BOOL fixtureLoaded = [web waitForExistenceWithTimeout:10];
+    NSString *failure = @"local WK fixture did not load";
+    if (!fixtureLoaded) {
+        XCUIElement *error = self.app.staticTexts[@"dsh.optionalCancelTouchFixture.error"];
+        if (error.exists) failure = error.label;
+    }
+    XCTAssertTrue(fixtureLoaded, @"%@", failure);
+    XCUIElement *original = web.buttons[@"Original optional cancel"];
+    XCTAssertTrue([original waitForExistenceWithTimeout:5]);
+    [original tap];
+    NSDictionary *receipt = [self optionalCancelFixtureReceipt:web settled:1];
+    XCTAssertEqual([receipt[@"original"] unsignedIntegerValue], 0u);
+    XCTAssertEqual([receipt[@"blockedOriginalClicks"] unsignedIntegerValue], 1u,
+                   @"the old action must fail because its real compatibility click was suppressed");
+    XCTAssertEqual([receipt[@"trustedEnds"] unsignedIntegerValue], 1u);
+
+    XCUIElement *bound = web.buttons[@"Bound optional cancel"];
+    XCTAssertTrue(bound.hittable);
+    [bound tap];
+    receipt = [self optionalCancelFixtureReceipt:web settled:2];
+    XCTAssertEqual([receipt[@"bound"] unsignedIntegerValue], 1u,
+                   @"one real tap must complete the optional action even without compatibility click");
+    XCTAssertEqual([receipt[@"beneath"] unsignedIntegerValue], 0u,
+                   @"removing the action must not deliver a ghost click to its underlying control");
+    XCTAssertFalse(bound.exists);
+
+    XCUIElement *drag = web.buttons[@"Drag guarded optional cancel"];
+    XCTAssertTrue(drag.hittable);
+    XCUICoordinate *dragStart = [drag coordinateWithNormalizedOffset:CGVectorMake(0.5, 0.5)];
+    XCUICoordinate *dragEnd = [dragStart coordinateWithOffset:CGVectorMake(200, 0)];
+    [dragStart pressForDuration:0.05 thenDragToCoordinate:dragEnd];
+    receipt = [self optionalCancelFixtureReceipt:web settled:3];
+    XCTAssertEqual([receipt[@"drag"] unsignedIntegerValue], 0u);
+    XCTAssertTrue([receipt[@"dragObserved"] boolValue], @"the real gesture must move or cancel");
+    XCTAssertEqual([receipt[@"beneath"] unsignedIntegerValue], 0u);
+
+    XCUIElement *cleaned = web.buttons[@"Cleaned optional cancel"];
+    XCTAssertTrue(cleaned.hittable);
+    [cleaned tap];
+    receipt = [self optionalCancelFixtureReceipt:web settled:4];
+    XCTAssertEqual([receipt[@"cleaned"] unsignedIntegerValue], 0u,
+                   @"calling cleanup must detach the shipped touch action");
+    XCTAssertEqual([receipt[@"original"] unsignedIntegerValue], 0u);
+    XCTAssertEqual([receipt[@"bound"] unsignedIntegerValue], 1u);
+    XCTAssertEqual([receipt[@"beneath"] unsignedIntegerValue], 0u);
+    [self attachScreenshot:@"optional-cancel-real-touch-fixture"];
+}
+#endif
 
 @end

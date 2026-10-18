@@ -265,15 +265,21 @@
         ^{ overlay.hidden = YES; [overlay hide]; }
     ];
     for (dispatch_block_t change in changes) {
-        [overlay showStarting:@"Starting"];
         __block NSUInteger reads = 0;
-        NSObject *owner = [NSObject new];
-        __weak NSObject *weakOwner = owner;
-        [overlay setProgressElapsedProvider:^{ reads++; return [owner isKindOfClass:NSObject.class] ? 17.0 : 0.0; } expected:100];
-        owner = nil;
-        XCTAssertNotNil(weakOwner); XCTAssertEqual(reads, 1u);
-        change(); [overlay tick];
-        XCTAssertEqual(reads, 1u, @"A previous phase's elapsed callback must never be read again");
+        __weak NSObject *weakOwner = nil;
+        @autoreleasepool {
+            [overlay showStarting:@"Starting"];
+            NSObject *owner = [NSObject new];
+            weakOwner = owner;
+            [overlay setProgressElapsedProvider:^{ reads++; return [owner isKindOfClass:NSObject.class] ? 17.0 : 0.0; } expected:100];
+            owner = nil;
+            XCTAssertNotNil(weakOwner); XCTAssertEqual(reads, 1u);
+            change(); [overlay tick];
+            XCTAssertNil([overlay valueForKey:@"progressElapsedProvider"], @"Mode changes must clear the stored provider immediately");
+            XCTAssertEqual(reads, 1u, @"A previous phase's elapsed callback must never be read again");
+        }
+        // Drain assertion/block temporaries before checking ownership. If the
+        // overlay still copies the old provider, its captured owner stays alive.
         XCTAssertNil(weakOwner, @"Mode changes must release the copied provider");
     }
     [overlay showStarting:@"Legacy date estimate"];

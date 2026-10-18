@@ -630,6 +630,7 @@ jobs:
           name: guest-verification-logs
           path: |
             cilogs-verify/
+            ish-arm64/build-arm64-release/ish
             build/rootfs-test/dsh-serve.log
             build/rootfs-test/*.txt
             build/rootfs-test/*.yml

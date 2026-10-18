@@ -83,6 +83,7 @@ def stop_observers(observers):
         except subprocess.TimeoutExpired:
             sample['cleanup_reason'] = 'observer-cleanup-deadline'
         except OSError as error:
+            sample['cleanup_reason'] = 'observer-wait-error'
             sample['cleanup_errors'].append(dict(operation='wait', errno=error.errno))
         # The old post-SIGKILL wait was unbounded. Reap and group verification
         # now share one second, independently of the business deadline.
@@ -161,10 +162,8 @@ def run(a):
                 # The child already owns its descriptor. Keep supervising it
                 # and preserve its wait status; this cannot become a pass.
                 input_close_error = type(error).__name__
-    identity = process_identity(p.pid)
-    os.set_blocking(p.stdout.fileno(), False)
-    selector = selectors.DefaultSelector()
-    selector.register(p.stdout, selectors.EVENT_READ)
+    identity = None
+    selector = None
     raw_status = None
     reaped_at = None
     timed_out = False
@@ -199,6 +198,12 @@ def run(a):
                     signal_errors.append(dict(target='leader', signal=sig, errno=direct_error.errno))
 
     try:
+        # Every resource created after Popen belongs to this supervision scope.
+        # Partial pipe/selector initialization must still reap the real child.
+        identity = process_identity(p.pid)
+        os.set_blocking(p.stdout.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(p.stdout, selectors.EVENT_READ)
         while True:
             elapsed = time.monotonic() - started
             if raw_status is None:
@@ -259,8 +264,17 @@ def run(a):
     finally:
         if raw_status is None:
             send(signal.SIGKILL)
-        selector.close()
-        p.stdout.close()
+        if selector is not None:
+            try:
+                selector.close()
+            except OSError as error:
+                if runner_error is None:
+                    runner_error = type(error).__name__
+        try:
+            p.stdout.close()
+        except OSError as error:
+            if runner_error is None:
+                runner_error = type(error).__name__
         before_cleanup = process_group(p.pid, diagnostic=process_queries['before_cleanup'])
         if before_cleanup:
             send(signal.SIGKILL)

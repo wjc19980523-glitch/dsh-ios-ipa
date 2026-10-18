@@ -448,6 +448,7 @@ jobs:
           set -euo pipefail
           python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
           python3 tests/observer-timing-test.py 2>&1 | tee cilogs-verify/observer-timing.log
+          python3 tests/runner-resource-test.py 2>&1 | tee cilogs-verify/runner-resource.log
           python3 tests/native-runner-test.py 2>&1 | tee cilogs-verify/native-runner.log
           python3 tests/job-tracking-supervision-test.py 2>&1 | tee cilogs-verify/job-tracking-supervision.log
           python3 tests/job-tracking-cleanup-test.py 2>&1 | tee cilogs-verify/job-tracking-cleanup.log

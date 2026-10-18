@@ -46,6 +46,7 @@ on:
       - "rootfs/**"
       - "tests/rootfs-test.sh"
       - "tests/guest-*"
+      - "tests/helper-diagnostics*.py"
       - "tests/guest_snapshot.py"
       - "tests/check-bridge-refusal.py"
       - "tests/check-session-lease-guest*.py"

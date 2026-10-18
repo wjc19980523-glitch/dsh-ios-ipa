@@ -16,7 +16,7 @@ static NSSet<NSString *> *diagnosticEventNames(void) {
             @"sessionQuiesceDriverException", @"backgroundDeferredDuringSessionResume", @"sessionCancelDriverException",
             @"sessionQuiesceAcknowledged", @"sessionQuiesceFailed", @"deferredBackgroundExpired",
             @"sessionResumeDriverException", @"sessionResumeTimedOut", @"sessionResumeFailed",
-            @"sessionResumeReenteredBackground", @"sessionRecoveryConfirmed", @"foregroundResumed", @"guestStarted", @"guestExited", @"guestDialogObserved",
+            @"sessionResumeReenteredBackground", @"sessionRecoveryConfirmed", @"foregroundResumed", @"guestStarted", @"guestExited", @"guestDialogObserved", @"guestDialogObservationMode",
             @"harnessRestartRequested", @"relaunchScheduled", @"healthRestartLimit", @"webContentProcessTerminated",
             @"webInterfaceLoaded", @"incompletePreviousBackground", @"harnessState", @"hostStarted", @"hostBootStarted",
             @"startupPerformance", @"harnessAnswered", @"harnessStartupTimedOut", @"harnessAuthenticationReady",
@@ -78,6 +78,10 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
         dictionaries = [NSSet setWithArray:@[@"snapshot", @"guest_session_lifecycle", @"counts", @"lock", @"diagnostics", @"progress_diagnostics"]];
         arrays = [NSSet setWithArray:@[@"operations", @"transactions", @"native_flocks", @"native_flock_events", @"gate_waits"]];
     });
+    if ([key isEqual:@"ui_observation_enabled"]) {
+        if (![value isKindOfClass:NSNumber.class] || ([value doubleValue] != 0 && [value doubleValue] != 1)) return nil;
+        return @([value boolValue]);
+    }
     if ([numbers containsObject:key]) {
         if (![value isKindOfClass:NSNumber.class] || !isfinite([value doubleValue])) return nil;
         BOOL flag = [@[@"quiescing", @"session_drain_active", @"active_fakefs_operations_complete", @"registered", @"transition_pending", @"poll_pending", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"session_recovery_awaiting_registration", @"read_fd_observed", @"cached_autocommit", @"recovery_required", @"details_omitted", @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present"] containsObject:key];

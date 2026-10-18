@@ -235,7 +235,16 @@ static NSString *const DSHGuestDialogObservationScript =
     config.applicationNameForUserAgent = kDSHUserAgentSuffix;
     config.defaultWebpagePreferences.allowsContentJavaScript = YES;
 #if TARGET_OS_SIMULATOR
-    if ([NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"] isEqual:@"1"]) {
+    NSString *dialogObservation = NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"];
+    BOOL observeDialogs = [dialogObservation isEqual:@"1"];
+    if ([dialogObservation isEqual:@"0"] || observeDialogs) {
+        // Record the mode actually received by the app; neither mode nor this
+        // native metadata event queries the DOM or changes the input path.
+        [DSHHarness.shared.log append:[NSString stringWithFormat:
+            @"[lifecycle] {\"event\":\"guestDialogObservationMode\",\"ui_observation_enabled\":%@}",
+            observeDialogs ? @"true" : @"false"]];
+    }
+    if (observeDialogs) {
         [config.userContentController addScriptMessageHandler:[DSHGuestDialogMessageHandler new] name:@"dshGuestDialog"];
         [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:DSHGuestDialogObservationScript
             injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
@@ -496,7 +505,7 @@ static NSString *const DSHGuestDialogObservationScript =
         case DSHHarnessStateIdle:
         case DSHHarnessStateStarting:
             [self.overlay showStarting:@"Starting DeepSeek Harness…"];
-            [self.overlay setProgressStartedAt:h.launchStartedAt ?: NSDate.date expected:h.expectedStartupDuration];
+            [self showStartupProgressForHarness:h];
             break;
         case DSHHarnessStateRestarting:
             [self.overlay showStarting:@"Restarting the harness…"];
@@ -518,6 +527,16 @@ static NSString *const DSHGuestDialogObservationScript =
     }
 }
 
+- (void)showStartupProgressForHarness:(DSHHarness *)harness {
+    if (harness.state != DSHHarnessStateStarting) {
+        [self.overlay setProgressStartedAt:nil expected:0];
+        return;
+    }
+    __weak DSHHarness *weakHarness = harness;
+    [self.overlay setProgressElapsedProvider:^{ return weakHarness.activeStartupDuration; }
+                                  expected:harness.expectedStartupDuration];
+}
+
 - (void)loadHarness {
     // Never load the bare origin. Under dsh 0.2.x it answers 401 with a
     // one-line plain-text body, which is what "the app shows a blank page and
@@ -531,8 +550,7 @@ static NSString *const DSHGuestDialogObservationScript =
         // URL that is known to fail; -applyHarnessState runs again when the
         // harness captures the token or changes state.
         [self.overlay showStarting:@"Authenticating with the harness…"];
-        [self.overlay setProgressStartedAt:DSHHarness.shared.launchStartedAt
-                                  expected:DSHHarness.shared.expectedStartupDuration];
+        [self showStartupProgressForHarness:DSHHarness.shared];
         return;
     }
     [self.overlay showStarting:@"Loading the interface…"];

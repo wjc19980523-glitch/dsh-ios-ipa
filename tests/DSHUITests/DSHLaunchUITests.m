@@ -22,7 +22,10 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     self.continueAfterFailure = NO;
     self.app = [[XCUIApplication alloc] init];
     // Hosted unit tests use a blank scene; UI tests must launch the real app.
-    self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0", @"DSH_UI_DIALOG_DIAGNOSTICS": @"1" };
+    // Required UI acceptance follows the production input path. Opt in only
+    // for a diagnostic run; geometry observation can itself affect WebKit.
+    NSString *observeDialogs = [NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"] isEqual:@"1"] ? @"1" : @"0";
+    self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0", @"DSH_UI_DIALOG_DIAGNOSTICS": observeDialogs };
     __weak DSHLaunchUITests *weakSelf = self;
     [self addUIInterruptionMonitorWithDescription:@"Refuse DSH system permission requests"
                                           handler:^BOOL(XCUIElement *interruption) {

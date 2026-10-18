@@ -9,6 +9,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NSTimeInterval (^DSHStatusOverlayElapsedProvider)(void);
+
 @interface DSHStatusOverlayView : UIView
 
 @property (nonatomic, copy, nullable) dispatch_block_t retryHandler;
@@ -19,6 +21,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Drives the progress bar: elapsed vs. expected seconds since `startedAt`.
 /// Pass nil startedAt to hide the estimate (e.g. "Loading the interface…").
 - (void)setProgressStartedAt:(nullable NSDate *)startedAt expected:(NSTimeInterval)expected;
+/// Main-thread, read-only elapsed input for active startup estimates. The
+/// copied provider should weakly capture its owner; mode changes clear it.
+- (void)setProgressElapsedProvider:(nullable DSHStatusOverlayElapsedProvider)provider expected:(NSTimeInterval)expected;
 /// Shows a measured fraction (0…1) instead of a time estimate; pass a negative
 /// fraction for "busy, no measurable progress".
 - (void)setDeterminateProgress:(double)fraction detail:(nullable NSString *)detail;

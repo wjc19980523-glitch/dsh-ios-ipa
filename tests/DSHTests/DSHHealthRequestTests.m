@@ -1,5 +1,14 @@
 #import <XCTest/XCTest.h>
 #import "DSHHarness.h"
+#import "DSHStatusOverlayView.h"
+#import "DSHRootViewController.h"
+
+@interface DSHStatusOverlayView (StartupProgressFixture)
+- (void)tick;
+@end
+@interface DSHRootViewController (StartupProgressFixture)
+- (void)showStartupProgressForHarness:(DSHHarness *)harness;
+@end
 
 /// Deliberately permits callbacks after cancellation: this models a result
 /// already queued by URLSession when the scene leaves the foreground.
@@ -211,6 +220,86 @@
     XCTAssertEqual(self.harness.state, DSHHarnessStateReady);
     XCTAssertEqualWithAccuracy(self.harness.lastStartupDuration, 12, 0.001);
     XCTAssertEqualWithAccuracy(self.harness.expectedStartupDuration, 37.5, 0.001);
+}
+- (void)testOverlayProgressFreezesInBackgroundAndContinuesFromActiveTime {
+    DSHStatusOverlayView *overlay = [[DSHStatusOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 480)];
+    DSHRootViewController *controller = [DSHRootViewController new];
+    [controller setValue:overlay forKey:@"overlay"];
+    [overlay showStarting:@"Starting"];
+    [self.harness start]; [self.clock advance:40];
+    [controller showStartupProgressForHarness:self.harness];
+    UILabel *label = [overlay valueForKey:@"elapsedLabel"];
+    UIProgressView *progress = [overlay valueForKey:@"progress"];
+    XCTAssertEqualObjects(label.text, @"40 s elapsed · about 140 s left");
+    XCTAssertEqualWithAccuracy(progress.progress, 0.2, 0.0001);
+    [self.harness handleAppBackground]; [self.clock advance:300]; [overlay tick];
+    XCTAssertEqualObjects(label.text, @"40 s elapsed · about 140 s left");
+    XCTAssertEqualWithAccuracy(progress.progress, 0.2, 0.0001);
+    [self.harness handleAppResume]; [self.clock advance:3]; [overlay tick];
+    XCTAssertEqualObjects(label.text, @"43 s elapsed · about 137 s left");
+    XCTAssertEqualWithAccuracy(progress.progress, 0.215, 0.0001);
+    XCTAssertEqual(self.launcher.launches, 1u); XCTAssertEqual(self.launcher.kills, 0u);
+    [overlay showFailure:@"test finished"];
+}
+- (void)testPublicActiveDurationFreezesWhenReadyAndResetsOutsideTheCurrentAttempt {
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 0, 0.001);
+    [self.harness start]; [self.clock advance:60]; [self announceToken:@"progress-duration-token"];
+    [self.clock advance:3]; [self.harness.startupProbes.lastObject answerReadyWithProbeElapsed:3];
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 63, 0.001);
+    [self.clock advance:100];
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 63, 0.001, @"Ready is a completed sample, not a running timer");
+    [self.harness stop];
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 0, 0.001);
+    [self.harness start];
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 0, 0.001);
+    [self.clock advance:4];
+    XCTAssertEqualWithAccuracy(self.harness.activeStartupDuration, 4, 0.001);
+}
+- (void)testOverlayModeChangesReleaseTheProviderAndKeepTheDateAPIUsable {
+    DSHStatusOverlayView *overlay = [[DSHStatusOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 480)];
+    NSArray<dispatch_block_t> *changes = @[
+        ^{ [overlay setProgressStartedAt:[NSDate dateWithTimeIntervalSinceNow:-10] expected:100]; },
+        ^{ [overlay setDeterminateProgress:0.5 detail:@"Installed"]; },
+        ^{ [overlay showStarting:@"Loading the interface"]; },
+        ^{ [overlay showFailure:@"Failed"]; },
+        ^{ overlay.hidden = YES; [overlay hide]; }
+    ];
+    for (dispatch_block_t change in changes) {
+        [overlay showStarting:@"Starting"];
+        __block NSUInteger reads = 0;
+        NSObject *owner = [NSObject new];
+        __weak NSObject *weakOwner = owner;
+        [overlay setProgressElapsedProvider:^{ reads++; return [owner isKindOfClass:NSObject.class] ? 17.0 : 0.0; } expected:100];
+        owner = nil;
+        XCTAssertNotNil(weakOwner); XCTAssertEqual(reads, 1u);
+        change(); [overlay tick];
+        XCTAssertEqual(reads, 1u, @"A previous phase's elapsed callback must never be read again");
+        XCTAssertNil(weakOwner, @"Mode changes must release the copied provider");
+    }
+    [overlay showStarting:@"Legacy date estimate"];
+    [overlay setProgressStartedAt:[NSDate dateWithTimeIntervalSinceNow:-10] expected:100];
+    UILabel *label = [overlay valueForKey:@"elapsedLabel"];
+    UIProgressView *progress = [overlay valueForKey:@"progress"];
+    XCTAssertTrue([label.text hasPrefix:@"10 s elapsed"]);
+    XCTAssertEqualWithAccuracy(progress.progress, 0.09, 0.005);
+    [overlay showFailure:@"test finished"];
+}
+- (void)testRootProgressProviderDoesNotRetainTheHarnessOrUseAnIdleTimer {
+    DSHStatusOverlayView *overlay = [[DSHStatusOverlayView alloc] initWithFrame:CGRectMake(0, 0, 640, 480)];
+    DSHRootViewController *controller = [DSHRootViewController new];
+    [controller setValue:overlay forKey:@"overlay"];
+    [overlay showStarting:@"Starting"];
+    [controller showStartupProgressForHarness:self.harness];
+    UIProgressView *progress = [overlay valueForKey:@"progress"];
+    XCTAssertEqualWithAccuracy(progress.alpha, 0, 0.001, @"Idle has no active startup estimate");
+    [self.harness start]; [self.clock advance:5];
+    [controller showStartupProgressForHarness:self.harness];
+    __weak DSHHarness *weakHarness = self.harness;
+    [self.harness stop]; self.harness = nil;
+    XCTAssertNil(weakHarness, @"The overlay must not own the lifecycle being observed");
+    [overlay tick];
+    XCTAssertTrue([[((UILabel *)[overlay valueForKey:@"elapsedLabel"]) text] hasPrefix:@"0 s elapsed"]);
+    [overlay showFailure:@"test finished"];
 }
 @end
 

@@ -93,6 +93,9 @@ typedef NSTimeInterval (^DSHHarnessClock)(void);
 /// Foreground-active seconds from the current guest launch to its first HTTP
 /// answer, including time spent waiting for its token. Background time is excluded.
 @property (nonatomic, readonly) NSTimeInterval lastStartupDuration;
+/// Main-thread progress input: current foreground-active startup time while
+/// Starting, frozen lastStartupDuration while Ready, and zero in other states.
+@property (nonatomic, readonly) NSTimeInterval activeStartupDuration;
 /// Expected active startup duration from previous runs on this device (180 s
 /// until measured once). Separate from StartupMetrics' wall-clock stage offsets.
 @property (nonatomic, readonly) NSTimeInterval expectedStartupDuration;

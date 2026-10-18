@@ -4,6 +4,7 @@
 //
 
 #import "DSHStatusOverlayView.h"
+#include <math.h>
 
 @interface DSHStatusOverlayView ()
 @property (nonatomic) UILabel *titleLabel;
@@ -18,6 +19,7 @@
 @property (nonatomic) UIStackView *buttons;
 @property (nonatomic, nullable) NSDate *startedAt;
 @property (nonatomic, nullable) NSDate *progressStartedAt;
+@property (nonatomic, copy, nullable) DSHStatusOverlayElapsedProvider progressElapsedProvider;
 @property (nonatomic) NSTimeInterval expected;
 @property (nonatomic) UIProgressView *progress;
 @property (nonatomic, nullable) NSTimer *timer;
@@ -143,6 +145,7 @@
 - (void)logTapped { if (self.logHandler) self.logHandler(); }
 
 - (void)showStarting:(NSString *)message {
+    self.progressElapsedProvider = nil;
     [self.layer removeAllAnimations];
     self.alpha = 1;
     self.hidden = NO;
@@ -165,6 +168,7 @@
 }
 
 - (void)setDeterminateProgress:(double)fraction detail:(NSString *)detail {
+    self.progressElapsedProvider = nil;
     self.progressStartedAt = nil;
     self.expected = 0;
     self.progress.hidden = NO;
@@ -175,10 +179,20 @@
 }
 
 - (void)setProgressStartedAt:(NSDate *)startedAt expected:(NSTimeInterval)expected {
+    self.progressElapsedProvider = nil;
     self.progressStartedAt = startedAt;
     self.expected = expected;
     self.progress.hidden = NO;
     self.progress.alpha = startedAt == nil ? 0 : 1;
+    [self tick];
+}
+
+- (void)setProgressElapsedProvider:(DSHStatusOverlayElapsedProvider)provider expected:(NSTimeInterval)expected {
+    self.progressStartedAt = nil;
+    self.progressElapsedProvider = provider;
+    self.expected = expected;
+    self.progress.hidden = NO;
+    self.progress.alpha = provider == nil ? 0 : 1;
     [self tick];
 }
 
@@ -199,9 +213,9 @@
 }
 
 - (void)hide {
+    [self stopTimer];
     if (self.hidden)
         return;
-    [self stopTimer];
     self.showingFailure = NO;
     [UIView animateWithDuration:0.25 animations:^{ self.alpha = 0; } completion:^(BOOL finished) {
         self.hidden = YES;
@@ -219,11 +233,12 @@
     if (self.startedAt == nil)
         return;
     NSTimeInterval t = -self.startedAt.timeIntervalSinceNow;
-    if (self.progressStartedAt == nil || self.expected <= 0) {
+    if ((self.progressElapsedProvider == nil && self.progressStartedAt == nil) || self.expected <= 0) {
         self.elapsedLabel.text = [NSString stringWithFormat:@"%.0f s", t];
         return;
     }
-    NSTimeInterval done = -self.progressStartedAt.timeIntervalSinceNow;
+    NSTimeInterval done = self.progressElapsedProvider ? self.progressElapsedProvider() : -self.progressStartedAt.timeIntervalSinceNow;
+    if (!isfinite(done) || done < 0) done = 0;
     NSTimeInterval left = self.expected - done;
     // Asymptotic fill: never reaches 100% until the server really answers.
     float fraction = done < self.expected ? (float) (done / self.expected) * 0.9f
@@ -240,6 +255,7 @@
     self.timer = nil;
     self.startedAt = nil;
     self.progressStartedAt = nil;
+    self.progressElapsedProvider = nil;
     [self.progress setProgress:0 animated:NO];
 }
 

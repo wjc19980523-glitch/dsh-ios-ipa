@@ -109,6 +109,11 @@
     }
 }
 - (void)testUIDialogObservationsRetainOnlyBoundedMetadata {
+    NSDictionary *mode = [DSHLifecycleDiagnostics safeEventFromLogLine:
+        @"[lifecycle] {\"event\":\"guestDialogObservationMode\",\"ui_observation_enabled\":false}"];
+    XCTAssertEqualObjects(mode[@"event"], @"guestDialogObservationMode");
+    XCTAssertEqualObjects(mode[@"ui_observation_enabled"], @NO);
+    XCTAssertNil([DSHLifecycleDiagnostics sanitizedEvent:@{@"ui_observation_enabled": @2}][@"ui_observation_enabled"]);
     NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:@{
         @"event": @"guestDialogObserved", @"ui_dialog": @"api", @"ui_phase": @"click_capture",
         @"ui_sequence": @7, @"ui_modal_instance": @1, @"ui_action_instance": @2,

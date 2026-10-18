@@ -455,14 +455,19 @@ DSH_EXPORTED NSString *DSHHarnessStateName(DSHHarnessState state) {
     }
 }
 
-- (NSTimeInterval)activeStartupDuration {
+- (NSTimeInterval)elapsedActiveStartup {
     NSTimeInterval elapsed = self.startupElapsedBeforePause;
     if (!self.appBackgrounded) elapsed += MAX(0, self.clock() - self.startupActiveStartedAt);
     return elapsed;
 }
 
+- (NSTimeInterval)activeStartupDuration {
+    if (self.state == DSHHarnessStateStarting) return [self elapsedActiveStartup];
+    return self.state == DSHHarnessStateReady ? self.lastStartupDuration : 0;
+}
+
 - (NSTimeInterval)remainingStartupBudget {
-    return self.startupTimeout - [self activeStartupDuration];
+    return self.startupTimeout - [self elapsedActiveStartup];
 }
 
 - (DSHReadinessProbe *)readinessProbeForURL:(NSURL *)url interval:(NSTimeInterval)interval timeout:(NSTimeInterval)timeout {

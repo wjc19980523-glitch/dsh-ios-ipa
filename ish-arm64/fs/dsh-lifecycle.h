@@ -61,7 +61,21 @@ enum dsh_lifecycle_flock_event_kind {
 
 struct dsh_lifecycle_owner {
     int guest_pid;              /* -1 when no guest task is available. */
+    int guest_tgid;             /* -1 unless the trusted TLS identity matches. */
     uint64_t thread_id;         /* Stable, process-local diagnostic ID. */
+};
+
+/* Immutable descriptor type only: never paths, contents or socket addresses. */
+enum dsh_lifecycle_read_fd_kind {
+    DSH_READ_FD_UNKNOWN = 0,
+    DSH_READ_FD_REGULAR,
+    DSH_READ_FD_DIRECTORY,
+    DSH_READ_FD_PIPE,
+    DSH_READ_FD_SOCKET,
+    DSH_READ_FD_TTY,
+    DSH_READ_FD_CHARACTER,
+    DSH_READ_FD_BLOCK,
+    DSH_READ_FD_OTHER,
 };
 
 struct dsh_lifecycle_operation_snapshot {
@@ -71,6 +85,24 @@ struct dsh_lifecycle_operation_snapshot {
     uint64_t started_monotonic_ns;
     uint64_t age_ns;
     unsigned nesting_depth;
+    bool read_fd_observed;
+    int read_guest_fd;
+    enum dsh_lifecycle_read_fd_kind read_fd_kind;
+};
+
+enum dsh_lifecycle_gate_wait_reason {
+    DSH_GATE_WAIT_OPERATION = 0,
+    DSH_GATE_WAIT_CHECKPOINT,
+    DSH_GATE_WAIT_TTY_RESUME,
+};
+
+struct dsh_lifecycle_gate_wait_snapshot {
+    struct dsh_lifecycle_owner owner;
+    char name[DSH_LIFECYCLE_OPERATION_NAME_SIZE];
+    enum dsh_lifecycle_gate_wait_reason reason;
+    uint64_t entered_generation;
+    uint64_t started_monotonic_ns;
+    uint64_t age_ns;
 };
 
 struct dsh_lifecycle_transaction_snapshot {
@@ -142,12 +174,20 @@ struct dsh_lifecycle_snapshot {
     int session_drain_guest_tgid;
     uint64_t session_drain_generation;
     int last_sqlite_result;
+    /* Diagnostic-only: waiting tasks are not active operations and do not
+     * change quiescence. Counts include table/array omissions; overflow does
+     * not increment the safety-critical tracking_overflows counter. */
+    uint64_t gate_waiters;
+    uint64_t gate_wait_tracking_overflows;
+    uint64_t read_metadata_misses;
+    unsigned gate_wait_count;
     unsigned operation_count;
     unsigned transaction_count;
     unsigned native_flock_count;
     uint64_t native_flock_event_total;
     unsigned native_flock_event_count;
     struct dsh_lifecycle_operation_snapshot operations[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
+    struct dsh_lifecycle_gate_wait_snapshot gate_waits[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     struct dsh_lifecycle_transaction_snapshot transactions[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     struct dsh_lifecycle_flock_snapshot native_flocks[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
     /* Last 16 transitions, oldest first. Intentional history wrap does not
@@ -162,6 +202,13 @@ struct dsh_lifecycle_snapshot {
 DSH_LIFECYCLE_API uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid);
 DSH_LIFECYCLE_API void dsh_lifecycle_operation_end(uint64_t token);
 DSH_LIFECYCLE_API unsigned dsh_lifecycle_operation_depth(void);
+/* Annotate the innermost existing scope at the retained stream-read boundary.
+ * This never obtains admission, retains a descriptor or changes its lifetime.
+ * Clear before releasing the descriptor; thread_exit also retires the scope.
+ * Zero means there was no tracked scope. Only fixed enum/numeric data is kept. */
+DSH_LIFECYCLE_API uint64_t dsh_lifecycle_read_observe(int guest_fd,
+        enum dsh_lifecycle_read_fd_kind kind);
+DSH_LIFECYCLE_API void dsh_lifecycle_read_clear(uint64_t token);
 /* Only the common stream-read boundary may call these after retaining a known
  * tty_dev fd and releasing the fdtable lock. A pause is refused unless exactly
  * one tracked permit is owned and no SQLite/native-flock uncertainty exists.

@@ -9,6 +9,7 @@
 #define OPERATION_CAPACITY 512
 #define CONNECTION_CAPACITY 128
 #define FLOCK_CAPACITY 256
+#define GATE_WAIT_CAPACITY 128
 #define UNTRACKED_TOKEN (UINT64_C(1) << 63)
 
 struct operation_record {
@@ -24,6 +25,10 @@ struct flock_record {
     const void *key;
     struct dsh_lifecycle_flock_snapshot value;
 };
+struct gate_wait_record {
+    bool used;
+    struct dsh_lifecycle_gate_wait_snapshot value;
+};
 
 /* No I/O, SQLite calls, guest locks, callbacks or allocations while held. */
 static pthread_mutex_t diagnostic_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -32,6 +37,10 @@ static bool admission_enabled;
 static struct operation_record operations[OPERATION_CAPACITY];
 static struct connection_record connections[CONNECTION_CAPACITY];
 static struct flock_record native_flocks[FLOCK_CAPACITY];
+static struct gate_wait_record gate_waits[GATE_WAIT_CAPACITY];
+static uint64_t gate_waiters;
+static uint64_t gate_wait_tracking_overflows;
+static uint64_t read_metadata_misses;
 static struct dsh_lifecycle_flock_event flock_events[DSH_LIFECYCLE_SNAPSHOT_ITEMS];
 static uint64_t flock_event_total;
 static enum dsh_lifecycle_state lifecycle_state = DSH_LIFECYCLE_RUNNING;
@@ -76,8 +85,10 @@ static void copy_label(char *destination, size_t size, const char *source) {
  * or pthread representation; they are meaningful within this process only. */
 static struct dsh_lifecycle_owner owner(int guest_pid) {
     if (thread_id == 0) thread_id = next_thread_id++;
+    int pid = guest_pid >= 0 ? guest_pid : operation_guest_pid;
     return (struct dsh_lifecycle_owner) {
-        .guest_pid = guest_pid >= 0 ? guest_pid : operation_guest_pid,
+        .guest_pid = pid,
+        .guest_tgid = pid > 0 && guest_context.guest_pid == pid ? guest_context.guest_tgid : -1,
         .thread_id = thread_id,
     };
 }
@@ -118,11 +129,47 @@ static bool has_session_drain(int guest_pid) {
         guest_context.guest_tgid == session_drain_guest_tgid;
 }
 
-static void await_admission(int guest_pid) {
-    while (admission_enabled && lifecycle_state != DSH_LIFECYCLE_RUNNING &&
-            operation_depth == 0 && !owns_existing_critical_section(guest_pid) &&
-            !has_session_drain(guest_pid))
+static bool admission_blocked(int guest_pid, enum dsh_lifecycle_gate_wait_reason reason) {
+    if (!admission_enabled || lifecycle_state == DSH_LIFECYCLE_RUNNING) return false;
+    if (reason == DSH_GATE_WAIT_TTY_RESUME) return true;
+    return operation_depth == 0 && !owns_existing_critical_section(guest_pid) &&
+        !has_session_drain(guest_pid);
+}
+
+/* Called with diagnostic_lock held, including cancellation cleanup after
+ * pthread_cond_wait has reacquired it. No guest locks, I/O or allocation. */
+static void retire_gate_wait(struct gate_wait_record *record) {
+    if (record) record->used = false;
+    if (gate_waiters) gate_waiters--;
+}
+
+static void cancel_gate_wait(void *record) {
+    retire_gate_wait(record);
+    pthread_mutex_unlock(&diagnostic_lock);
+}
+
+static void await_admission(int guest_pid, const char *name, enum dsh_lifecycle_gate_wait_reason reason) {
+    if (!admission_blocked(guest_pid, reason)) return;
+    struct gate_wait_record *record = NULL;
+    gate_waiters++;
+    for (unsigned i = 0; i < GATE_WAIT_CAPACITY; i++) {
+        if (gate_waits[i].used) continue;
+        record = &gate_waits[i];
+        record->used = true;
+        record->value = (struct dsh_lifecycle_gate_wait_snapshot) {
+            .owner = owner(guest_pid), .reason = reason,
+            .entered_generation = lifecycle_generation,
+            .started_monotonic_ns = monotonic_ns(),
+        };
+        copy_label(record->value.name, sizeof(record->value.name), name);
+        break;
+    }
+    if (!record) gate_wait_tracking_overflows++;
+    pthread_cleanup_push(cancel_gate_wait, record);
+    while (admission_blocked(guest_pid, reason))
         pthread_cond_wait(&admission_changed, &diagnostic_lock);
+    retire_gate_wait(record);
+    pthread_cleanup_pop(0);
 }
 
 static uint64_t record_operation_begin(const char *name, int guest_pid) {
@@ -142,6 +189,7 @@ static uint64_t record_operation_begin(const char *name, int guest_pid) {
             .owner = owner(guest_pid),
             .started_monotonic_ns = now,
             .nesting_depth = operation_depth,
+            .read_guest_fd = -1,
         };
         copy_label(operations[i].value.name, sizeof(operations[i].value.name), name);
         break;
@@ -156,7 +204,7 @@ static uint64_t record_operation_begin(const char *name, int guest_pid) {
 uint64_t dsh_lifecycle_operation_begin(const char *name, int guest_pid) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
-    await_admission(guest_pid);
+    await_admission(guest_pid, name, DSH_GATE_WAIT_OPERATION);
     uint64_t token = record_operation_begin(name, guest_pid);
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
@@ -205,6 +253,43 @@ unsigned dsh_lifecycle_operation_depth(void) {
     return operation_depth;
 }
 
+uint64_t dsh_lifecycle_read_observe(int guest_fd, enum dsh_lifecycle_read_fd_kind kind) {
+    int saved_errno = errno;
+    uint64_t token = 0;
+    pthread_mutex_lock(&diagnostic_lock);
+    for (unsigned i = 0; operation_depth && i < OPERATION_CAPACITY; i++) {
+        struct operation_record *record = &operations[i];
+        if (!record->used || record->paused_fileless || record->value.owner.thread_id != thread_id ||
+                record->value.nesting_depth != operation_depth) continue;
+        record->value.read_fd_observed = true;
+        record->value.read_guest_fd = guest_fd >= 0 ? guest_fd : -1;
+        record->value.read_fd_kind = kind >= DSH_READ_FD_UNKNOWN && kind <= DSH_READ_FD_OTHER ?
+            kind : DSH_READ_FD_UNKNOWN;
+        token = record->value.id;
+        break;
+    }
+    if (!token) read_metadata_misses++;
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+    return token;
+}
+
+void dsh_lifecycle_read_clear(uint64_t token) {
+    int saved_errno = errno;
+    if (!token) return;
+    pthread_mutex_lock(&diagnostic_lock);
+    for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
+        struct operation_record *record = &operations[i];
+        if (!record->used || record->value.id != token || record->value.owner.thread_id != thread_id) continue;
+        record->value.read_fd_observed = false;
+        record->value.read_guest_fd = -1;
+        record->value.read_fd_kind = DSH_READ_FD_UNKNOWN;
+        break;
+    }
+    pthread_mutex_unlock(&diagnostic_lock);
+    errno = saved_errno;
+}
+
 uint64_t dsh_lifecycle_pause_tty_read(void) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
@@ -238,8 +323,11 @@ void dsh_lifecycle_resume_tty_read(uint64_t token) {
         // tty_read has returned with all of its locks released. Unlike a new
         // critical-section owner, a fileless reader has no work to drain and
         // must wait through both Quiescent and Resuming before guest copyout.
-        while (admission_enabled && lifecycle_state != DSH_LIFECYCLE_RUNNING)
-            pthread_cond_wait(&admission_changed, &diagnostic_lock);
+        int guest_pid = -1;
+        for (unsigned i = 0; i < OPERATION_CAPACITY; i++)
+            if (operations[i].used && operations[i].value.id == token)
+                guest_pid = operations[i].value.owner.guest_pid;
+        await_admission(guest_pid, "tty_read_resume", DSH_GATE_WAIT_TTY_RESUME);
         for (unsigned i = 0; i < OPERATION_CAPACITY; i++) {
             struct operation_record *record = &operations[i];
             if (!record->used || !record->paused_fileless || record->value.id != token) continue;
@@ -493,6 +581,15 @@ void dsh_lifecycle_get_snapshot(struct dsh_lifecycle_snapshot *snapshot) {
     snapshot->session_drain_guest_tgid = session_drain_guest_tgid;
     snapshot->session_drain_generation = session_drain_generation;
     snapshot->last_sqlite_result = last_sqlite_result;
+    snapshot->gate_waiters = gate_waiters;
+    snapshot->gate_wait_tracking_overflows = gate_wait_tracking_overflows;
+    snapshot->read_metadata_misses = read_metadata_misses;
+    for (unsigned i = 0; i < GATE_WAIT_CAPACITY; i++) {
+        if (!gate_waits[i].used || snapshot->gate_wait_count == DSH_LIFECYCLE_SNAPSHOT_ITEMS) continue;
+        struct dsh_lifecycle_gate_wait_snapshot *value = &snapshot->gate_waits[snapshot->gate_wait_count++];
+        *value = gate_waits[i].value;
+        value->age_ns = now >= value->started_monotonic_ns ? now - value->started_monotonic_ns : 0;
+    }
     snapshot->native_flock_event_total = flock_event_total;
     snapshot->native_flock_event_count = flock_event_total < DSH_LIFECYCLE_SNAPSHOT_ITEMS
         ? (unsigned) flock_event_total : DSH_LIFECYCLE_SNAPSHOT_ITEMS;
@@ -606,7 +703,7 @@ void dsh_lifecycle_begin_resume(void) {
 void dsh_lifecycle_checkpoint(int guest_pid) {
     int saved_errno = errno;
     pthread_mutex_lock(&diagnostic_lock);
-    await_admission(guest_pid);
+    await_admission(guest_pid, "guest_checkpoint", DSH_GATE_WAIT_CHECKPOINT);
     pthread_mutex_unlock(&diagnostic_lock);
     errno = saved_errno;
 }

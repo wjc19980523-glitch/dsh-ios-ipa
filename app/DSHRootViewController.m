@@ -23,6 +23,156 @@
 
 static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 
+// Read-only observation in explicitly opted-in simulator UI tests. Never click,
+// read inputs, change the DOM, or relax an onboarding success assertion.
+#if TARGET_OS_SIMULATOR
+// BEGIN DSH_GUEST_DIALOG_OBSERVER
+static NSString *const DSHGuestDialogObservationScript =
+@"(() => {\n"
+"  'use strict';\n"
+"  const bridge = window.webkit?.messageHandlers?.dshGuestDialog;\n"
+"  if (!bridge || window.__dshGuestDialogObserver) return;\n"
+"  window.__dshGuestDialogObserver = true;\n"
+"  const started = performance.now();\n"
+"  const kinds = new Map([['Preview Notice', 'welcome'], ['预览版说明', 'welcome'],\n"
+"    ['Add an API key to get started', 'api'], ['添加一个 API Key 开始使用', 'api']]);\n"
+"  const actions = new Map([['Continue', 'welcome'], ['继续', 'welcome'],\n"
+"    ['Configure later', 'api'], ['稍后配置', 'api']]);\n"
+"  let sequence = 0, scans = 0, stopped = false, queued = false;\n"
+"  let previous = new Map();\n"
+"  const instances = new WeakMap();\n"
+"  let nextInstance = 0;\n"
+"  const instance = element => {\n"
+"    if (!element) return 0;\n"
+"    if (!instances.has(element)) instances.set(element, ++nextInstance);\n"
+"    return instances.get(element);\n"
+"  };\n"
+"  const known = () => Array.from(document.querySelectorAll('[role=\"dialog\"]')).slice(0, 16)\n"
+"    .flatMap(dialog => {\n"
+"      const title = dialog.querySelector('h2');\n"
+"      const kind = title && kinds.get(title.textContent.trim());\n"
+"      if (!kind) return [];\n"
+"      const action = Array.from(dialog.querySelectorAll('button')).slice(0, 16)\n"
+"        .find(button => actions.get(button.textContent.trim()) === kind);\n"
+"      return [{dialog, action, kind}];\n"
+"    });\n"
+"  const inertAncestor = element => {\n"
+"    for (let cursor = element, depth = 0; cursor && depth < 32; cursor = cursor.parentElement, depth++) {\n"
+"      if (cursor.inert) return true;\n"
+"    }\n"
+"    return false;\n"
+"  };\n"
+"  const state = ({dialog, action, kind}) => {\n"
+"    const root = document.getElementById('root');\n"
+"    const rect = action?.getBoundingClientRect();\n"
+"    const visible = !!rect && rect.width > 0 && rect.height > 0 &&\n"
+"      getComputedStyle(action).visibility === 'visible' && getComputedStyle(action).display !== 'none';\n"
+"    const hit = visible ? document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) : null;\n"
+"    return {ui_dialog: kind, ui_dialog_present: dialog.isConnected,\n"
+"      ui_modal_instance: instance(dialog), ui_action_instance: instance(action),\n"
+"      ui_root_inert: !!root?.inert, ui_modal_inert: inertAncestor(dialog),\n"
+"      ui_modal_under_root: !!root?.contains(dialog), ui_action_enabled: !!action && !action.disabled,\n"
+"      ui_action_visible: visible, ui_hit_action: !!action && !!hit && (hit === action || action.contains(hit)),\n"
+"      ui_view_width: Math.round(window.innerWidth), ui_view_height: Math.round(window.innerHeight)};\n"
+"  };\n"
+"  const emit = (phase, record, extra = {}) => {\n"
+"    if (stopped || sequence >= 192) return;\n"
+"    bridge.postMessage({...record, ...extra, ui_phase: phase, ui_sequence: ++sequence,\n"
+"      ui_elapsed_ms: Math.max(0, Math.round(performance.now() - started))});\n"
+"  };\n"
+"  const stop = () => {\n"
+"    if (stopped) return;\n"
+"    for (const [kind, record] of previous) emit('finished', record);\n"
+"    stopped = true;\n"
+"    observer.disconnect();\n"
+"    for (const [name, listener, capture] of listeners) window.removeEventListener(name, listener, capture);\n"
+"  };\n"
+"  const scan = () => {\n"
+"    queued = false;\n"
+"    if (stopped) return;\n"
+"    if (++scans > 512) { stop(); return; }\n"
+"    const current = new Map();\n"
+"    for (const item of known()) {\n"
+"      const record = state(item);\n"
+"      current.set(item.kind, record);\n"
+"      if (JSON.stringify(record) !== JSON.stringify(previous.get(item.kind)))\n"
+"        emit(previous.has(item.kind) ? 'state' : 'started', record);\n"
+"    }\n"
+"    for (const [kind, record] of previous)\n"
+"      if (!current.has(kind)) emit('state', {...record, ui_dialog_present: false});\n"
+"    previous = current;\n"
+"    if (sequence >= 192) stop();\n"
+"  };\n"
+"  const scheduleScan = () => {\n"
+"    if (!queued && !stopped) { queued = true; requestAnimationFrame(scan); }\n"
+"  };\n"
+"  const observeEvent = (event, phase) => {\n"
+"    if (stopped) return;\n"
+"    for (const item of known()) {\n"
+"      const record = state(item);\n"
+"      const target = event.target;\n"
+"      const targetAction = !!item.action && !!target &&\n"
+"        (target === item.action || item.action.contains(target));\n"
+"      emit(phase, record, {ui_trusted: !!event.isTrusted,\n"
+"        ui_default_prevented: !!event.defaultPrevented, ui_target_action: targetAction});\n"
+"      queueMicrotask(() => {\n"
+"        if (!stopped) emit('after_event', state(item),\n"
+"          {ui_trusted: !!event.isTrusted, ui_default_prevented: !!event.defaultPrevented,\n"
+"           ui_target_action: targetAction});\n"
+"      });\n"
+"    }\n"
+"  };\n"
+"  const listeners = [];\n"
+"  for (const name of ['pointerdown', 'pointerup', 'pointercancel', 'touchstart', 'touchend', 'touchcancel', 'click']) {\n"
+"    const listener = event => observeEvent(event, name === 'click' ? 'click_capture' : name);\n"
+"    listeners.push([name, listener, true]);\n"
+"    window.addEventListener(name, listener, {capture: true, passive: true});\n"
+"  }\n"
+"  const bubble = event => observeEvent(event, 'click_bubble');\n"
+"  listeners.push(['click', bubble, false]);\n"
+"  window.addEventListener('click', bubble, {passive: true});\n"
+"  const observer = new MutationObserver(scheduleScan);\n"
+"  observer.observe(document.documentElement, {childList: true, subtree: true,\n"
+"    attributes: true, attributeFilter: ['disabled', 'inert', 'hidden', 'aria-hidden', 'style', 'class']});\n"
+"  scan();\n"
+"  setTimeout(stop, 600000);\n"
+"})();\n";
+// END DSH_GUEST_DIALOG_OBSERVER
+
+@interface DSHGuestDialogMessageHandler : NSObject <WKScriptMessageHandler>
+@property (nonatomic) NSUInteger count;
+@end
+@implementation DSHGuestDialogMessageHandler
+- (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    (void)controller;
+    if (!message.frameInfo.isMainFrame || ![message.body isKindOfClass:NSDictionary.class] || self.count >= 192) return;
+    WKSecurityOrigin *origin = message.frameInfo.securityOrigin;
+    if (![origin.protocol isEqual:@"http"] || ![origin.host isEqual:@"127.0.0.1"] ||
+        origin.port != DSHHarness.shared.port) return;
+    NSDictionary *body = message.body;
+    NSMutableDictionary *record = [NSMutableDictionary new];
+    for (NSString *key in @[@"ui_dialog", @"ui_phase", @"ui_sequence", @"ui_elapsed_ms", @"ui_modal_instance", @"ui_action_instance",
+          @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root",
+          @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action",
+          @"ui_dialog_present", @"ui_view_width", @"ui_view_height"]) {
+        if (body[key]) record[key] = body[key];
+    }
+    NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:record];
+    if (!safe[@"ui_dialog"] || !safe[@"ui_phase"]) return;
+    record = [safe mutableCopy];
+    record[@"event"] = @"guestDialogObserved";
+    record[@"ui_native_sequence"] = @(++self.count);
+    record[@"ui_host_ms"] = @((uint64_t)(NSProcessInfo.processInfo.systemUptime * 1000));
+    NSData *data = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingSortedKeys error:nil];
+    if (data) [DSHHarness.shared.log append:[@"[lifecycle] " stringByAppendingString:
+        [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]]];
+    // UI application stdout is not retained by XCTest; use the existing safe,
+    // bounded launch report collected after this batch (without an fsync/tap).
+}
+@end
+#endif
+
+
 @interface DSHRootViewController () <WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate>
 @property (nonatomic) WKWebView *webView;
 @property (nonatomic) DSHStatusOverlayView *overlay;
@@ -37,6 +187,7 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
 @property (nonatomic) uint16_t loadedPort;
 @property (nonatomic) BOOL pageLoaded;
 @property (nonatomic) uint64_t sessionWarningGeneration;
+@property (nonatomic, weak, nullable) UIAlertController *sessionRecoveryAlert;
 @property (nonatomic) NSUInteger pageLoadGeneration;
 /// Authentication generation the in-flight (or last successful) navigation
 /// used. The harness bumps its own counter whenever the server mints a new
@@ -62,6 +213,8 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     [nc addObserver:self selector:@selector(harnessStateChanged:) name:DSHHarnessStateDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(logChanged:) name:DSHLogBufferDidChangeNotification object:nil];
     [nc addObserver:self selector:@selector(bootStateChanged:) name:DSHBootStateDidChangeNotification object:nil];
+    [nc addObserver:self selector:@selector(sessionRecoveryChanged:)
+              name:DSHLifecycleCoordinatorRecoveryDidChangeNotification object:nil];
     [self observeActivity];
     [DSHTurnPresence.shared start];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(turnWasInterrupted:)
@@ -81,6 +234,13 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     config.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
     config.applicationNameForUserAgent = kDSHUserAgentSuffix;
     config.defaultWebpagePreferences.allowsContentJavaScript = YES;
+#if TARGET_OS_SIMULATOR
+    if ([NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"] isEqual:@"1"]) {
+        [config.userContentController addScriptMessageHandler:[DSHGuestDialogMessageHandler new] name:@"dshGuestDialog"];
+        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:DSHGuestDialogObservationScript
+            injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
+    }
+#endif
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
@@ -257,20 +417,49 @@ static NSString *const kDSHUserAgentSuffix = @" DSH-iOS/1.0";
     [self showSessionRecoveryIssueIfNeeded];
 }
 
+- (void)sessionRecoveryChanged:(NSNotification *)note {
+    [self showSessionRecoveryIssueIfNeeded];
+}
+
 - (void)showSessionRecoveryIssueIfNeeded {
-    DSHLifecycleCoordinator *coordinator = DSHAppLifecycle.sharedCoordinator;
-    if (!coordinator.sessionRecoveryNeedsAttention || coordinator.state != DSHLifecycleCoordinatorStateRunning ||
+    [self updateSessionRecoveryIssueForCoordinator:DSHAppLifecycle.sharedCoordinator];
+}
+
+- (void)updateSessionRecoveryIssueForCoordinator:(DSHLifecycleCoordinator *)coordinator {
+    if (!coordinator.sessionRecoveryNeedsAttention) {
+        BOOL dismiss = self.sessionRecoveryAlert && self.presentedViewController == self.sessionRecoveryAlert;
+        self.sessionRecoveryAlert = nil;
+        self.sessionWarningGeneration = 0;
+        if (dismiss) {
+            __weak typeof(self) weakSelf = self;
+            [self dismissViewControllerAnimated:YES completion:^{
+                // A newer failed cycle can arrive during the old alert's
+                // dismissal. Recheck once UIKit permits presentation again.
+                [weakSelf updateSessionRecoveryIssueForCoordinator:coordinator];
+            }];
+        }
+        return;
+    }
+    NSString *title = coordinator.sessionRecoveryAwaitingRegistration ? @"Session recovery is waiting for startup" : @"Session recovery needs attention";
+    NSString *message = coordinator.sessionRecoveryAwaitingRegistration ?
+        @"The session control channel has not registered yet, so session writing has not been confirmed safe to resume. Keep DSH open while startup continues. Saved data is preserved; export diagnostics if startup does not finish." :
+        @"Session writing has not been confirmed safe to resume. Saved data is preserved; recent content may still be in memory. Keep DSH open and export its diagnostic report before restarting or repairing the environment.";
+    if (self.sessionRecoveryAlert) {
+        self.sessionRecoveryAlert.title = title;
+        self.sessionRecoveryAlert.message = message;
+    }
+    if (coordinator.state != DSHLifecycleCoordinatorStateRunning ||
         self.sessionWarningGeneration == coordinator.generation || !self.isViewLoaded || !self.view.window ||
         self.presentedViewController != nil) return;
     self.sessionWarningGeneration = coordinator.generation;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Session recovery needs attention"
-        message:@"Session writing has not been confirmed safe to resume. Saved data is preserved; recent content may still be in memory. Keep DSH open and export its diagnostic report before restarting or repairing the environment."
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
         preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) weakSelf = self;
     [alert addAction:[UIAlertAction actionWithTitle:@"View diagnostics" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [weakSelf presentLog];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Keep open" style:UIAlertActionStyleCancel handler:nil]];
+    self.sessionRecoveryAlert = alert;
     [self presentViewController:alert animated:YES completion:nil];
 }
 

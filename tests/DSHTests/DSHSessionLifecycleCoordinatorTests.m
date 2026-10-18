@@ -1,5 +1,41 @@
 #import <XCTest/XCTest.h>
 #import "DSHLifecycleCoordinator.h"
+#import "DSHRootViewController.h"
+
+@interface DSHRootViewController (SessionRecoveryTests)
+- (void)updateSessionRecoveryIssueForCoordinator:(DSHLifecycleCoordinator *)coordinator;
+@end
+
+// Keep this UI regression independent of booting the guest or presenting an
+// animated window. The alert itself is the real UIKit controller.
+@interface DSHSessionRecoveryViewFixture : DSHRootViewController
+@property (nonatomic) UIViewController *fixturePresented;
+@property (nonatomic) NSUInteger presentations;
+@property (nonatomic) NSUInteger dismissals;
+@property (nonatomic) BOOL deferDismissal;
+@property (nonatomic, copy) dispatch_block_t pendingDismissal;
+- (void)finishDismissal;
+@end
+@implementation DSHSessionRecoveryViewFixture
+- (void)loadView { self.view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 640, 480)]; }
+- (void)viewDidLoad {}
+- (UIViewController *)presentedViewController { return self.fixturePresented; }
+- (void)presentViewController:(UIViewController *)controller animated:(BOOL)animated completion:(void (^)(void))completion {
+    self.fixturePresented = controller; self.presentations++;
+    if (completion) completion();
+}
+- (void)dismissViewControllerAnimated:(BOOL)animated completion:(void (^)(void))completion {
+    self.dismissals++;
+    if (self.deferDismissal) { self.pendingDismissal = completion; return; }
+    self.fixturePresented = nil;
+    if (completion) completion();
+}
+- (void)finishDismissal {
+    dispatch_block_t completion = self.pendingDismissal;
+    self.pendingDismissal = nil; self.fixturePresented = nil;
+    if (completion) completion();
+}
+@end
 
 typedef void (^DSHSessionResult)(BOOL);
 
@@ -53,6 +89,9 @@ typedef void (^DSHSessionResult)(BOOL);
 @property (nonatomic) BOOL throwPrepare;
 @property (nonatomic) BOOL throwResume;
 @property (nonatomic) BOOL throwCancel;
+@property (nonatomic, copy) dispatch_block_t sessionRecoveryObserver;
+@property (nonatomic) BOOL sessionRecoveryAwaitingRegistration;
+@property (nonatomic) BOOL sessionRecoveryConfirmedRunning;
 @property (nonatomic) NSUInteger invariants;
 @property (nonatomic, weak) DSHLifecycleCoordinator *coordinator;
 - (void)completePreparation:(NSUInteger)index success:(BOOL)success;
@@ -64,6 +103,7 @@ typedef void (^DSHSessionResult)(BOOL);
         _calls = [NSMutableArray array]; _records = [NSMutableArray array];
         _preparations = [NSMutableArray array]; _preparationGenerations = [NSMutableArray array];
         _resumes = [NSMutableArray array]; _resumeGenerations = [NSMutableArray array];
+        _sessionRecoveryConfirmedRunning = YES;
     }
     return self;
 }
@@ -458,6 +498,104 @@ typedef void (^DSHSessionResult)(BOOL);
     XCTAssertNotNil([self record:@"sessionResumeTimedOut"]);
     [self.driver completeResume:0 success:YES];
     XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention);
+}
+- (void)testLateStartupRegistrationNeedsARealCurrentRunningConfirmationToClearAttention {
+    self.driver.sessionRecoveryAwaitingRegistration = YES;
+    self.driver.sessionRecoveryConfirmedRunning = NO;
+    self.coordinator.sessionResumeTimeout = 1;
+    [self.coordinator handleAppBackground]; [self.coordinator handleAppForeground];
+    XCTAssertTrue(self.coordinator.sessionRecoveryAwaitingRegistration);
+    XCTAssertTrue(self.driver.admissionClosed, @"Unregistered startup cannot authorize resume");
+    [self.clock advance:1];
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention);
+    XCTAssertTrue(self.coordinator.sessionRecoveryAwaitingRegistration);
+    XCTAssertEqualObjects([self record:@"sessionResumeTimedOut"][@"session_recovery_awaiting_registration"], @YES);
+    NSUInteger opens = [self count:@"open"], resumes = [self count:@"harnessResume"];
+    self.driver.sessionRecoveryAwaitingRegistration = NO;
+    self.driver.sessionRecoveryObserver();
+    XCTAssertFalse(self.coordinator.sessionRecoveryAwaitingRegistration);
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention,
+                  @"Registration and pre-existing writers must not be treated as recovery success");
+    [self.driver completeResume:0 success:YES];
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention, @"An obsolete callback cannot clear the timeout");
+    self.driver.sessionRecoveryConfirmedRunning = YES;
+    self.driver.sessionRecoveryObserver();
+    XCTAssertFalse(self.coordinator.sessionRecoveryNeedsAttention);
+    XCTAssertNotNil([self record:@"sessionRecoveryConfirmed"]);
+    XCTAssertEqual([self count:@"open"], opens); XCTAssertEqual([self count:@"harnessResume"], resumes);
+}
+- (void)testRecoveryObservationCannotCompleteOrOpenABackgroundCycle {
+    self.coordinator.sessionResumeTimeout = 1;
+    [self quiesce]; [self.coordinator handleAppForeground]; [self.clock advance:1];
+    [self.coordinator handleAppBackground];
+    NSUInteger opens = [self count:@"open"], resumes = [self count:@"harnessResume"];
+    self.driver.sessionRecoveryObserver();
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention);
+    XCTAssertEqual(self.coordinator.state, DSHLifecycleCoordinatorStateQuiescing);
+    XCTAssertTrue(self.driver.admissionClosed);
+    XCTAssertEqual([self count:@"open"], opens); XCTAssertEqual([self count:@"harnessResume"], resumes);
+    [self.driver completePreparation:1 success:YES]; [self.coordinator handleAppForeground];
+    [self.driver completeResume:1 success:YES];
+    XCTAssertFalse(self.coordinator.sessionRecoveryNeedsAttention);
+}
+- (void)testSafeAbsentGuestCompletionDoesNotClearAnUnconfirmedWriterFailure {
+    [self quiesce]; [self.coordinator handleAppForeground];
+    [self.driver completeResume:0 success:NO];
+    self.driver.sessionRecoveryConfirmedRunning = NO;
+    [self quiesce]; [self.coordinator handleAppForeground];
+    [self.driver completeResume:1 success:YES];
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention,
+                  @"Exit/absent completion permits UI progress but cannot prove writer recovery");
+    self.driver.sessionRecoveryObserver();
+    XCTAssertTrue(self.coordinator.sessionRecoveryNeedsAttention);
+}
+- (void)testShownStartupWarningUpdatesAndDismissesOnlyAfterConfirmedRecovery {
+    self.driver.sessionRecoveryAwaitingRegistration = YES;
+    self.driver.sessionRecoveryConfirmedRunning = NO;
+    self.coordinator.sessionResumeTimeout = 1;
+    [self.coordinator handleAppBackground]; [self.coordinator handleAppForeground]; [self.clock advance:1];
+    DSHSessionRecoveryViewFixture *controller = [DSHSessionRecoveryViewFixture new];
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 640, 480)];
+    [window addSubview:controller.view];
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    UIAlertController *alert = (UIAlertController *)controller.presentedViewController;
+    XCTAssertNotNil(alert); XCTAssertEqual(controller.presentations, 1u);
+    XCTAssertEqualObjects(alert.title, @"Session recovery is waiting for startup");
+    self.driver.sessionRecoveryAwaitingRegistration = NO; self.driver.sessionRecoveryObserver();
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertEqualObjects(alert.title, @"Session recovery needs attention");
+    XCTAssertEqual(controller.presentations, 1u); XCTAssertEqual(controller.dismissals, 0u);
+    [self.driver completeResume:0 success:YES];
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertEqual(controller.dismissals, 0u, @"Stale success cannot hide the warning");
+    self.driver.sessionRecoveryConfirmedRunning = YES; self.driver.sessionRecoveryObserver();
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertNil(controller.presentedViewController); XCTAssertEqual(controller.dismissals, 1u);
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertEqual(controller.dismissals, 1u);
+    [controller.view removeFromSuperview];
+}
+- (void)testNewFailureDuringWarningDismissalIsPresentedAfterAnimation {
+    self.driver.sessionRecoveryConfirmedRunning = NO;
+    [self quiesce]; [self.coordinator handleAppForeground]; [self.driver completeResume:0 success:NO];
+    DSHSessionRecoveryViewFixture *controller = [DSHSessionRecoveryViewFixture new];
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 640, 480)];
+    [window addSubview:controller.view];
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertEqual(controller.presentations, 1u);
+    controller.deferDismissal = YES;
+    self.driver.sessionRecoveryConfirmedRunning = YES;
+    self.driver.sessionRecoveryObserver();
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertNotNil(controller.pendingDismissal); XCTAssertEqual(controller.dismissals, 1u);
+    self.driver.sessionRecoveryConfirmedRunning = NO;
+    [self quiesce]; [self.coordinator handleAppForeground]; [self.driver completeResume:1 success:NO];
+    [controller updateSessionRecoveryIssueForCoordinator:self.coordinator];
+    XCTAssertEqual(controller.presentations, 1u, @"UIKit still owns the dismissing alert");
+    [controller finishDismissal];
+    XCTAssertEqual(controller.presentations, 2u);
+    XCTAssertEqualObjects(controller.presentedViewController.title, @"Session recovery needs attention");
+    [controller.view removeFromSuperview];
 }
 - (void)testCoordinatorTeardownCancelsItsDrainAndLateCompletionIsHarmless {
     [self.coordinator handleAppBackground];

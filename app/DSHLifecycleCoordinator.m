@@ -2,6 +2,8 @@
 #import <UIKit/UIKit.h>
 #include <math.h>
 
+DSH_EXPORTED NSNotificationName const DSHLifecycleCoordinatorRecoveryDidChangeNotification = @"DSHLifecycleCoordinatorRecoveryDidChange";
+
 @interface DSHUIKitLifecycleTasks : NSObject <DSHLifecycleBackgroundTasks>
 @end
 
@@ -50,6 +52,7 @@
 @property (nonatomic, readwrite) uint64_t coreGeneration;
 @property (nonatomic, readwrite) NSTimeInterval lastQuiesceWaitDuration;
 @property (nonatomic, readwrite) BOOL sessionRecoveryNeedsAttention;
+@property (nonatomic, readwrite) BOOL sessionRecoveryAwaitingRegistration;
 @property (nonatomic, nullable) DSHLifecycleCycle *cycle;
 @property (nonatomic) NSMutableArray<dispatch_block_t> *pendingActions;
 @property (nonatomic) BOOL flushingActions;
@@ -83,6 +86,10 @@
         _pollInterval = 0.05;
         _sessionResumeTimeout = 15;
         _pendingActions = [NSMutableArray array];
+        if ([_driver respondsToSelector:@selector(setSessionRecoveryObserver:)]) {
+            __weak typeof(self) weakSelf = self;
+            [_driver setSessionRecoveryObserver:^{ [weakSelf sessionRecoveryStateChanged]; }];
+        }
     }
     return self;
 }
@@ -122,6 +129,7 @@
               @"session_ack_required": @(cycle.requiresSessionAcknowledgement),
               @"session_acknowledged": @(cycle.sessionAcknowledged),
               @"session_recovery_needs_attention": @(self.sessionRecoveryNeedsAttention),
+              @"session_recovery_awaiting_registration": @(self.sessionRecoveryAwaitingRegistration),
               @"wait_ms": @(waited * 1000), @"snapshot": [self.driver diagnosticSnapshot] ?: @{} };
 }
 
@@ -133,6 +141,34 @@
 
 - (void)recordEvent:(NSString *)event cycle:(DSHLifecycleCycle *)cycle {
     [self.driver recordLifecycleEvent:event details:[self detailsForCycle:cycle]];
+}
+
+- (void)notifyRecoveryStateChanged {
+    [NSNotificationCenter.defaultCenter postNotificationName:DSHLifecycleCoordinatorRecoveryDidChangeNotification object:self];
+}
+
+- (void)updateSessionRecoveryPhase {
+    BOOL waiting = [self.driver respondsToSelector:@selector(sessionRecoveryAwaitingRegistration)] &&
+        [self.driver sessionRecoveryAwaitingRegistration];
+    if (waiting == self.sessionRecoveryAwaitingRegistration) return;
+    self.sessionRecoveryAwaitingRegistration = waiting;
+    [self notifyRecoveryStateChanged];
+}
+
+- (void)sessionRecoveryStateChanged {
+    NSAssert(NSThread.isMainThread, @"Session recovery observations require main");
+    [self updateSessionRecoveryPhase];
+    // Never open admission, finish a resume, or authorize background suspend
+    // from an observation. Only the ordinary transition owns those boundaries.
+    if (self.state != DSHLifecycleCoordinatorStateRunning || !self.sessionRecoveryNeedsAttention ||
+        ![self.driver respondsToSelector:@selector(sessionRecoveryConfirmedRunning)] ||
+        ![self.driver sessionRecoveryConfirmedRunning]) return;
+    self.sessionRecoveryNeedsAttention = NO;
+    [self.driver recordLifecycleEvent:@"sessionRecoveryConfirmed" details:@{
+        @"cycle": @(self.generation), @"core_generation": @(self.coreGeneration),
+        @"session_recovery_needs_attention": @NO, @"session_recovery_awaiting_registration": @NO,
+        @"snapshot": [self.driver diagnosticSnapshot] ?: @{}}];
+    [self notifyRecoveryStateChanged];
 }
 
 - (void)endTaskForCycle:(DSHLifecycleCycle *)cycle {
@@ -331,6 +367,7 @@
     self.state = DSHLifecycleCoordinatorStateResuming;
     self.resumeFinished = NO;
     self.resumeCancellationRequested = NO;
+    [self updateSessionRecoveryPhase];
     [self finishWaitForCycle:cycle];
     [self cancelPreparationForCycle:cycle];
     [self.driver beginResume];
@@ -372,7 +409,11 @@
     self.resumeFinished = YES;
     // HTTP readiness and opening the native UI gate do not establish that
     // session writers recovered. Ignore obsolete callbacks before this write.
-    self.sessionRecoveryNeedsAttention = timedOut || !success;
+    [self updateSessionRecoveryPhase];
+    BOOL confirmed = ![self.driver respondsToSelector:@selector(sessionRecoveryConfirmedRunning)] ||
+        [self.driver sessionRecoveryConfirmedRunning];
+    if (timedOut || !success) self.sessionRecoveryNeedsAttention = YES;
+    else if (confirmed) self.sessionRecoveryNeedsAttention = NO;
     if (timedOut || !success) {
         [self cancelSessionResume];
         [self recordEvent:timedOut ? @"sessionResumeTimedOut" : @"sessionResumeFailed" cycle:cycle];
@@ -392,6 +433,7 @@
     self.cycle = nil;
     [self.driver resumeHarnessSupervision];
     [self recordEvent:@"foregroundResumed" cycle:cycle];
+    [self notifyRecoveryStateChanged];
     [self flushPendingActions];
 }
 

@@ -93,6 +93,28 @@
         dsh_lifecycle_native_flock_close(&object);
     }
 }
+- (void)testUIDialogObservationsRetainOnlyBoundedMetadata {
+    NSDictionary *safe = [DSHLifecycleDiagnostics sanitizedEvent:@{
+        @"event": @"guestDialogObserved", @"ui_dialog": @"api", @"ui_phase": @"click_capture",
+        @"ui_sequence": @7, @"ui_modal_instance": @1, @"ui_action_instance": @2,
+        @"ui_trusted": @YES, @"ui_target_action": @YES,
+        @"credential": @"fixture-secret", @"value": @"fixture-secret", @"url": @"https://fixture-secret"}];
+    XCTAssertEqualObjects(safe[@"event"], @"guestDialogObserved");
+    XCTAssertEqualObjects(safe[@"ui_sequence"], @7);
+    XCTAssertEqualObjects(safe[@"ui_modal_instance"], @1);
+    XCTAssertEqualObjects(safe[@"ui_action_instance"], @2);
+    XCTAssertEqualObjects(safe[@"ui_trusted"], @YES);
+    XCTAssertNil(safe[@"credential"]);
+    XCTAssertNil(safe[@"value"]);
+    XCTAssertNil(safe[@"url"]);
+    NSData *data = [NSJSONSerialization dataWithJSONObject:safe options:0 error:nil];
+    NSString *line = [@"[lifecycle] " stringByAppendingString:[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]];
+    XCTAssertEqualObjects([DSHLifecycleDiagnostics safeEventFromLogLine:line], safe);
+    NSDictionary *invalid = [DSHLifecycleDiagnostics sanitizedEvent:@{
+        @"ui_dialog": @"fixture-secret", @"ui_phase": @"fixture-secret", @"ui_elapsed_ms": @(-1),
+        @"ui_sequence": @(9007199254740992.0), @"ui_action_enabled": @2, @"ui_modal_instance": @YES}];
+    XCTAssertEqual(invalid.count, 0u);
+}
 - (void)testExportPersistsAnImmediateSnapshotOfCurrentLocks {
     // Other Harness tests create enough default logs to rotate the singleton's
     // original file out of the shared directory. Own this test's writer/path;

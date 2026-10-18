@@ -236,6 +236,33 @@
     XCTAssertEqualObjects(event[@"transactions"][0][@"phase"], @"step_timeout");
     XCTAssertNil(event[@"transactions"][1][@"phase"]);
 }
+- (void)testReadAndGateMetadataKeepOnlyBoundedNumericIdentityAndFixedCategories {
+    NSMutableArray *waiters = [NSMutableArray new];
+    for (NSUInteger i = 0; i < 20; i++) [waiters addObject:@{@"guest_pid":@(251 + i), @"guest_tgid":@250,
+        @"thread":@(91 + i), @"entry":@"guest_checkpoint", @"entered_generation":@7,
+        @"wait_reason":@"task_checkpoint", @"age_ms":@12, @"executable":@"/root/private-program",
+        @"peer_address":@"private-host", @"parent_name":@"secret-parent"}];
+    NSDictionary *event = [DSHLifecycleDiagnostics sanitizedEvent:@{@"event":@"quiesceExpired",
+        @"gate_waiters":@20, @"gate_waits_omitted":@4, @"gate_wait_tracking_overflows":@0,
+        @"read_metadata_misses":@0, @"read_metadata_scope":@"retained_stream_read_only",
+        @"process_metadata_scope":@"guest_pid_tgid_only", @"peer_metadata_scope":@"not_observed",
+        @"gate_waits":waiters, @"operations":@[@{@"guest_pid":@250, @"guest_tgid":@250,
+            @"read_fd_observed":@YES, @"read_guest_fd":@4, @"read_fd_kind":@"pipe", @"read_data":@"private-payload"},
+            @{@"read_fd_kind":@"/root/private-name", @"wait_reason":@"secret-wait", @"read_guest_fd":@1.5}]}];
+    XCTAssertEqual([event[@"gate_waits"] count], 16u);
+    XCTAssertEqualObjects(event[@"gate_waiters"], @20);
+    XCTAssertEqualObjects(event[@"gate_waits"][0][@"entry"], @"guest_checkpoint");
+    XCTAssertEqualObjects(event[@"gate_waits"][0][@"guest_tgid"], @250);
+    XCTAssertEqualObjects(event[@"gate_waits"][0][@"wait_reason"], @"task_checkpoint");
+    XCTAssertEqualObjects(event[@"operations"][0][@"read_fd_kind"], @"pipe");
+    XCTAssertEqualObjects(event[@"operations"][0][@"read_guest_fd"], @4);
+    XCTAssertNil(event[@"operations"][1][@"read_fd_kind"]);
+    XCTAssertNil(event[@"operations"][1][@"wait_reason"]);
+    XCTAssertNil(event[@"operations"][1][@"read_guest_fd"]);
+    NSString *text = event.description;
+    for (NSString *secret in @[@"private-program", @"private-host", @"secret-parent", @"private-payload", @"private-name", @"secret-wait"])
+        XCTAssertFalse([text containsString:secret]);
+}
 - (void)testWaitingPinIsUpgradedWithTheRealExpirationAfterItsInitialWindowCloses {
     DSHLogBuffer *log = self.persistentLog;
     NSDictionary *snapshot = [self lockSnapshotForHost:DSHLogBuffer.hostLaunchID generation:5];

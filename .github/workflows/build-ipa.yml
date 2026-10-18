@@ -59,6 +59,7 @@ on:
       - "tests/scripts-test.sh"
       - "tests/DSHTests/**"
       - "tests/DSHUITests/**"
+      - "tests/ui-dialog-observer-test.mjs"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
@@ -447,6 +448,7 @@ jobs:
       - name: Native runner execution and failure-propagation regressions
         run: |
           set -euo pipefail
+          node --test tests/ui-dialog-observer-test.mjs 2>&1 | tee cilogs-verify/ui-dialog-observer.log
           python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
           python3 tests/observer-timing-test.py 2>&1 | tee cilogs-verify/observer-timing.log
           python3 tests/runner-resource-test.py 2>&1 | tee cilogs-verify/runner-resource.log
@@ -465,6 +467,9 @@ jobs:
 
       - name: Production flock identity, privacy and release regressions (ASan + UBSan)
         run: bash tests/flock-diagnostics-test.sh
+
+      - name: Bounded lifecycle wait and read diagnostics (ASan + UBSan)
+        run: bash tests/lifecycle-wait-diagnostics-test.sh
 
       - name: Generation-scoped Node drain admission (native flock + ASan + UBSan)
         run: bash tests/session-drain-admission-test.sh

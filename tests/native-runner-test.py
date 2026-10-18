@@ -19,6 +19,7 @@ NATIVE_NAMES = (
     "flock-diagnostics-test.sh",
     "session-drain-admission-test.sh",
     "task-lifecycle-context-test.sh",
+    "lifecycle-wait-diagnostics-test.sh",
 )
 
 

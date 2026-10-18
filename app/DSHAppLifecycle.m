@@ -9,8 +9,24 @@
 @interface DSHAppLifecycleDriver : NSObject <DSHLifecycleDriver>
 @property (nonatomic) int drainPID;
 @property (nonatomic) uint64_t drainGeneration;
+@property (nonatomic, copy) dispatch_block_t sessionRecoveryObserver;
 @end
 @implementation DSHAppLifecycleDriver
+- (instancetype)init {
+    if ((self = [super init])) [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(sessionRecoveryChanged:) name:DSHGuestSessionLifecycleStateDidChangeNotification
+        object:DSHGuestSessionLifecycle.shared];
+    return self;
+}
+- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
+- (void)sessionRecoveryChanged:(NSNotification *)notification {
+    if (self.sessionRecoveryObserver) self.sessionRecoveryObserver();
+}
+- (BOOL)sessionRecoveryAwaitingRegistration {
+    DSHGuestSessionLifecycle *sessions = DSHGuestSessionLifecycle.shared;
+    return sessions.managedGuestPID > 0 && !sessions.registered;
+}
+- (BOOL)sessionRecoveryConfirmedRunning { return DSHGuestSessionLifecycle.shared.confirmedRunning; }
 - (uint64_t)closeAdmission { return dsh_lifecycle_request_quiesce(); }
 - (BOOL)markQuiescentForGeneration:(uint64_t)generation { return dsh_lifecycle_mark_quiescent(generation); }
 - (void)beginResume { dsh_lifecycle_begin_resume(); }

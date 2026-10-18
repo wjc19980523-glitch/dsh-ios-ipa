@@ -83,6 +83,14 @@ static ssize_t file_read(struct fd *fd, void *buf, size_t size) {
     struct dsh_lifecycle_snapshot state;
     dsh_lifecycle_get_snapshot(&state);
     assert(state.active_operations > 0 && state.paused_fileless_operations == 0);
+    enum dsh_lifecycle_read_fd_kind expected = DSH_READ_FD_OTHER;
+    if (S_ISREG(fd->type)) expected = DSH_READ_FD_REGULAR;
+    else if (S_ISFIFO(fd->type)) expected = DSH_READ_FD_PIPE;
+    else if (S_ISSOCK(fd->type)) expected = DSH_READ_FD_SOCKET;
+    else if (S_ISCHR(fd->type)) expected = DSH_READ_FD_CHARACTER;
+    else if (S_ISBLK(fd->type)) expected = DSH_READ_FD_BLOCK;
+    assert(state.operation_count == 1 && state.operations[0].read_fd_observed &&
+        state.operations[0].read_guest_fd == 0 && state.operations[0].read_fd_kind == expected);
     atomic_fetch_add(&file_reads, 1);
     if (size) ((char *)buf)[0] = 'F';
     return size ? 1 : 0;
@@ -301,6 +309,11 @@ static void six_readers(void) {
         assert_no_guest_locks(&readers[i]);
     }
     assert(snapshot().active_operations == 0 && snapshot().paused_fileless_operations == 6);
+    state = snapshot();
+    assert(state.gate_waiters == 6 && state.gate_wait_count == 6);
+    for (unsigned i = 0; i < state.gate_wait_count; i++)
+        assert(state.gate_waits[i].reason == DSH_GATE_WAIT_TTY_RESUME &&
+            state.gate_waits[i].owner.guest_pid >= 5 && state.gate_waits[i].owner.guest_pid <= 10);
     assert(atomic_load(&copyouts) == writes && atomic_load(&final_closes) == closes);
     dsh_lifecycle_begin_resume();
     delay_ms(30);
@@ -404,6 +417,11 @@ static void conservative_reads(void) {
         start(&reader);
         assert(snapshot().active_operations == (critical == NESTED_SCOPE ? 2U : 1U));
         assert(snapshot().paused_fileless_operations == 0);
+        struct dsh_lifecycle_snapshot observed = snapshot();
+        unsigned innermost = observed.operation_count - 1;
+        assert(observed.operations[innermost].read_fd_observed &&
+            observed.operations[innermost].read_guest_fd == 0 &&
+            observed.operations[innermost].read_fd_kind == DSH_READ_FD_TTY);
         uint64_t generation = dsh_lifecycle_request_quiesce();
         assert(!dsh_lifecycle_mark_quiescent(generation));
         feed(&reader, "safe");
@@ -419,8 +437,13 @@ static void conservative_reads(void) {
     uint64_t permit = dsh_lifecycle_operation_begin("file_read", reader.guest.pid);
     fd_close(reader.files.files[0]);
     reader.files.files[0] = fd_create(&file_ops); assert(reader.files.files[0]);
-    reader.files.files[0]->type = S_IFREG;
-    assert((int_t)sys_read(0, (addr_t)(uintptr_t)reader.output, 4) == 1 && reader.output[0] == 'F');
+    const mode_t_ types[] = {S_IFREG, S_IFIFO, S_IFSOCK, S_IFCHR, S_IFBLK, 0};
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        reader.files.files[0]->type = types[i];
+        assert((int_t)sys_read(0, (addr_t)(uintptr_t)reader.output, 4) == 1 && reader.output[0] == 'F');
+        struct dsh_lifecycle_operation_snapshot observed = snapshot().operations[0];
+        assert(!observed.read_fd_observed && observed.read_guest_fd == -1);
+    }
     assert((int_t)sys_read(1, (addr_t)(uintptr_t)reader.output, 4) == _EBADF);
     reader.files.files[0]->type = S_IFDIR;
     assert((int_t)sys_read(0, (addr_t)(uintptr_t)reader.output, 4) == _EISDIR);

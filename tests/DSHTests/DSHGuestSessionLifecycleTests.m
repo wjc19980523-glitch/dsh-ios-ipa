@@ -174,6 +174,74 @@
     [self.mainQueue drain]; XCTAssertEqual(callbacks, 0u); XCTAssertTrue(self.manager.transitionPending);
 }
 
+- (void)testFirstRegistrationRequiresNewGenerationAndRealRestoreOfExistingWriters {
+    [self.manager managedGuestDidLaunch:101];
+    __block NSUInteger callbacks = 0;
+    [self.manager resumeWithCompletion:^(BOOL success) { XCTAssertTrue(success); callbacks++; }];
+    uint64_t beforeRegistration = self.generation;
+    XCTAssertFalse(self.manager.confirmedRunning);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:beforeRegistration state:@"running"]].status, 409);
+    DSHHostBridgeResponse *first = [self pollPID:101 after:-1 wait:0];
+    XCTAssertEqual(first.status, 200); XCTAssertGreaterThan(self.generation, beforeRegistration);
+    XCTAssertEqualObjects(first.body[@"state"], @"running");
+    [self.mainQueue drain];
+    XCTAssertEqual(callbacks, 0u); XCTAssertFalse(self.manager.confirmedRunning);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:beforeRegistration state:@"running"]].status, 409);
+    // The fixture has two existing writers. Only their real current ACK, not
+    // startup or first poll, confirms restoration.
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:self.generation state:@"running"]].status, 200);
+    XCTAssertFalse(self.manager.confirmedRunning, @"Pending callback has not yet revoked the driver's permit");
+    [self.mainQueue drain]; XCTAssertEqual(callbacks, 1u); XCTAssertTrue(self.manager.confirmedRunning);
+}
+
+- (void)testLateFirstPollCanConfirmCancelledStartupOnlyAfterFreshRunningACK {
+    [self.manager managedGuestDidLaunch:101];
+    __block NSUInteger callbacks = 0, confirmations = 0;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:DSHGuestSessionLifecycleStateDidChangeNotification
+        object:self.manager queue:nil usingBlock:^(NSNotification *note) {
+            XCTAssertTrue(NSThread.isMainThread);
+            if (self.manager.confirmedRunning) confirmations++;
+        }];
+    [self.manager resumeWithCompletion:^(BOOL success) { callbacks++; }];
+    uint64_t timedOut = self.generation;
+    [self.manager cancelPendingTransition];
+    XCTAssertEqual([self pollPID:101 after:-1 wait:0].status, 200);
+    [self.mainQueue drain]; XCTAssertEqual(confirmations, 0u);
+    XCTAssertFalse(self.manager.confirmedRunning);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:timedOut state:@"running"]].status, 409);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:self.generation state:@"running"]].status, 200);
+    [self.mainQueue drain];
+    XCTAssertEqual(callbacks, 0u, @"Cancelled resume must never complete twice");
+    XCTAssertEqual(confirmations, 1u); XCTAssertTrue(self.manager.confirmedRunning);
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+}
+
+- (void)testQueuedRecoveryObservationCannotConfirmNewCommandOrReusedPID {
+    [self registerPID:101]; [self.mainQueue drain];
+    __block NSUInteger confirmations = 0;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:DSHGuestSessionLifecycleStateDidChangeNotification
+        object:self.manager queue:nil usingBlock:^(NSNotification *note) {
+            if (self.manager.confirmedRunning) confirmations++;
+        }];
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:self.generation state:@"running"]].status, 200);
+    [self.manager prepareForBackgroundWithCompletion:^(BOOL success) {}];
+    [self.mainQueue drain]; XCTAssertEqual(confirmations, 0u); XCTAssertFalse(self.manager.confirmedRunning);
+    [self.manager resumeWithCompletion:^(BOOL success) {}];
+    uint64_t obsolete = self.generation;
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:obsolete state:@"running"]].status, 200);
+    [self.manager managedGuestDidLaunch:101];
+    [self.mainQueue drain]; XCTAssertEqual(confirmations, 0u); XCTAssertFalse(self.manager.confirmedRunning);
+    XCTAssertEqual([self pollPID:101 after:-1 wait:0].status, 200);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:obsolete state:@"running"]].status, 409);
+    NSMutableDictionary *failed = [self ackPID:101 generation:self.generation state:@"failed"];
+    failed[@"error_code"] = @"ownership_conflict";
+    XCTAssertEqual([self sendACK:failed].status, 200);
+    [self.mainQueue drain]; XCTAssertEqual(confirmations, 0u); XCTAssertFalse(self.manager.confirmedRunning);
+    XCTAssertEqual([self sendACK:[self ackPID:101 generation:self.generation state:@"running"]].status, 409);
+    [self exitPID:101]; [self.mainQueue drain]; XCTAssertFalse(self.manager.confirmedRunning);
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+}
+
 - (void)testStaleACKAndCancelCannotCompleteNewTransition {
     [self registerPID:101];
     __block NSUInteger obsolete = 0, current = 0;

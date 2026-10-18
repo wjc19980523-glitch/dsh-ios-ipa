@@ -13,6 +13,7 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
 
 @interface DSHLaunchUITests : XCTestCase
 @property (nonatomic) XCUIApplication *app;
+@property (nonatomic) NSUInteger guestDialogAttempt;
 @end
 
 @implementation DSHLaunchUITests
@@ -21,7 +22,7 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     self.continueAfterFailure = NO;
     self.app = [[XCUIApplication alloc] init];
     // Hosted unit tests use a blank scene; UI tests must launch the real app.
-    self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0" };
+    self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0", @"DSH_UI_DIALOG_DIAGNOSTICS": @"1" };
     __weak DSHLaunchUITests *weakSelf = self;
     [self addUIInterruptionMonitorWithDescription:@"Refuse DSH system permission requests"
                                           handler:^BOOL(XCUIElement *interruption) {
@@ -104,6 +105,7 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
 - (void)attachGuestDialogState:(NSDictionary *)state phase:(NSString *)phase labels:(NSArray<NSString *> *)labels {
     NSMutableDictionary *record = [state mutableCopy];
     record[@"phase"] = phase;
+    record[@"attempt_id"] = @(self.guestDialogAttempt);
     record[@"known_dialog_labels"] = labels;
     record[@"test_host_uptime"] = @(NSProcessInfo.processInfo.systemUptime);
     NSData *data = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingSortedKeys error:nil];
@@ -124,6 +126,7 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
                           [NSPredicate predicateWithFormat:@"label IN %@", dialogLabels]].firstMatch;
     if (![dialog waitForExistenceWithTimeout:10])
         return;
+    self.guestDialogAttempt++;
     XCUIElement *action = [dialog.buttons matchingPredicate:
                           [NSPredicate predicateWithFormat:@"label IN %@", actionLabels]].firstMatch;
     // One monotonic budget covers readiness, the tap and closure. In Preview,
@@ -156,13 +159,23 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     }
     XCTAssertEqual(readyResult, XCTWaiterResultCompleted,
                    @"the known web dialog needs an enabled, hittable safe action: %@", dialogLabels);
+    NSTimeInterval tapStarted = NSProcessInfo.processInfo.systemUptime;
     [action tap];
+    NSTimeInterval tapReturned = NSProcessInfo.processInfo.systemUptime;
     NSPredicate *gone = [NSPredicate predicateWithFormat:@"exists == NO"];
     XCTNSPredicateExpectation *closed = [[XCTNSPredicateExpectation alloc] initWithPredicate:gone object:dialog];
     XCTWaiterResult closedResult = [XCTWaiter waitForExpectations:@[closed]
                                                        timeout:MAX(0, deadline - NSProcessInfo.processInfo.systemUptime)];
-    BOOL closedInTime = closedResult == XCTWaiterResultCompleted && NSProcessInfo.processInfo.systemUptime <= deadline;
-    [self attachGuestDialogState:[self guestDialogState:dialog action:action web:web]
+    NSTimeInterval closureObserved = NSProcessInfo.processInfo.systemUptime;
+    BOOL closedInTime = closedResult == XCTWaiterResultCompleted && closureObserved <= deadline;
+    NSMutableDictionary *closureState = [[self guestDialogState:dialog action:action web:web] mutableCopy];
+    closureState[@"waiter_result"] = @(closedResult);
+    closureState[@"tap_started_uptime"] = @(tapStarted);
+    closureState[@"tap_returned_uptime"] = @(tapReturned);
+    closureState[@"closure_observed_uptime"] = @(closureObserved);
+    closureState[@"deadline_uptime"] = @(deadline);
+    closureState[@"closed_in_time"] = @(closedInTime);
+    [self attachGuestDialogState:closureState
                           phase:closedInTime ? @"closed" : @"closure-timeout"
                          labels:dialogLabels];
     XCTAssertTrue(closedInTime,

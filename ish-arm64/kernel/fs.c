@@ -219,6 +219,18 @@ static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
     struct fd *fd = f_get_retained(fd_no);
     if (fd == NULL)
         return _EBADF;
+    // type and ops are immutable on this retained open description. Keep only
+    // numeric/category metadata on the existing operation; never probe paths,
+    // socket addresses, peers or other tasks under the diagnostic mutex.
+    enum dsh_lifecycle_read_fd_kind kind = DSH_READ_FD_OTHER;
+    if (fd->ops == &tty_dev.fd) kind = DSH_READ_FD_TTY;
+    else if (S_ISREG(fd->type)) kind = DSH_READ_FD_REGULAR;
+    else if (S_ISDIR(fd->type)) kind = DSH_READ_FD_DIRECTORY;
+    else if (S_ISFIFO(fd->type)) kind = DSH_READ_FD_PIPE;
+    else if (S_ISSOCK(fd->type)) kind = DSH_READ_FD_SOCKET;
+    else if (S_ISCHR(fd->type)) kind = DSH_READ_FD_CHARACTER;
+    else if (S_ISBLK(fd->type)) kind = DSH_READ_FD_BLOCK;
+    uint64_t read_observation = dsh_lifecycle_read_observe(fd_no, kind);
     ssize_t res = _EBADF;
     if (S_ISDIR(fd->type)) {
         res = _EISDIR;
@@ -249,6 +261,7 @@ static ssize_t sys_read_buf(fd_t fd_no, void *buf, size_t size) {
         STRACE(" \"%.*s\"", print_size, buf);
     }
 out:
+    dsh_lifecycle_read_clear(read_observation);
     fd_close(fd);
     return res;
 }

@@ -3,6 +3,8 @@
 #include <limits.h>
 #include <math.h>
 
+DSH_EXPORTED NSNotificationName const DSHGuestSessionLifecycleStateDidChangeNotification = @"DSHGuestSessionLifecycleStateDidChange";
+
 static BOOL integerValue(id value, int64_t minimum, int64_t maximum, int64_t *result) {
     if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
     double number = [value doubleValue];
@@ -111,6 +113,17 @@ static NSDictionary *phaseDiagnostics(id presented) {
         if (completion) completion(transition.result);
     });
 }
+- (void)enqueueStateChangeForIdentity:(uint64_t)identity generation:(uint64_t)generation {
+    self.mainScheduler(^{
+        [self.condition lock];
+        BOOL current = identity == self.guestIdentity && generation == self.commandGeneration;
+        [self.condition unlock];
+        // Main-thread guest lifecycle/commands cannot interleave between this
+        // validation and observers reading the current state.
+        if (current) [NSNotificationCenter.defaultCenter
+            postNotificationName:DSHGuestSessionLifecycleStateDidChangeNotification object:self];
+    });
+}
 - (uint64_t)managedGuestDidLaunch:(int)pid {
     NSAssert(NSThread.isMainThread, @"managed guest lifecycle on main");
     if (pid <= 0) return 0;
@@ -130,13 +143,16 @@ static NSDictionary *phaseDiagnostics(id presented) {
     self.progressDiagnostics = @{};
     self.errorCode = nil;
     uint64_t identity = self.guestIdentity;
+    uint64_t generation = self.commandGeneration;
     [self.condition broadcast];
     [self.condition unlock];
+    [self enqueueStateChangeForIdentity:identity generation:generation];
     return identity;
 }
 - (void)managedGuestDidExit:(int)pid identity:(uint64_t)identity {
     NSAssert(NSThread.isMainThread, @"managed guest lifecycle on main");
     DSHGuestSessionTransition *delivery = nil;
+    uint64_t changedIdentity = 0, changedGeneration = 0;
     [self.condition lock];
     if (pid > 0 && pid == self.managedPID && identity > 0 && identity == self.guestIdentity) {
         DSHGuestSessionTransition *pending = self.transition;
@@ -147,6 +163,8 @@ static NSDictionary *phaseDiagnostics(id presented) {
         self.commandGeneration++;
         self.transition = nil;
         self.ackState = @"exited";
+        changedIdentity = self.guestIdentity;
+        changedGeneration = self.commandGeneration;
         if (pending) {
             // The exited process cannot reacquire a lease. Carry its pending
             // completion into a new delivery identity, invalidating any ACK
@@ -164,9 +182,18 @@ static NSDictionary *phaseDiagnostics(id presented) {
     }
     [self.condition unlock];
     if (delivery) [self enqueueDelivery:delivery];
+    if (changedIdentity) [self enqueueStateChangeForIdentity:changedIdentity generation:changedGeneration];
 }
 - (BOOL)registered {
     [self.condition lock]; BOOL value = self.guestRegistered; [self.condition unlock]; return value;
+}
+- (BOOL)confirmedRunning {
+    [self.condition lock];
+    BOOL confirmed = self.managedPID > 0 && self.guestRegistered && !self.transition &&
+        [self.desiredState isEqual:@"running"] && self.ackGeneration == self.commandGeneration &&
+        [self.ackState isEqual:@"running"] && self.errorCode == nil;
+    [self.condition unlock];
+    return confirmed;
 }
 - (int)managedGuestPID {
     [self.condition lock]; int value = self.managedPID; [self.condition unlock]; return value;
@@ -243,6 +270,14 @@ static NSDictionary *phaseDiagnostics(id presented) {
     self.activePoll = poll;
     BOOL first = !self.guestRegistered;
     self.guestRegistered = YES;
+    if (first) {
+        // A PID may have existed (and may already own writers) long before its
+        // backend control loop starts. Require a fresh real restore/release;
+        // registration alone never acknowledges any earlier command.
+        self.commandGeneration++;
+        if (self.transition && !self.transition.resolved)
+            self.transition.generation = self.commandGeneration;
+    }
     if (hasProgress && progress == (int64_t)self.commandGeneration && !first) {
         self.progressGeneration = (uint64_t)progress;
         self.progressDiagnostics = diagnostics;
@@ -255,7 +290,9 @@ static NSDictionary *phaseDiagnostics(id presented) {
     if (self.activePoll == poll) self.activePoll = nil;
     if (pid != self.managedPID || poll.guestIdentity != self.guestIdentity) { [self.condition unlock]; return self.stale; }
     NSDictionary *answer = @{@"protocol": @1, @"generation": @(self.commandGeneration), @"state": self.desiredState};
+    uint64_t identity = self.guestIdentity, generation = self.commandGeneration;
     [self.condition unlock];
+    if (first) [self enqueueStateChangeForIdentity:identity generation:generation];
     return [DSHHostBridgeResponse ok:answer];
 }
 - (DSHHostBridgeResponse *)acknowledge:(DSHHostBridgeRequest *)request {
@@ -305,8 +342,10 @@ static NSDictionary *phaseDiagnostics(id presented) {
         delivery.resolved = YES;
         delivery.result = ![state isEqual:@"failed"];
     }
+    uint64_t identity = self.guestIdentity;
     [self.condition unlock];
     if (delivery) [self enqueueDelivery:delivery];
+    [self enqueueStateChangeForIdentity:identity generation:(uint64_t)generation];
     return [DSHHostBridgeResponse ok:@{@"generation": @(generation), @"accepted": @YES}];
 }
 @end

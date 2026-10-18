@@ -1,5 +1,9 @@
 #import <Foundation/Foundation.h>
 
+#ifndef DSH_EXPORTED
+#define DSH_EXPORTED __attribute__((visibility("default")))
+#endif
+
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, DSHLifecycleCoordinatorState) {
@@ -8,6 +12,7 @@ typedef NS_ENUM(NSUInteger, DSHLifecycleCoordinatorState) {
     DSHLifecycleCoordinatorStateQuiesced,
     DSHLifecycleCoordinatorStateResuming,
 };
+extern DSH_EXPORTED NSNotificationName const DSHLifecycleCoordinatorRecoveryDidChangeNotification;
 
 /// The driver bridges the coordinator to the filesystem gate, socket repair,
 /// Harness, and metadata-only diagnostics. Every method runs on the main queue.
@@ -42,6 +47,11 @@ typedef NS_ENUM(NSUInteger, DSHLifecycleCoordinatorState) {
 /// Reacquire stable writer locks, revoke the new group permit, then complete.
 /// Failure leaves guest persistence fail-closed until its own recovery succeeds.
 - (void)resumeSessionsWithCompletion:(void (^)(BOOL success))completion;
+/// Recovery observations run on main and only describe the current authenticated
+/// guest/command. They also cover a real ACK after a finite resume timed out.
+- (void)setSessionRecoveryObserver:(dispatch_block_t)observer;
+- (BOOL)sessionRecoveryAwaitingRegistration;
+- (BOOL)sessionRecoveryConfirmedRunning;
 @end
 
 /// UIKit's background task is a finite opportunity to finish already admitted
@@ -72,6 +82,9 @@ typedef NSTimeInterval (^DSHLifecycleClock)(void);
 /// A failed or timed-out session restore still needs attention even when the
 /// UI and HTTP service recover. Only a current successful restore clears it.
 @property (nonatomic, readonly) BOOL sessionRecoveryNeedsAttention;
+/// Distinguishes startup's missing control registration from a registered
+/// writer restore. Neither registration nor UI readiness clears attention.
+@property (nonatomic, readonly) BOOL sessionRecoveryAwaitingRegistration;
 /// Default 0.05 seconds. A poll only reads cached state and attempts the atomic mark.
 @property (nonatomic) NSTimeInterval pollInterval;
 /// Default 15 seconds; bounds asynchronous foreground writer/lock restoration.

@@ -16,7 +16,7 @@ static NSSet<NSString *> *diagnosticEventNames(void) {
             @"sessionQuiesceDriverException", @"backgroundDeferredDuringSessionResume", @"sessionCancelDriverException",
             @"sessionQuiesceAcknowledged", @"sessionQuiesceFailed", @"deferredBackgroundExpired",
             @"sessionResumeDriverException", @"sessionResumeTimedOut", @"sessionResumeFailed",
-            @"sessionResumeReenteredBackground", @"foregroundResumed", @"guestStarted", @"guestExited",
+            @"sessionResumeReenteredBackground", @"sessionRecoveryConfirmed", @"foregroundResumed", @"guestStarted", @"guestExited", @"guestDialogObserved",
             @"harnessRestartRequested", @"relaunchScheduled", @"healthRestartLimit", @"webContentProcessTerminated",
             @"webInterfaceLoaded", @"incompletePreviousBackground", @"harnessState", @"hostStarted", @"hostBootStarted",
             @"startupPerformance", @"harnessAnswered", @"harnessStartupTimedOut", @"harnessAuthenticationReady",
@@ -44,7 +44,11 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"native_flock_event_total", @"native_flock_events_omitted", @"managed_guest_pid", @"guest_identity",
             @"registered", @"generation", @"ack_generation", @"transition_pending", @"poll_pending",
             @"writer_count", @"released_count", @"pending_events", @"cycle", @"core_generation",
-            @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"wait_ms",
+            @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"session_recovery_awaiting_registration", @"wait_ms",
+            @"gate_waiters", @"gate_waits_omitted", @"gate_wait_tracking_overflows", @"entered_generation",
+            @"read_metadata_misses", @"read_fd_observed", @"read_guest_fd",
+            @"ui_sequence", @"ui_native_sequence", @"ui_elapsed_ms", @"ui_host_ms", @"ui_wait_result", @"ui_view_width", @"ui_view_height", @"ui_modal_instance", @"ui_action_instance",
+            @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present",
             @"id", @"host_fd", @"thread", @"guest_fd_at_last_lock", @"guest_tgid", @"started_monotonic_ns",
             @"age_ms", @"host_device", @"host_inode", @"identity_stat_errno", @"identity_path_errno",
             @"connection", @"mode", @"cached_autocommit", @"sqlite_result", @"recovery_required", @"recovery_result",
@@ -58,6 +62,13 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"error_code": @[@"none", @"checkpoint_changed", @"not_materialized", @"ownership_conflict", @"storage_failure", @"close_failure", @"transition_failed"],
             @"file_kind": @[@"session.lock", @"redacted", @"unavailable"],
             @"filesystem_kind": @[@"fake", @"real", @"other", @"unavailable"],
+            @"read_fd_kind": @[@"unavailable", @"regular", @"directory", @"pipe", @"socket", @"tty", @"character", @"block", @"other"],
+            @"wait_reason": @[@"operation_admission", @"task_checkpoint", @"tty_copyout_resume"],
+            @"read_metadata_scope": @[@"retained_stream_read_only"],
+            @"process_metadata_scope": @[@"guest_pid_tgid_only"],
+            @"peer_metadata_scope": @[@"not_observed"],
+            @"ui_dialog": @[@"welcome", @"api"],
+            @"ui_phase": @[@"started", @"state", @"pointerdown", @"pointerup", @"pointercancel", @"touchstart", @"touchend", @"touchcancel", @"click_capture", @"click_bubble", @"after_event", @"finished"],
             @"type": @[@"LOCK_SH", @"LOCK_EX"],
             @"host_start_source": @[@"first_observation_sysctl_unavailable", @"kernel_process_start"],
             @"stage": @[@"image_preparation", @"guest_kernel_boot", @"web_interface_loaded"],
@@ -65,17 +76,19 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"web_error": @[@"none", @"invalid_url", @"blocked_url", @"redirect_blocked", @"unsupported_content", @"too_large", @"timeout", @"aborted", @"dns", @"tls", @"connection_refused", @"proxy", @"other"],
             @"phase": @[@"open", @"close_failed", @"sql_profile", @"finalize", @"step", @"step_timeout", @"retry_reset", @"retry_timeout", @"step_result", @"reset", @"prepare_failed", @"prepare_timeout", @"finalize_failed", @"begin_read", @"begin_write", @"commit", @"rollback", @"bind", @"invalid_stat", @"missing_inode", @"missing_link_source"]};
         dictionaries = [NSSet setWithArray:@[@"snapshot", @"guest_session_lifecycle", @"counts", @"lock", @"diagnostics", @"progress_diagnostics"]];
-        arrays = [NSSet setWithArray:@[@"operations", @"transactions", @"native_flocks", @"native_flock_events"]];
+        arrays = [NSSet setWithArray:@[@"operations", @"transactions", @"native_flocks", @"native_flock_events", @"gate_waits"]];
     });
     if ([numbers containsObject:key]) {
         if (![value isKindOfClass:NSNumber.class] || !isfinite([value doubleValue])) return nil;
-        BOOL flag = [@[@"quiescing", @"session_drain_active", @"active_fakefs_operations_complete", @"registered", @"transition_pending", @"poll_pending", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"cached_autocommit", @"recovery_required", @"details_omitted"] containsObject:key];
+        BOOL flag = [@[@"quiescing", @"session_drain_active", @"active_fakefs_operations_complete", @"registered", @"transition_pending", @"poll_pending", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"session_recovery_awaiting_registration", @"read_fd_observed", @"cached_autocommit", @"recovery_required", @"details_omitted", @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present"] containsObject:key];
         if (!flag && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
         BOOL fractional = [@[@"host_started_epoch", @"observed_epoch", @"wait_ms", @"duration_seconds"] containsObject:key];
         if (!fractional && floor([value doubleValue]) != [value doubleValue]) return nil;
         if ([@[@"web_request_sequence", @"web_duration_ms"] containsObject:key] && [value doubleValue] > 9007199254740991.0) return nil;
+        if ([key hasPrefix:@"ui_"] && [value doubleValue] > 9007199254740991.0) return nil;
+        if ([key hasPrefix:@"ui_"] && flag && [value doubleValue] != 0 && [value doubleValue] != 1) return nil;
         if ([key isEqual:@"web_http_status"] && ([value doubleValue] < 100 || [value doubleValue] > 599)) return nil;
-        BOOL signedValue = [@[@"guest_pid", @"managed_guest_pid", @"session_drain_guest_tgid", @"host_fd", @"guest_fd_at_last_lock", @"guest_tgid", @"exit_code", @"install_error_code", @"actor_guest_pid", @"last_sqlite_result", @"sqlite_result", @"recovery_result", @"host_errno"] containsObject:key];
+        BOOL signedValue = [@[@"guest_pid", @"managed_guest_pid", @"session_drain_guest_tgid", @"host_fd", @"guest_fd_at_last_lock", @"guest_tgid", @"read_guest_fd", @"exit_code", @"install_error_code", @"actor_guest_pid", @"last_sqlite_result", @"sqlite_result", @"recovery_result", @"host_errno"] containsObject:key];
         if (!signedValue && [value doubleValue] < 0) return nil;
         return value;
     }
@@ -92,7 +105,7 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
     if (enums[key]) return [value isKindOfClass:NSString.class] && [enums[key] containsObject:value] ? value : nil;
     if ([key isEqual:@"entry"]) {
         if (![value isKindOfClass:NSString.class]) return nil;
-        NSArray *fixed = @[@"fakefs_open", @"fakefs_open_inode", @"fakefs_link", @"fakefs_unlink", @"fakefs_rmdir", @"fakefs_rename", @"fakefs_symlink", @"fakefs_mknod", @"fakefs_stat", @"fakefs_fstat", @"fakefs_setattr", @"fakefs_fsetattr", @"fakefs_mkdir", @"fakefs_readlink", @"fakefs_readdir", @"fakefs_bind_mount", @"fakefs_bind_unmount", @"fakefs_mount", @"fakefs_umount", @"fakefs_inode_orphaned", @"fake_db_init", @"fake_db_deinit", @"realfs_open", @"realfs_close", @"realfs_stat", @"realfs_fstat", @"realfs_read", @"realfs_write", @"realfs_pread", @"realfs_pwrite", @"realfs_opendir", @"realfs_readdir", @"realfs_telldir", @"realfs_seekdir", @"realfs_lseek", @"realfs_mmap", @"realfs_readlink", @"realfs_getpath", @"realfs_link", @"realfs_unlink", @"realfs_rmdir", @"realfs_rename", @"realfs_symlink", @"realfs_mknod_with_effect", @"realfs_truncate", @"realfs_setattr", @"realfs_fsetattr", @"realfs_utime", @"realfs_mkdir", @"realfs_flock", @"realfs_statfs", @"realfs_mount", @"realfs_fsync", @"realfs_getflags", @"realfs_setflags", @"realfs_ioctl", @"guest_thread_cleanup", @"guest_group_exit", @"guest_wait_cleanup", @"sys_poll"];
+        NSArray *fixed = @[@"fakefs_open", @"fakefs_open_inode", @"fakefs_link", @"fakefs_unlink", @"fakefs_rmdir", @"fakefs_rename", @"fakefs_symlink", @"fakefs_mknod", @"fakefs_stat", @"fakefs_fstat", @"fakefs_setattr", @"fakefs_fsetattr", @"fakefs_mkdir", @"fakefs_readlink", @"fakefs_readdir", @"fakefs_bind_mount", @"fakefs_bind_unmount", @"fakefs_mount", @"fakefs_umount", @"fakefs_inode_orphaned", @"fake_db_init", @"fake_db_deinit", @"realfs_open", @"realfs_close", @"realfs_stat", @"realfs_fstat", @"realfs_read", @"realfs_write", @"realfs_pread", @"realfs_pwrite", @"realfs_opendir", @"realfs_readdir", @"realfs_telldir", @"realfs_seekdir", @"realfs_lseek", @"realfs_mmap", @"realfs_readlink", @"realfs_getpath", @"realfs_link", @"realfs_unlink", @"realfs_rmdir", @"realfs_rename", @"realfs_symlink", @"realfs_mknod_with_effect", @"realfs_truncate", @"realfs_setattr", @"realfs_fsetattr", @"realfs_utime", @"realfs_mkdir", @"realfs_flock", @"realfs_statfs", @"realfs_mount", @"realfs_fsync", @"realfs_getflags", @"realfs_setflags", @"realfs_ioctl", @"guest_thread_cleanup", @"guest_group_exit", @"guest_wait_cleanup", @"guest_checkpoint", @"tty_read_resume", @"sys_poll"];
         if ([fixed containsObject:value]) return value;
         // Syscall/interrupt labels are generated from numeric IDs, never args.
         if ([value length] <= 40 && [[NSRegularExpression regularExpressionWithPattern:@"^guest_(?:syscall_[0-9]{1,10}|interrupt_-?[0-9]{1,10})$" options:0 error:nil] firstMatchInString:value options:0 range:NSMakeRange(0, [value length])]) return value;
@@ -154,10 +167,11 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
 + (NSDictionary *)snapshotForHarness:(DSHHarness *)harness event:(NSString *)event {
     struct dsh_lifecycle_snapshot s;
     dsh_lifecycle_get_snapshot(&s);
-    NSMutableArray *transactions = [NSMutableArray new], *operations = [NSMutableArray new], *flocks = [NSMutableArray new], *flockEvents = [NSMutableArray new];
+    NSMutableArray *transactions = [NSMutableArray new], *operations = [NSMutableArray new], *flocks = [NSMutableArray new], *flockEvents = [NSMutableArray new], *gateWaits = [NSMutableArray new];
     for (unsigned i = 0; i < s.transaction_count; i++) {
         struct dsh_lifecycle_transaction_snapshot t = s.transactions[i];
         [transactions addObject:@{@"connection": @(t.connection_id), @"guest_pid": @(t.owner.guest_pid),
+            @"guest_tgid": @(t.owner.guest_tgid),
             @"thread": @(t.owner.thread_id), @"mode": @(t.mode), @"age_ms": @(t.age_ns / 1000000),
             @"cached_autocommit": @(t.cached_autocommit), @"sqlite_result": @(t.cached_result),
             @"recovery_required": @(t.recovery_required),
@@ -166,8 +180,20 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
     }
     for (unsigned i = 0; i < s.operation_count; i++) {
         struct dsh_lifecycle_operation_snapshot o = s.operations[i];
+        NSArray *kinds = @[@"unavailable", @"regular", @"directory", @"pipe", @"socket", @"tty", @"character", @"block", @"other"];
         [operations addObject:@{@"id": @(o.id), @"entry": @(o.name), @"guest_pid": @(o.owner.guest_pid),
-            @"thread": @(o.owner.thread_id), @"age_ms": @(o.age_ns / 1000000), @"nesting": @(o.nesting_depth)}];
+            @"guest_tgid": @(o.owner.guest_tgid),
+            @"thread": @(o.owner.thread_id), @"age_ms": @(o.age_ns / 1000000), @"nesting": @(o.nesting_depth),
+            @"read_fd_observed": @(o.read_fd_observed), @"read_guest_fd": @(o.read_guest_fd),
+            @"read_fd_kind": kinds[o.read_fd_kind]}];
+    }
+    for (unsigned i = 0; i < s.gate_wait_count; i++) {
+        struct dsh_lifecycle_gate_wait_snapshot w = s.gate_waits[i];
+        NSArray *reasons = @[@"operation_admission", @"task_checkpoint", @"tty_copyout_resume"];
+        [gateWaits addObject:@{@"guest_pid": @(w.owner.guest_pid), @"guest_tgid": @(w.owner.guest_tgid),
+            @"thread": @(w.owner.thread_id), @"entry": @(w.name), @"wait_reason": reasons[w.reason],
+            @"entered_generation": @(w.entered_generation),
+            @"started_monotonic_ns": @(w.started_monotonic_ns), @"age_ms": @(w.age_ns / 1000000)}];
     }
     for (unsigned i = 0; i < s.native_flock_count; i++) {
         [flocks addObject:flockDetails(s.native_flocks[i])];
@@ -196,6 +222,11 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         @"active_operations": @(s.active_operations), @"paused_tty_reads": @(s.paused_fileless_operations),
         @"active_fakefs_operations": @(s.active_fakefs_operations),
         @"active_fakefs_operations_complete": @(s.tracking_overflows == 0),
+        @"gate_waiters": @(s.gate_waiters), @"gate_waits_omitted": @(s.gate_waiters - s.gate_wait_count),
+        @"gate_wait_tracking_overflows": @(s.gate_wait_tracking_overflows),
+        @"read_metadata_misses": @(s.read_metadata_misses),
+        @"read_metadata_scope": @"retained_stream_read_only",
+        @"process_metadata_scope": @"guest_pid_tgid_only", @"peer_metadata_scope": @"not_observed",
         @"fakefs_operation_counting": @"covered fakefs_ entry scopes; includes nesting, not unique syscalls",
         @"active_transactions": @(s.active_deferred_transactions + s.active_read_transactions + s.active_write_transactions),
         @"read_transactions": @(s.active_read_transactions), @"write_transactions": @(s.active_write_transactions),
@@ -209,7 +240,7 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
         @"native_flock_event_total": @(s.native_flock_event_total),
         @"native_flock_events_omitted": @(s.native_flock_event_total - s.native_flock_event_count),
         @"native_flock_events": flockEvents,
-        @"operations": operations, @"transactions": transactions, @"native_flocks": flocks};
+        @"operations": operations, @"transactions": transactions, @"native_flocks": flocks, @"gate_waits": gateWaits};
 }
 + (void)recordEvent:(NSString *)event harness:(DSHHarness *)harness {
     NSData *data = [NSJSONSerialization dataWithJSONObject:[self snapshotForHarness:harness event:event] options:NSJSONWritingSortedKeys error:nil];
@@ -231,7 +262,7 @@ static NSDictionary *flockDetails(struct dsh_lifecycle_flock_snapshot f) {
     if (encoded.length > 32768) {
         // Keep classification counters/identities, not an unbounded detail dump.
         NSMutableDictionary *snapshot = [eventSnapshot(safe) mutableCopy];
-        for (NSString *key in @[@"operations", @"transactions", @"native_flocks", @"native_flock_events"]) [snapshot removeObjectForKey:key];
+        for (NSString *key in @[@"operations", @"transactions", @"native_flocks", @"native_flock_events", @"gate_waits"]) [snapshot removeObjectForKey:key];
         snapshot[@"details_omitted"] = @YES;
         if (safe[@"snapshot"]) safe[@"snapshot"] = snapshot; else safe = snapshot;
         if ([NSJSONSerialization dataWithJSONObject:safe options:0 error:nil].length > 32768) {

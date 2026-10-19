@@ -570,6 +570,19 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertEqual(self.filesystem.writeCalls, writes);
 }
 - (void)testJobTrackingManifestCannotWriteSessionOrWebPackages {
+    NSDictionary *sessionManifest = self.manifest;
+    NSDictionary *sessionResources = self.resources;
+    [self prepareJobTrackingFixture];
+    // Keep the jobs schema and bridge patch valid so the foreign session
+    // resources are rejected by their whitelist, not by the four-file count.
+    NSMutableDictionary *foreignSession = [self.manifest mutableCopy];
+    NSMutableArray *foreignFiles = [sessionManifest[@"files"] mutableCopy];
+    [foreignFiles addObject:self.manifest[@"files"][3]];
+    foreignSession[@"files"] = foreignFiles;
+    self.manifest = foreignSession;
+    NSMutableDictionary *foreignResources = [self.resources mutableCopy];
+    [foreignResources addEntriesFromDictionary:sessionResources];
+    self.resources = foreignResources;
     NSError *error = nil;
     XCTAssertFalse([self installJobs:&error]);
     XCTAssertEqualObjects(error.domain, @"DSHSessionLifecycleInstaller");

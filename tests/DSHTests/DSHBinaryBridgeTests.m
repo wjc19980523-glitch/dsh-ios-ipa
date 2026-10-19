@@ -11,14 +11,21 @@
 @implementation DSHBinaryBridgeTests
 - (void)setUp {
     [super setUp]; self.bridge=[DSHHostBridge new]; XCTAssertTrue([self.bridge start]);
-    [DSHCapabilityRegistry.shared registerCapability:[[DSHCapability alloc] initWithIdentifier:@"tests.binary.export" title:@"test" details:@"test" gate:DSHCapabilityGateEnabledOnly enabledByDefault:YES available:YES]];
+    // This transport-only fixture is not a shipping default-on capability.
+    // The shared registry outlives this suite, so leave its declared default
+    // off and enable it explicitly only while these socket tests execute.
+    [DSHCapabilityRegistry.shared registerCapability:[[DSHCapability alloc] initWithIdentifier:@"tests.binary.export" title:@"test" details:@"test" gate:DSHCapabilityGateEnabledOnly enabledByDefault:NO available:YES]];
     [DSHCapabilityRegistry.shared setEnabled:YES forIdentifier:@"tests.binary.export"];
     [self.bridge registerBinaryRoute:@"PUT" path:@"/test/binary" capability:@"tests.binary.export" maximumBytes:128*1024 handler:^DSHHostBridgeResponse *(DSHHostBridgeRequest *request) {
         XCTAssertNil(request.json); XCTAssertNotNil(request.binaryBody);
         return [DSHHostBridgeResponse ok:@{@"bytes":@(request.binaryBody.length),@"first":@(((const uint8_t *)request.binaryBody.bytes)[0])}];
     }];
 }
-- (void)tearDown { [self.bridge stop]; [super tearDown]; }
+- (void)tearDown {
+    [self.bridge stop];
+    [DSHCapabilityRegistry.shared setEnabled:NO forIdentifier:@"tests.binary.export"];
+    [super tearDown];
+}
 - (NSDictionary *)request:(NSData *)body token:(NSString *)token type:(NSString *)type {
     NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:[self.bridge.baseURLString stringByAppendingString:@"/test/binary"]]];
     request.HTTPMethod=@"PUT"; request.HTTPBody=body; request.timeoutInterval=8;

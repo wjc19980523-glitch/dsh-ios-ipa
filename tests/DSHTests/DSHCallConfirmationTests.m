@@ -18,6 +18,32 @@
 #import "DSHHostBridge.h"
 #import "DSHActivityLog.h"
 
+// Exercise the production cancellation/once gate with a presentation double.
+// No Files provider or real human authorization is claimed by these tests.
+@interface DSHConfirmationPrompt : NSObject
+@property (atomic, readonly) BOOL finished;
+@property (atomic, readonly) DSHConfirmationOutcome outcome;
+@property (nonatomic) dispatch_semaphore_t answered;
+- (instancetype)initWithTitle:(NSString *)title detail:(NSString *)detail timeout:(NSTimeInterval)timeout cancellationCheck:(BOOL (^)(void))check;
+- (void)start;
+- (void)tick;
+- (void)allow;
+- (void)decline;
+- (void)resolve:(DSHConfirmationOutcome)outcome;
+@end
+
+@interface DSHCancellationTestPrompt : DSHConfirmationPrompt
+@property (nonatomic) BOOL ownedAlertVisible;
+@property (nonatomic) NSUInteger ownedDismissalCount;
+@end
+@implementation DSHCancellationTestPrompt
+- (BOOL)presentAlert { self.ownedAlertVisible = YES; return YES; }
+- (void)dismissOwnedAlertWithCompletion:(dispatch_block_t)completion {
+    if (self.ownedAlertVisible) { self.ownedAlertVisible = NO; self.ownedDismissalCount++; }
+    completion();
+}
+@end
+
 @interface DSHCallConfirmationTests : XCTestCase
 @end
 
@@ -121,6 +147,101 @@
                           @"nothing may be granted without a human");
     XCTAssertLessThanOrEqual(DSHCallConfirmation.presentedCount - before, 1u,
                              @"at most one alert may be presented at a time");
+}
+
+- (DSHCancellationTestPrompt *)promptWithTimeout:(NSTimeInterval)timeout check:(BOOL (^)(void))check {
+    return [[DSHCancellationTestPrompt alloc] initWithTitle:@"DSH self-test" detail:@"Not a real request." timeout:timeout cancellationCheck:check];
+}
+
+- (void)testCancellingPendingConfirmationDismissesOnlyItsOwnedAlertOnce {
+    __block BOOL cancelled = NO;
+    DSHCancellationTestPrompt *prompt = [self promptWithTimeout:45 check:^BOOL { return cancelled; }];
+    DSHCancellationTestPrompt *unrelated = [self promptWithTimeout:45 check:nil];
+    [prompt start]; [unrelated start];
+    cancelled = YES;
+    [prompt tick];
+    [prompt tick]; [prompt allow]; [prompt resolve:DSHConfirmationGranted];
+    XCTAssertEqual(prompt.outcome, DSHConfirmationCancelled);
+    XCTAssertTrue(prompt.finished);
+    XCTAssertEqual(prompt.ownedDismissalCount, 1u);
+    XCTAssertFalse(prompt.ownedAlertVisible);
+    XCTAssertTrue(unrelated.ownedAlertVisible);
+    XCTAssertFalse(unrelated.finished);
+    XCTAssertEqual(unrelated.ownedDismissalCount, 0u, @"cancellation cannot dismiss another request's UI");
+    [unrelated decline];
+}
+
+- (void)testCancellationIsRecheckedBeforeAllowEvenBeforeTheNextPoll {
+    __block BOOL cancelled = NO;
+    DSHCancellationTestPrompt *prompt = [self promptWithTimeout:45 check:^BOOL { return cancelled; }];
+    [prompt start];
+    cancelled = YES;
+    [prompt allow];
+    [prompt allow]; [prompt decline];
+    XCTAssertEqual(prompt.outcome, DSHConfirmationCancelled);
+    XCTAssertEqual(prompt.ownedDismissalCount, 1u);
+    XCTAssertEqual(dispatch_semaphore_wait(prompt.answered, DISPATCH_TIME_NOW), 0l);
+    XCTAssertNotEqual(dispatch_semaphore_wait(prompt.answered, DISPATCH_TIME_NOW), 0l, @"the worker receives exactly one terminal answer");
+}
+
+- (void)testBackgroundCancelsCancellableConfirmationAndPreservesUnrelatedLegacyPrompt {
+    DSHCancellationTestPrompt *prompt = [self promptWithTimeout:45 check:^BOOL { return NO; }];
+    DSHCancellationTestPrompt *legacy = [self promptWithTimeout:45 check:nil];
+    [prompt start]; [legacy start];
+    [NSNotificationCenter.defaultCenter postNotificationName:UIApplicationDidEnterBackgroundNotification object:nil];
+    XCTAssertEqual(prompt.outcome, DSHConfirmationCancelled);
+    XCTAssertEqual(prompt.ownedDismissalCount, 1u);
+    XCTAssertFalse(legacy.finished);
+    XCTAssertTrue(legacy.ownedAlertVisible);
+    [legacy decline];
+}
+
+- (void)testPeriodicCancellationEndsAPendingConfirmationWithoutWaitingForItsDeadline {
+    __block BOOL cancelled = NO;
+    DSHCancellationTestPrompt *prompt = [self promptWithTimeout:45 check:^BOOL { return cancelled; }];
+    [prompt start];
+    cancelled = YES;
+    XCTestExpectation *polled = [self expectationWithDescription:@"cancellation polled"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [polled fulfill]; });
+    [self waitForExpectations:@[polled] timeout:2];
+    XCTAssertTrue(prompt.finished);
+    XCTAssertEqual(prompt.outcome, DSHConfirmationCancelled);
+    XCTAssertEqual(prompt.ownedDismissalCount, 1u);
+}
+
+- (void)testTimeoutRejectsALateAllowAndDoesNotResolveTwice {
+    DSHCancellationTestPrompt *prompt = [self promptWithTimeout:0.02 check:nil];
+    [prompt start];
+    XCTestExpectation *timedOut = [self expectationWithDescription:@"confirmation timed out"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [timedOut fulfill]; });
+    [self waitForExpectations:@[timedOut] timeout:2];
+    [prompt allow];
+    XCTAssertEqual(prompt.outcome, DSHConfirmationTimedOut);
+    XCTAssertEqual(prompt.ownedDismissalCount, 1u);
+}
+
+- (void)testLegacyPromptWithoutCancellationCheckStillAllowsAndDeclines {
+    DSHCancellationTestPrompt *allowed = [self promptWithTimeout:45 check:nil];
+    [allowed start]; [allowed allow];
+    XCTAssertEqual(allowed.outcome, DSHConfirmationGranted);
+    DSHCancellationTestPrompt *declined = [self promptWithTimeout:45 check:nil];
+    [declined start]; [declined decline];
+    XCTAssertEqual(declined.outcome, DSHConfirmationDeclined);
+}
+
+- (void)testCancellationTakesPrecedenceOverTheAutomaticApprovalTestHook {
+    DSHCallConfirmation.automaticallyApproveForTesting = YES;
+    NSUInteger count = DSHCallConfirmation.presentedCount;
+    DSHConfirmationOutcome outcome = [DSHCallConfirmation confirmTitle:@"DSH self-test" detail:@"Not a real request." timeout:45 cancellationCheck:^BOOL { return YES; }];
+    XCTAssertEqual(outcome, DSHConfirmationCancelled);
+    XCTAssertEqual(DSHCallConfirmation.presentedCount, count);
+}
+
+- (void)testCancellationResponseDoesNotPretendTheUserDeclinedOrInviteRetry {
+    DSHHostBridgeResponse *response = [DSHCallConfirmation refusalFor:DSHConfirmationCancelled action:@"exporting game.ipa"];
+    XCTAssertEqual(response.status, 409);
+    XCTAssertEqualObjects(response.body[@"error"][@"code"], @"cancelled");
+    XCTAssertEqualObjects(response.body[@"error"][@"recoverable"], @NO);
 }
 
 @end

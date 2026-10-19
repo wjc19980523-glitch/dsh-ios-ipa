@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "repository": "wjc19980523-glitch/TapGame",
+  "run_id": 39235244295,
+  "run_attempt": 1,
+  "head_sha": "a7c8f9aa7a31db6778d0fc77ee9432dd134217b4",
+  "artifact_name": "TapGame-unsigned-ipa",
+  "artifact_id": 12178731394,
+  "official_zip_bytes": 44827,
+  "official_zip_sha256": "b28db5e360b67af3f822cf66aa04ad15af569c775f2d4a2850f8b64d9bc5722e",
+  "ipa_name": "TapGame_unsigned.ipa",
+  "ipa_bytes": 45306,
+  "ipa_sha256": "e07179577a9272ca04898eb91e47730c18b5cb60490097091c2a0e2d1ecf1c4d",
+  "ipa_sha256_matches_user_supplied_value": true,
+  "read_only_official_download_verified": true,
+  "all_outer_and_inner_zip_crc_verified": true,
+  "test_usage": "Offline parser/export fixture. Never execute, sign, install, or claim physical device validation."
+}

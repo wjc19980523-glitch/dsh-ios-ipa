@@ -57,11 +57,12 @@ printf 'ok  scripts: release preflight and receipt recording are present\n'
 node - <<'NODE'
 const fs = require('fs');
 const manifest = JSON.parse(fs.readFileSync('docs/capabilities.json', 'utf8'));
-const plugin = fs.readFileSync('rootfs/overlay/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js', 'utf8');
+const plugin = fs.readFileSync('rootfs/overlay/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js', 'utf8')
+  + '\n' + fs.readFileSync('app/JobTracking.bundle/workspace-export.mjs', 'utf8');
 const app = fs.readdirSync('app').filter(f => f.endsWith('.m')).map(f => fs.readFileSync(`app/${f}`, 'utf8')).join('\n');
 const tools = manifest.capabilities.flatMap(c => c.tools);
 for (const tool of tools) {
-  if (!plugin.includes(`name: "${tool}"`)) throw new Error(`manifest tool missing from plugin: ${tool}`);
+  if (!new RegExp(`name:\\s*['"]${tool}['"]`).test(plugin)) throw new Error(`manifest tool missing from plugin: ${tool}`);
 }
 for (const capability of manifest.capabilities) {
   if (!app.includes(`@"${capability.id}"`)) throw new Error(`manifest capability missing from app: ${capability.id}`);

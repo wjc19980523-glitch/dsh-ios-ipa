@@ -173,12 +173,18 @@ static const NSTimeInterval kPickerTimeout = 120;
         if (refusal)
             return refusal;
 
-        NSURL *temporary = [[NSURL fileURLWithPath:NSTemporaryDirectory()] URLByAppendingPathComponent:safeName];
+        NSURL *staging = [[NSURL fileURLWithPath:NSTemporaryDirectory()]
+            URLByAppendingPathComponent:[@"dsh-legacy-export-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+        if (![NSFileManager.defaultManager createDirectoryAtURL:staging withIntermediateDirectories:NO attributes:nil error:nil])
+            return [DSHHostBridgeResponse errorWithStatus:500 code:@"internal" message:@"Could not create export staging directory." recoverable:YES];
+        NSURL *temporary = [staging URLByAppendingPathComponent:safeName];
         NSError *error = nil;
-        if (![data writeToURL:temporary options:NSDataWritingAtomic error:&error])
+        if (![data writeToURL:temporary options:NSDataWritingAtomic error:&error]) {
+            [NSFileManager.defaultManager removeItemAtURL:staging error:nil];
             return [DSHHostBridgeResponse errorWithStatus:500 code:@"internal"
                                                   message:[NSString stringWithFormat:@"Could not stage the file: %@", error.localizedDescription]
                                               recoverable:NO];
+        }
 
         DSHDocumentPicker *picker = [DSHDocumentPicker new];
         __block BOOL presented = NO;
@@ -192,12 +198,14 @@ static const NSTimeInterval kPickerTimeout = 120;
             [top presentViewController:controller animated:YES completion:nil];
             presented = YES;
         });
-        if (!presented)
+        if (!presented) {
+            [NSFileManager.defaultManager removeItemAtURL:staging error:nil];
             return [self noForegroundUI];
+        }
 
         dispatch_semaphore_wait(picker.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t) (kPickerTimeout * NSEC_PER_SEC)));
-        [NSFileManager.defaultManager removeItemAtURL:temporary error:nil];
-        if (picker.cancelled)
+        [NSFileManager.defaultManager removeItemAtURL:staging error:nil];
+        if (picker.cancelled || picker.pickedURL == nil)
             return [DSHHostBridgeResponse errorWithStatus:403 code:@"permission_denied"
                                                   message:@"The user closed the save dialog without saving."
                                               recoverable:NO];

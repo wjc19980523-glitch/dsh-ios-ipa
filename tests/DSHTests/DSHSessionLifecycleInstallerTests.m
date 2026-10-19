@@ -541,11 +541,12 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     self.filesystem.files[package] = self.original;
     self.resources = @{@"development-tools.mjs": DSHInstallerTestData(@"export const development = 1;"),
                        @"job-tracking.mjs": DSHInstallerTestData(@"export const tracking = 1;"),
-                       @"job-ledger.mjs": DSHInstallerTestData(@"export const ledger = 1;")};
+                       @"job-ledger.mjs": DSHInstallerTestData(@"export const ledger = 1;"),
+                       @"workspace-export.mjs": DSHInstallerTestData(@"export const workspaceExport = 1;")};
     NSMutableDictionary *patch = [self.manifest[@"patches"][0] mutableCopy];
     patch[@"target"] = package;
     NSMutableArray *files = [NSMutableArray array];
-    for (NSString *name in @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs"])
+    for (NSString *name in @[@"development-tools.mjs", @"job-ledger.mjs", @"workspace-export.mjs", @"job-tracking.mjs"])
         [files addObject:@{@"source": name, @"target": [directory stringByAppendingPathComponent:name],
             @"sha256": DSHInstallerTestHash(self.resources[name])}];
     self.manifest = @{@"schema": @1, @"patches": @[patch], @"files": files};
@@ -560,8 +561,9 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertTrue([self installJobs:&error], @"%@", error);
     XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs",
-        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/workspace-export.mjs",
+        @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js"]));
     NSUInteger writes = self.filesystem.writeCalls;
     XCTAssertTrue([self installJobs:&error]);
@@ -575,9 +577,16 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
     XCTAssertEqualObjects(error.userInfo[@"target"], @"manifest");
     [self prepareJobTrackingFixture];
+    // Session expects three resources; exercise its whitelist with a matched
+    // count, independently of the expanded jobs schema.
+    NSDictionary *completeJobsManifest = self.manifest;
+    NSMutableDictionary *sessionShape = [self.manifest mutableCopy];
+    sessionShape[@"files"] = [self.manifest[@"files"] subarrayWithRange:NSMakeRange(0,3)];
+    self.manifest = sessionShape;
     XCTAssertFalse([self install:&error]);
     XCTAssertEqual(error.code, DSHSessionLifecycleInstallerInvalidManifest);
     XCTAssertEqualObjects(error.userInfo[@"operation"], @"file whitelist");
+    self.manifest = completeJobsManifest;
     // Match the web installer's resource count so this exercises its resource
     // whitelist, rather than passing because an unrelated schema check failed.
     NSDictionary *jobsManifest = self.manifest;
@@ -641,12 +650,13 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     self.filesystem.files[controller] = previous;
     NSMutableDictionary *manifest = [self.manifest mutableCopy];
     NSMutableArray *files = [self.manifest[@"files"] mutableCopy];
-    NSMutableDictionary *record = [files[1] mutableCopy];
+    NSMutableDictionary *record = [files[3] mutableCopy];
     record[@"previous_sha256"] = @[DSHInstallerTestHash(previous)];
-    files[1] = record; manifest[@"files"] = files; self.manifest = manifest;
+    files[3] = record; manifest[@"files"] = files; self.manifest = manifest;
     XCTAssertTrue([self installJobs:nil]);
     XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[
-        [prefix stringByAppendingString:@"development-tools.mjs"], controller]));
+        [prefix stringByAppendingString:@"development-tools.mjs"],
+        [prefix stringByAppendingString:@"workspace-export.mjs"], controller]));
     XCTAssertEqualObjects(self.filesystem.files[ledger], self.resources[@"job-ledger.mjs"]);
 }
 - (void)prepareOnboardingFixture {

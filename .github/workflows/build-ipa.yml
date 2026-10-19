@@ -61,6 +61,8 @@ on:
       - "tests/DSHTests/**"
       - "tests/DSHUITests/**"
       - "tests/ui-dialog-observer-test.mjs"
+      - "tests/workspace-export-test.mjs"
+      - "tests/fixtures/cloud-build/**"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
@@ -467,6 +469,7 @@ jobs:
           set -euo pipefail
           node --test tests/ui-dialog-observer-test.mjs 2>&1 | tee cilogs-verify/ui-dialog-observer.log
           DSH_ONBOARDING_ROOTFS_REQUIRED=1 node --test tests/onboarding-touch-test.mjs 2>&1 | tee cilogs-verify/onboarding-touch.log
+          DSH_TAPGAME_IPA=tests/fixtures/cloud-build/TapGame_unsigned.ipa node --test tests/workspace-export-test.mjs 2>&1 | tee cilogs-verify/workspace-export.log
           python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
           python3 tests/observer-timing-test.py 2>&1 | tee cilogs-verify/observer-timing.log
           python3 tests/runner-resource-test.py 2>&1 | tee cilogs-verify/runner-resource.log

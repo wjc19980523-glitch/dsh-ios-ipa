@@ -2,6 +2,7 @@ import { JobLedger, jobOutcome, toolOutcome, scopeID } from './job-ledger.mjs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { developmentPreflight } from './development-tools.mjs';
+import { installWorkspaceExport } from './workspace-export.mjs';
 
 const singletons = globalThis[Symbol.for('dsh.jobTracking.v1')] ??= new WeakMap();
 const stateText = state => ({ succeeded: 'succeeded (exit 0)', failed: 'failed',
@@ -10,6 +11,7 @@ const stateText = state => ({ succeeded: 'succeeded (exit 0)', failed: 'failed',
 
 // Passive host-plane observer. Does not spawn, kill, replay, or restore jobs.
 export function installJobTracking(ctx, defineTool, options = {}) {
+  installWorkspaceExport(ctx, defineTool, options.workspaceExport ?? {});
   const jobs = ctx.get('jobs');
   if (!jobs) return;
   let ledger = singletons.get(jobs);

@@ -10,17 +10,23 @@
       ]
     },
     {
-      "source": "job-tracking.mjs",
-      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
-      "sha256": "f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510",
-      "previous_sha256": [
-        "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1"
-      ]
-    },
-    {
       "source": "job-ledger.mjs",
       "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
       "sha256": "06fda24c5715e516f65f8b14ce42e19588b900cfc234a4f1ca4bd225446b945f"
+    },
+    {
+      "source": "workspace-export.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/workspace-export.mjs",
+      "sha256": "0bec9f94d143e20014d85c5b8e040a33744b12cfbdacb4b927aa77e649a72a2f"
+    },
+    {
+      "source": "job-tracking.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
+      "sha256": "c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb",
+      "previous_sha256": [
+        "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1",
+        "f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510"
+      ]
     }
   ],
   "patches": [

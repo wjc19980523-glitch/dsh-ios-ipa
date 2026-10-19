@@ -65,10 +65,13 @@ def main():
         assert patched.count(replacement['find']) == replacement['count']
         patched = patched.replace(replacement['find'], replacement['replace'])
     sha = lambda data: hashlib.sha256(data).hexdigest()
-    resources = ('development-tools.mjs', 'job-tracking.mjs', 'job-ledger.mjs')
+    # Install dependencies before the importing controller. A failed upgrade
+    # cannot launch Harness with a partially installed tool graph.
+    resources = ('development-tools.mjs', 'job-ledger.mjs', 'workspace-export.mjs', 'job-tracking.mjs')
     manifest = {'schema': 1, 'files': [{'source': name, 'target': TARGET.rsplit('/', 1)[0] + '/' + name,
         'sha256': sha((BUNDLE / name).read_bytes()),
-        **({'previous_sha256': ['e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1']} if name == 'job-tracking.mjs' else
+        **({'previous_sha256': ['e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1',
+                               'f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510']} if name == 'job-tracking.mjs' else
            {'previous_sha256': ['c29375e91bc7fd295c86c5162629632effe736e99fe3e33637342d988bd9f4ac']} if name == 'development-tools.mjs' else {})} for name in resources],
         'patches': [{'target': TARGET, 'original_sha256': sha(original), 'patched_sha256': sha(patched.encode()),
                      'replacements': replacements}]}

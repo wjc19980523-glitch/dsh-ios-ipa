@@ -284,7 +284,7 @@ test('real prompt assembly offers bridge tools and the real tool runtime returns
   const bridge = await import(pathToFileURL(join(fixtures, 'bridge-patched.mjs')).href + '?real-registration-proof');
   assert.doesNotThrow(() => bridge.apply(ctx));
   const assembly = await ctx.get('systemPrompt').assemble();
-  for (const name of ['device_info', 'job_status', 'job_history', 'development_preflight'])
+  for (const name of ['device_info', 'job_status', 'job_history', 'development_preflight', 'file_export_from_workspace'])
     assert(assembly.tools.some(tool => tool.name === name), `${name} must actually be offered in the assembled model schema`);
   assert(assembly.sections.some(section => section.name === 'dsh:durable-job-status'));
   const result = await ctx.get('tools').execute({ name: 'device_info', arguments: {},
@@ -293,5 +293,12 @@ test('real prompt assembly offers bridge tools and the real tool runtime returns
   assert.equal(result.isError, false);
   assert(JSON.stringify(result).includes('controlled-device-version'));
   assert(calls.includes('/v1/device'));
+  const exportResult = await ctx.get('tools').execute({ name: 'file_export_from_workspace', arguments: { path: '/root/.ssh/id_ed25519' },
+    callId: 'controlled-workspace-export-refusal', signal: new AbortController().signal,
+    agent: { id: 'A', ctx: new Context(), session: { id: 'A', header: { cwd: '/root/workspace' } } } });
+  assert.equal(exportResult.isError, false, 'the registered tool must produce its declared canonical metadata output');
+  assert.equal(JSON.parse(exportResult.value).saved, false);
+  assert.equal(JSON.parse(exportResult.value).reason, 'file_outside_current_workspace');
+  assert(!calls.some(path => path.startsWith('/v1/files/workspace-export/')), 'path refusal must happen before Native receives a request');
 });
 traceStage(FILE_TAG, 'file:registered');

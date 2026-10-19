@@ -8,6 +8,7 @@
 #import "DSHHarness.h"
 #import "DSHActivityLog.h"
 #import <UIKit/UIKit.h>
+#import <math.h>
 
 /// Long enough for someone to read the alert and decide, short enough that an
 /// abandoned prompt does not hold an agent turn open indefinitely.
@@ -19,6 +20,144 @@ static NSUInteger sPresentedCount = 0;
 /// Guards "one alert at a time" across the bridge's concurrent handlers.
 static BOOL sPromptUp = NO;
 static NSLock *sLock = nil;
+
+/// Every completion path and UIAlertAction goes through the same once gate.
+/// The request worker can time out while main is blocked; UI teardown still
+/// runs on main and keeps the global prompt slot until its own alert is gone.
+@interface DSHConfirmationPrompt : NSObject
+@property (atomic, readonly) BOOL finished;
+@property (atomic, readonly) DSHConfirmationOutcome outcome;
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) NSString *detail;
+@property (nonatomic) NSTimeInterval timeout;
+@property (nonatomic, copy) BOOL (^cancellationCheck)(void);
+@property (nonatomic, copy) UIViewController *(^presenterProvider)(void);
+@property (nonatomic) dispatch_semaphore_t answered;
+@property (nonatomic) NSLock *resolutionLock;
+@property (nonatomic) UIAlertController *alert;
+@property (nonatomic) NSTimer *timer;
+@property (nonatomic) NSMutableArray *observers;
+@property (nonatomic) NSTimeInterval startedAt;
+@property (nonatomic) BOOL teardownStarted;
+- (instancetype)initWithTitle:(NSString *)title detail:(NSString *)detail timeout:(NSTimeInterval)timeout cancellationCheck:(BOOL (^_Nullable)(void))check;
+- (void)start;
+- (BOOL)presentAlert;
+- (void)dismissOwnedAlertWithCompletion:(dispatch_block_t)completion;
+- (void)tick;
+- (void)allow;
+- (void)decline;
+- (void)resolve:(DSHConfirmationOutcome)outcome;
+- (void)teardown;
+@end
+
+static DSHConfirmationPrompt *sCurrentPrompt;
+
+@implementation DSHConfirmationPrompt {
+    BOOL _finished;
+    DSHConfirmationOutcome _outcome;
+}
+- (instancetype)initWithTitle:(NSString *)title detail:(NSString *)detail timeout:(NSTimeInterval)timeout cancellationCheck:(BOOL (^)(void))check {
+    if ((self = [super init])) {
+        _title = [title copy]; _detail = [detail copy]; _timeout = timeout;
+        _cancellationCheck = [check copy]; _outcome = DSHConfirmationUnavailable;
+        _answered = dispatch_semaphore_create(0); _resolutionLock = [NSLock new];
+        _observers = [NSMutableArray new];
+    }
+    return self;
+}
+- (BOOL)finished { [self.resolutionLock lock]; BOOL result = _finished; [self.resolutionLock unlock]; return result; }
+- (DSHConfirmationOutcome)outcome { [self.resolutionLock lock]; DSHConfirmationOutcome result = _outcome; [self.resolutionLock unlock]; return result; }
+- (void)dealloc {
+    [_timer invalidate];
+    for (id observer in _observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
+}
+- (BOOL)presentAlert {
+    UIViewController *presenter = self.presenterProvider ? self.presenterProvider() : nil;
+    if (!presenter || UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+        presenter.isBeingDismissed || presenter.isBeingPresented ||
+        [presenter isKindOfClass:UIAlertController.class] || [presenter isKindOfClass:UIDocumentPickerViewController.class])
+        return NO;
+    self.alert = [UIAlertController alertControllerWithTitle:self.title message:self.detail preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [self.alert addAction:[UIAlertAction actionWithTitle:@"Don't Allow" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) { [weakSelf decline]; }]];
+    [self.alert addAction:[UIAlertAction actionWithTitle:@"Allow" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { [weakSelf allow]; }]];
+    self.alert.view.accessibilityIdentifier = @"dsh.confirmation";
+    @try {
+        [presenter presentViewController:self.alert animated:YES completion:nil];
+    } @catch (NSException *exception) { return NO; }
+    if (!self.alert.presentingViewController) return NO;
+    sPresentedCount++;
+    return YES;
+}
+- (void)start {
+    NSAssert(NSThread.isMainThread, @"Confirmation UI runs on main");
+    if (self.finished) { [self teardown]; return; }
+    if (self.cancellationCheck && self.cancellationCheck()) { [self resolve:DSHConfirmationCancelled]; return; }
+    self.startedAt = NSProcessInfo.processInfo.systemUptime;
+    if (![self presentAlert]) { [self resolve:DSHConfirmationUnavailable]; return; }
+    __weak typeof(self) weakSelf = self;
+    self.timer = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) { [weakSelf tick]; }];
+    [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
+    if (self.cancellationCheck) {
+        UIScene *scene = self.alert.presentingViewController.view.window.windowScene;
+        for (NSNotificationName name in @[UIApplicationDidEnterBackgroundNotification, UISceneDidEnterBackgroundNotification, UISceneDidDisconnectNotification]) {
+            [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+                if ([note.name isEqualToString:UIApplicationDidEnterBackgroundNotification] || !scene || note.object == scene)
+                    [weakSelf resolve:DSHConfirmationCancelled];
+            }]];
+        }
+    }
+}
+- (void)tick {
+    if (self.finished) return;
+    if (self.cancellationCheck && self.cancellationCheck()) [self resolve:DSHConfirmationCancelled];
+    else if (NSProcessInfo.processInfo.systemUptime - self.startedAt >= self.timeout) [self resolve:DSHConfirmationTimedOut];
+}
+- (void)allow {
+    if (self.finished) return;
+    [self resolve:(self.cancellationCheck && self.cancellationCheck()) ? DSHConfirmationCancelled : DSHConfirmationGranted];
+}
+- (void)decline { [self resolve:DSHConfirmationDeclined]; }
+- (void)resolve:(DSHConfirmationOutcome)outcome {
+    [self.resolutionLock lock];
+    if (_finished) { [self.resolutionLock unlock]; return; }
+    _finished = YES; _outcome = outcome;
+    [self.resolutionLock unlock];
+    dispatch_semaphore_signal(self.answered);
+    if (NSThread.isMainThread) [self teardown];
+    else dispatch_async(dispatch_get_main_queue(), ^{ [self teardown]; });
+}
+- (void)dismissOwnedAlertWithCompletion:(dispatch_block_t)completion {
+    // Do not dismiss a presenter's other alert or a picker from another call.
+    UIAlertController *alert = self.alert;
+    if (!alert.presentingViewController) { completion(); return; }
+    id<UIViewControllerTransitionCoordinator> transition = alert.transitionCoordinator;
+    if (alert.isBeingDismissed && transition) {
+        // UIAlertAction may have already started UIKit's automatic dismissal.
+        // Do not ask UIKit to dismiss it a second time and lose our completion.
+        BOOL registered = [transition animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+            if (alert.presentingViewController)
+                [alert dismissViewControllerAnimated:NO completion:completion];
+            else completion();
+        }];
+        if (registered) return;
+    }
+    [alert dismissViewControllerAnimated:NO completion:completion];
+}
+- (void)teardown {
+    if (self.teardownStarted) return;
+    self.teardownStarted = YES;
+    [self.timer invalidate]; self.timer = nil;
+    for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
+    [self.observers removeAllObjects];
+    [self dismissOwnedAlertWithCompletion:^{
+        [sLock lock];
+        if (sCurrentPrompt == self) { sCurrentPrompt = nil; sPromptUp = NO; }
+        [sLock unlock];
+        self.alert = nil;
+    }];
+}
+@end
 
 // DSH_EXPORTED here matches the declaration in the header; without it the
 // definition still lands in the executable's private symbol table and
@@ -97,21 +236,43 @@ DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
 + (DSHConfirmationOutcome)confirmTitle:(NSString *)title
                                 detail:(NSString *)detail
                             capability:(NSString *)capability {
+    return [self confirmTitle:title detail:detail capability:capability cancellationCheck:nil];
+}
+
++ (DSHConfirmationOutcome)confirmTitle:(NSString *)title
+                                detail:(NSString *)detail
+                            capability:(NSString *)capability
+                     cancellationCheck:(BOOL (^)(void))cancellationCheck {
     NSUInteger recent = capability ? [DSHActivityLog.shared countOf:capability within:600] : 0;
     NSString *full = recent >= 3
         ? [detail stringByAppendingFormat:@"\n\nThis is the %lu%@ time in ten minutes.",
            (unsigned long) (recent + 1), (recent + 1) % 10 == 1 && (recent + 1) != 11 ? @"st" : (recent + 1) % 10 == 2 && (recent + 1) != 12 ? @"nd" : (recent + 1) % 10 == 3 && (recent + 1) != 13 ? @"rd" : @"th"]
         : detail;
-    return [self confirmTitle:title detail:full timeout:kDefaultTimeout];
+    return [self confirmTitle:title detail:full timeout:kDefaultTimeout cancellationCheck:cancellationCheck];
 }
 
 + (DSHConfirmationOutcome)confirmTitle:(NSString *)title
                                 detail:(NSString *)detail
                                timeout:(NSTimeInterval)timeout {
+    return [self confirmTitle:title detail:detail timeout:timeout cancellationCheck:nil];
+}
+
++ (DSHConfirmationOutcome)confirmTitle:(NSString *)title
+                                detail:(NSString *)detail
+                               timeout:(NSTimeInterval)timeout
+                     cancellationCheck:(BOOL (^)(void))cancellationCheck {
+    if (cancellationCheck && cancellationCheck())
+        return [self finish:DSHConfirmationCancelled title:title detail:detail];
     if (sAutoApprove)
         return [self finish:DSHConfirmationGranted title:title detail:detail];
     if (sAutoDecline)
         return [self finish:DSHConfirmationDeclined title:title detail:detail];
+    if (NSThread.isMainThread)
+        return [self finish:DSHConfirmationUnavailable title:title detail:detail];
+    if (!isfinite(timeout) || timeout <= 0) timeout = kDefaultTimeout;
+
+    DSHConfirmationPrompt *prompt = [[DSHConfirmationPrompt alloc] initWithTitle:title detail:detail timeout:timeout cancellationCheck:cancellationCheck];
+    prompt.presenterProvider = ^{ return [self topViewController]; };
 
     [sLock lock];
     if (sPromptUp) {
@@ -122,52 +283,14 @@ DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
         return [self finish:DSHConfirmationUnavailable title:title detail:detail];
     }
     sPromptUp = YES;
+    sCurrentPrompt = prompt;
     [sLock unlock];
-
-    __block DSHConfirmationOutcome outcome = DSHConfirmationUnavailable;
-    dispatch_semaphore_t answered = dispatch_semaphore_create(0);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *presenter = [self topViewController];
-        if (presenter == nil || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
-            // Nothing the user can see: fail fast instead of waiting on a
-            // dialog that will only appear after they come back.
-            dispatch_semaphore_signal(answered);
-            return;
-        }
-        sPresentedCount += 1;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                      message:detail
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Don't Allow" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
-            outcome = DSHConfirmationDeclined;
-            dispatch_semaphore_signal(answered);
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Allow" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            outcome = DSHConfirmationGranted;
-            dispatch_semaphore_signal(answered);
-        }]];
-        alert.view.accessibilityIdentifier = @"dsh.confirmation";
-        [presenter presentViewController:alert animated:YES completion:nil];
-
-        // The alert has to come down on timeout too, or it sits there long
-        // after the call it belongs to has been answered.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (timeout * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (alert.presentingViewController == nil)
-                return;
-            [alert dismissViewControllerAnimated:YES completion:nil];
-            outcome = DSHConfirmationTimedOut;
-            dispatch_semaphore_signal(answered);
-        });
-    });
-
-    // +2s so the main-queue timeout above wins and the alert is dismissed,
-    // rather than this wait expiring first and leaving it on screen.
-    dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, (int64_t) ((timeout + 2) * NSEC_PER_SEC)));
-    [sLock lock];
-    sPromptUp = NO;
-    [sLock unlock];
-    return [self finish:outcome title:title detail:detail];
+    dispatch_async(dispatch_get_main_queue(), ^{ [prompt start]; });
+    // Main may itself be blocked or suspended. Resolve the request once and
+    // queue teardown; a late Allow cannot revive an expired request.
+    if (dispatch_semaphore_wait(prompt.answered, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 2) * NSEC_PER_SEC))) != 0)
+        [prompt resolve:DSHConfirmationTimedOut];
+    return [self finish:prompt.outcome title:title detail:detail];
 }
 
 /// Every exit goes through here. Recording used to sit on the tail of the one
@@ -180,6 +303,7 @@ DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
     [DSHHarness.shared.log append:[NSString stringWithFormat:@"[bridge] confirmation “%@”: %@", title,
                                    outcome == DSHConfirmationGranted ? @"allowed"
                                    : outcome == DSHConfirmationDeclined ? @"declined"
+                                   : outcome == DSHConfirmationCancelled ? @"cancelled"
                                    : outcome == DSHConfirmationTimedOut ? @"timed out" : @"could not ask"]];
     // The detail is what the user was shown, so recording it leaks nothing
     // they have not already seen — and it is the only way the log can answer
@@ -190,6 +314,7 @@ DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
                                  result:nil
                                 outcome:outcome == DSHConfirmationGranted ? DSHActivityOutcomeOK
                                         : outcome == DSHConfirmationDeclined ? DSHActivityOutcomeDeclined
+                                        : outcome == DSHConfirmationCancelled ? DSHActivityOutcomeInterrupted
                                         : outcome == DSHConfirmationTimedOut ? DSHActivityOutcomeTimedOut
                                         : DSHActivityOutcomeRefused
                                duration:0];
@@ -230,6 +355,10 @@ DSH_EXPORTED NSString *DSHDisplayValue(NSString *value, NSUInteger limit) {
                                                   message:[NSString stringWithFormat:
                                                            @"DSH could not ask the user about: %@ — the app is in the background, or another confirmation is already open. Try once the user is back in DSH.", action]
                                               recoverable:YES];
+        case DSHConfirmationCancelled:
+            return [DSHHostBridgeResponse errorWithStatus:409 code:@"cancelled"
+                                                  message:[NSString stringWithFormat:@"The request was cancelled before authorization completed: %@.", action]
+                                              recoverable:NO];
     }
 }
 

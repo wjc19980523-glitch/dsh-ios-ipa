@@ -14,6 +14,7 @@
 #import "DSHContactsCapability.h"
 #import "DSHNotificationCapability.h"
 #import "DSHFilesCapability.h"
+#import "DSHWorkspaceExportStore.h"
 #import "DSHPhotosCapability.h"
 #import "DSHShareCapability.h"
 #import "DSHShortcutsCapability.h"
@@ -200,6 +201,7 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
     [DSHContactsCapability installOn:bridge];
     [DSHNotificationCapability installOn:bridge];
     [DSHFilesCapability installOn:bridge];
+    [DSHWorkspaceExportStore installOnBridge:bridge];
     [DSHPhotosCapability installOn:bridge];
     [DSHShareCapability installOn:bridge];
     [DSHShortcutsCapability installOn:bridge];

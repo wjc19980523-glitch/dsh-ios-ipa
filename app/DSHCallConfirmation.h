@@ -37,6 +37,7 @@ typedef NS_ENUM(NSInteger, DSHConfirmationOutcome) {
     DSHConfirmationDeclined,      // the user said no
     DSHConfirmationTimedOut,      // nobody answered
     DSHConfirmationUnavailable,   // no foreground UI to ask in, or one is already up
+    DSHConfirmationCancelled,     // the originating operation was cancelled
 };
 
 @interface DSHCallConfirmation : NSObject
@@ -53,10 +54,23 @@ typedef NS_ENUM(NSInteger, DSHConfirmationOutcome) {
                                 detail:(NSString *)detail
                             capability:(nullable NSString *)capability;
 
+/// Optional operation cancellation. YES means this request is no longer live.
+/// The predicate must be quick and thread safe: checked before showing UI,
+/// periodically on main, and again before accepting Allow. Only this prompt's
+/// alert is dismissed. Passing nil preserves the existing API's behavior.
++ (DSHConfirmationOutcome)confirmTitle:(NSString *)title
+                                detail:(NSString *)detail
+                            capability:(nullable NSString *)capability
+                     cancellationCheck:(BOOL (^_Nullable)(void))cancellationCheck;
+
 /// Same, with an explicit timeout — used by tests.
 + (DSHConfirmationOutcome)confirmTitle:(NSString *)title
                                 detail:(NSString *)detail
                                timeout:(NSTimeInterval)timeout;
++ (DSHConfirmationOutcome)confirmTitle:(NSString *)title
+                                detail:(NSString *)detail
+                               timeout:(NSTimeInterval)timeout
+                     cancellationCheck:(BOOL (^_Nullable)(void))cancellationCheck;
 
 /// Turns anything other than `Granted` into the response the route should send,
 /// each with a message telling the model what actually happened. Returns nil

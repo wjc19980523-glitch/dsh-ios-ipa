@@ -12,6 +12,7 @@
     {"id":"notifications.post","gate":"system-permission","tools":["notify"]},
     {"id":"files.import","gate":"picker","tools":["file_import"]},
     {"id":"files.export","gate":"per-call","tools":["file_export"]},
+    {"id":"files.export.workspace","gate":"per-call","tools":["file_export_from_workspace"]},
     {"id":"photos.import","gate":"picker","tools":["photo_import"]},
     {"id":"share.present","gate":"per-call","tools":["share"]},
     {"id":"shortcuts.run","gate":"per-call","tools":["shortcut_run"]}

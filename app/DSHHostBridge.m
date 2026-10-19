@@ -69,6 +69,7 @@ static const NSTimeInterval kSocketTimeout = 15;
 @property (nonatomic, readwrite, copy) NSDictionary<NSString *, NSString *> *query;
 @property (nonatomic, readwrite, copy) NSDictionary<NSString *, NSString *> *headers;
 @property (nonatomic, readwrite, copy, nullable) NSDictionary *json;
+@property (nonatomic, readwrite, copy, nullable) NSData *binaryBody;
 @end
 
 @implementation DSHHostBridgeRequest
@@ -144,6 +145,14 @@ static const NSTimeInterval kSocketTimeout = 15;
     }];
 }
 
+- (void)registerBinaryRoute:(NSString *)method path:(NSString *)path capability:(NSString *)capability maximumBytes:(NSUInteger)maximumBytes handler:(DSHHostBridgeHandler)handler {
+    NSParameterAssert(capability.length && maximumBytes > 0 && maximumBytes <= 128 * 1024);
+    NSString *key = [NSString stringWithFormat:@"%@ %@", method.uppercaseString, path];
+    @synchronized (self.routes) {
+        self.routes[key] = @{ @"capability":capability, @"handler":[handler copy], @"binaryLimit":@(maximumBytes) };
+    }
+}
+
 #pragma mark Lifecycle
 
 - (BOOL)start {
@@ -217,6 +226,10 @@ static const NSTimeInterval kSocketTimeout = 15;
     struct timeval tv = { .tv_sec = (int) kSocketTimeout };
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    // A cancelled/interrupted upload may close while the reply is being sent.
+    // Keep that ordinary EPIPE local to this request instead of killing DSH.
+    int noSigPipe = 1;
+    setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
     dispatch_async(self.queue, ^{ [self serveConnection:client]; });
 }
 
@@ -230,7 +243,7 @@ static const NSTimeInterval kSocketTimeout = 15;
         ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
         if (n <= 0) { close(fd); return; }
         [buffer appendBytes:chunk length:n];
-        if (buffer.length > kMaxRequestBytes) {
+        if (buffer.length > 64 * 1024) {
             [self sendResponse:[DSHHostBridgeResponse errorWithStatus:413 code:@"invalid_request" message:@"request too large" recoverable:NO] to:fd];
             [self finishConnection:fd];
             return;
@@ -259,9 +272,18 @@ static const NSTimeInterval kSocketTimeout = 15;
     }
 
     // 3. Read the body, if the request has one.
-    NSUInteger contentLength = (NSUInteger) [headers[@"content-length"] integerValue];
+    NSString *lengthHeader = headers[@"content-length"] ?: @"0";
+    if ([lengthHeader rangeOfString:@"^(0|[1-9][0-9]{0,9})$" options:NSRegularExpressionSearch].location == NSNotFound || headers[@"transfer-encoding"]) {
+        [self sendResponse:[DSHHostBridgeResponse errorWithStatus:400 code:@"invalid_request" message:@"A bounded Content-Length is required; transfer encoding is not supported." recoverable:NO] to:fd];
+        [self finishConnection:fd]; return;
+    }
+    NSUInteger contentLength = (NSUInteger)lengthHeader.longLongValue;
     NSUInteger bodyStart = split.location + split.length;
-    if (contentLength > kMaxRequestBytes) {
+    NSString *routePath = [requestLine[1] componentsSeparatedByString:@"?"].firstObject;
+    NSDictionary *route;
+    @synchronized (self.routes) { route = self.routes[[NSString stringWithFormat:@"%@ %@",[requestLine[0] uppercaseString],routePath]]; }
+    NSUInteger limit = route[@"binaryLimit"] ? [route[@"binaryLimit"] unsignedIntegerValue] : kMaxRequestBytes;
+    if (contentLength > limit) {
         [self sendResponse:[DSHHostBridgeResponse errorWithStatus:413 code:@"invalid_request" message:@"body too large" recoverable:NO] to:fd];
         [self finishConnection:fd];
         return;
@@ -349,7 +371,12 @@ static const NSTimeInterval kSocketTimeout = 15;
     }
 
     NSDictionary *json = nil;
-    if (body.length) {
+    BOOL binary = route[@"binaryLimit"] != nil;
+    if (binary) {
+        NSString *type = [headers[@"content-type"] componentsSeparatedByString:@";"].firstObject.lowercaseString;
+        if (![type isEqualToString:@"application/octet-stream"] || !body.length || body.length > [route[@"binaryLimit"] unsignedIntegerValue])
+            return [DSHHostBridgeResponse errorWithStatus:400 code:@"invalid_request" message:@"Send a bounded application/octet-stream chunk." recoverable:NO];
+    } else if (body.length) {
         id parsed = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
         if (![parsed isKindOfClass:NSDictionary.class])
             return [DSHHostBridgeResponse errorWithStatus:400 code:@"invalid_request" message:@"body must be a JSON object" recoverable:NO];
@@ -362,6 +389,7 @@ static const NSTimeInterval kSocketTimeout = 15;
     request.query = query;
     request.headers = headers;
     request.json = json;
+    request.binaryBody = binary ? body : nil;
 
     DSHHostBridgeHandler handler = route[@"handler"];
     DSHHostBridgeResponse *response;
@@ -371,8 +399,11 @@ static const NSTimeInterval kSocketTimeout = 15;
     } @catch (NSException *exception) {
         response = [DSHHostBridgeResponse errorWithStatus:500 code:@"internal" message:exception.reason ?: @"handler failed" recoverable:NO];
     }
-    [self log:method target:path outcome:[NSString stringWithFormat:@"%ld", (long) response.status]];
-    if (capability)
+    // A 512 MiB export may contain thousands of chunks. Keep errors, not a
+    // per-chunk log/activity flood; no session credentials or bytes are logged.
+    if (!binary || response.status >= 400)
+        [self log:method target:path outcome:[NSString stringWithFormat:@"%ld", (long) response.status]];
+    if (capability && !binary)
         [DSHActivityLog.shared recordSource:DSHActivitySourceCapability
                                        name:capability
                                      detail:[self describeRequest:request]

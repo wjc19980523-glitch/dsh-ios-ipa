@@ -43,6 +43,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, copy) NSDictionary<NSString *, NSString *> *query;
 @property (nonatomic, readonly, copy) NSDictionary<NSString *, NSString *> *headers;
 @property (nonatomic, readonly, copy, nullable) NSDictionary *json;  // parsed body, if any
+/// Present only for explicitly registered, bounded binary routes. Never JSON/base64.
+@property (nonatomic, readonly, copy, nullable) NSData *binaryBody;
 /// Query or body value as a bounded integer (`fallback` when absent/invalid).
 - (NSInteger)integerFor:(NSString *)key fallback:(NSInteger)fallback min:(NSInteger)min max:(NSInteger)max;
 @end
@@ -74,6 +76,13 @@ typedef DSHHostBridgeResponse *_Nonnull (^DSHHostBridgeHandler)(DSHHostBridgeReq
                  path:(NSString *)path
            capability:(nullable NSString *)capability
               handler:(DSHHostBridgeHandler)handler;
+
+/// Separate binary ingress; leaves the existing JSON ceiling unchanged.
+- (void)registerBinaryRoute:(NSString *)method
+                       path:(NSString *)path
+                 capability:(NSString *)capability
+               maximumBytes:(NSUInteger)maximumBytes
+                    handler:(DSHHostBridgeHandler)handler;
 
 /// Number of requests served since start (for tests and the log).
 @property (nonatomic, readonly) NSUInteger requestCount;

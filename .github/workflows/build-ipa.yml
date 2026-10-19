@@ -24,7 +24,7 @@ on:
         type: boolean
         default: false
       force_rootfs:
-        description: "Rebuild the guest rootfs even if the cache hits"
+        description: "Ignore cache and restore the verified pinned guest rootfs"
         type: boolean
         default: false
       rootfs_focus:
@@ -63,6 +63,12 @@ on:
       - "tests/ui-dialog-observer-test.mjs"
       - "tests/workspace-export-test.mjs"
       - "tests/fixtures/cloud-build/**"
+      - "scripts/restore-pinned-rootfs.py"
+      - "tests/pinned-rootfs-restore-test.py"
+      - "scripts/check-workspace-export-app.py"
+      - "tests/workspace-export-app-test.py"
+      - "scripts/check-required-export-tests.py"
+      - "tests/required-export-tests-test.py"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
@@ -250,12 +256,14 @@ jobs:
           echo "ok: real VDSO built at $VDSO"
           ls -lh "$VDSO"
 
-      - name: Build guest rootfs (Alpine + Node + dsh)
+      - name: Restore pinned rootfs on cache miss
         if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p cilogs
-          make rootfs 2>&1 | tee cilogs/02-rootfs.log
+          python3 scripts/restore-pinned-rootfs.py --output build/root.tar.gz --json-output cilogs/pinned-rootfs.json
 
       - name: Verify rootfs
         run: |
@@ -272,6 +280,10 @@ jobs:
 
       - name: Execute simulator XCTest (units + real guest integration + UI)
         run: bash scripts/run-xctests.sh
+
+      - name: Require all workspace export Native tests and original confirmations
+        id: required_exports
+        run: python3 scripts/check-required-export-tests.py --results-dir build/TestResults --json-output cilogs/required-export-tests.json
 
       - name: Upload XCTest result bundles
         if: always()
@@ -294,7 +306,7 @@ jobs:
           python3 scripts/check-verification-gate.py 2>&1 | tee cilogs/verification-gate.log
 
       - name: Archive app (unsigned)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success' }}
         run: |
           set -euo pipefail
           mkdir -p cilogs
@@ -315,8 +327,13 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             archive 2>&1 | tee cilogs/04-archive.log
 
+      - name: Verify archived workspace export components
+        id: archive_contents
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success' }}
+        run: python3 scripts/check-workspace-export-app.py --app build/DSH.xcarchive/Products/Applications/DSH.app --source-root "$PWD" --json-output cilogs/workspace-export-app.json
+
       - name: Package unsigned IPA
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success' && steps.archive_contents.outcome == 'success' }}
         id: package
         run: |
           set -euo pipefail
@@ -345,7 +362,7 @@ jobs:
           echo "ipa_name=${IPA_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Verify IPA contents
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success' && steps.archive_contents.outcome == 'success' }}
         run: |
           set -euo pipefail
           IPA="build/ipa/Payload"
@@ -372,7 +389,7 @@ jobs:
           ls "$IPA/DSH.app" | head -40
 
       - name: Upload IPA
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success' && steps.archive_contents.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: DSH-unsigned-ipa
@@ -414,6 +431,9 @@ jobs:
     name: Verify guest image boots and dsh serves (${{ github.event.inputs.runner_label || 'xcode-27' }})
     runs-on: ${{ github.event.inputs.runner_label || 'xcode-27' }}
     timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
     env:
       DSH_ROOTFS_FOCUS: ${{ github.event.inputs.rootfs_focus || 'full' }}
       DSH_GUEST_INITIAL_SAMPLE_AFTER: ${{ github.event.inputs.rootfs_focus == 'wrong-token' && '10' || '0' }}
@@ -436,6 +456,7 @@ jobs:
 
       - name: Restore guest rootfs cache
         id: rootfs-cache
+        if: ${{ github.event.inputs.force_rootfs != 'true' }}
         uses: actions/cache@v4
         with:
           path: build/root.tar.gz
@@ -450,12 +471,14 @@ jobs:
           (cd ish-arm64 && meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release -Ddebug=true)
           make emulator 2>&1 | tee cilogs-verify/01-emulator.log
 
-      - name: Build guest rootfs (only if the cache did not restore it)
+      - name: Restore pinned rootfs on cache miss
         if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p cilogs-verify
-          make rootfs 2>&1 | tee cilogs-verify/02-rootfs.log
+          python3 scripts/restore-pinned-rootfs.py --output build/root.tar.gz --json-output cilogs-verify/pinned-rootfs.json
 
       - name: Verify rootfs present
         run: |
@@ -470,6 +493,9 @@ jobs:
           node --test tests/ui-dialog-observer-test.mjs 2>&1 | tee cilogs-verify/ui-dialog-observer.log
           DSH_ONBOARDING_ROOTFS_REQUIRED=1 node --test tests/onboarding-touch-test.mjs 2>&1 | tee cilogs-verify/onboarding-touch.log
           DSH_TAPGAME_IPA=tests/fixtures/cloud-build/TapGame_unsigned.ipa node --test tests/workspace-export-test.mjs 2>&1 | tee cilogs-verify/workspace-export.log
+          python3 tests/pinned-rootfs-restore-test.py 2>&1 | tee cilogs-verify/pinned-rootfs-restore-tests.log
+          python3 tests/workspace-export-app-test.py 2>&1 | tee cilogs-verify/workspace-export-app-tests.log
+          python3 tests/required-export-tests-test.py 2>&1 | tee cilogs-verify/required-export-tests-tests.log
           python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
           python3 tests/observer-timing-test.py 2>&1 | tee cilogs-verify/observer-timing.log
           python3 tests/runner-resource-test.py 2>&1 | tee cilogs-verify/runner-resource.log

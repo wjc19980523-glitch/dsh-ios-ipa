@@ -82,9 +82,26 @@ The regression fixture `tests/fixtures/cloud-build/TapGame_unsigned.ipa` is
 Its provenance is adjacent to the fixture. The fixture is never signed or run.
 Local Codex gh credentials are not evidence of authorization inside the DSH Guest.
 
-Remote writes need explicit user consent. No source push or workflow dispatch
-has been authorized for this feature yet. A request with an uncertain dispatch
-outcome must retain `dispatch_unknown` and never automatically dispatch again.
+The user authorized only the `feature/workspace-ipa-export` push, Gate A macOS
+validation and one unsigned Build 30 after all gates pass on 2026-10-19.
+This does not authorize Gate B activation, signing, installation, a Release or
+stable-branch changes. A request with an uncertain dispatch outcome must retain
+`dispatch_unknown` and never automatically dispatch again.
+
+## CI acceptance gates
+
+A cache miss restores the exact original RootFS from verified Build 29 artifact
+12145352465 (successful run 39148238106), rather than rebuilding a changing
+Alpine image. The read-only restore checks official provenance, all archive CRCs,
+fixed outer/IPA hashes and the existing RootFS size/hash before publication.
+An expired or unavailable original fails closed; the image pin is never relaxed.
+
+After real simulator XCTest execution, a separate gate requires each of the 46
+new tests and five original confirmation tests to occur exactly once as Success
+in the actual xcresult database, with no skip or expected failure. Before IPA
+packaging, another gate checks Build 30 identity, unsigned arm64 device code,
+both Native classes, all 13 bundled resources and the unchanged RootFS. Portable
+tests of these gate readers are controls, not evidence of Native execution.
 
 ## Validation status and remaining acceptance
 

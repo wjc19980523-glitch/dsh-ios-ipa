@@ -190,10 +190,15 @@ from pathlib import Path
 workflow = Path('.github/workflows/build-ipa.yml').read_text()
 build_input = workflow.split('      build_ipa:', 1)[1].split('      force_rootfs:', 1)[0]
 assert 'type: boolean' in build_input and 'default: false' in build_input
-gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' }}"
-for name in ('Archive app (unsigned)', 'Package unsigned IPA', 'Verify IPA contents', 'Upload IPA'):
+gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa && steps.verification_gate.outcome == 'success' && steps.required_exports.outcome == 'success'"
+for name in ('Archive app (unsigned)', 'Verify archived workspace export components', 'Package unsigned IPA', 'Verify IPA contents', 'Upload IPA'):
     step = workflow.split('      - name: ' + name + '\n', 1)[1].split('      - name:', 1)[0]
-    assert gate in step, name + ' lacks the manual and same-attempt verification IPA gates'
+    assert gate in step, name + ' lacks the manual, actual required XCTest and same-attempt guest IPA gates'
+    if name in ('Package unsigned IPA', 'Verify IPA contents', 'Upload IPA'):
+        assert "steps.archive_contents.outcome == 'success'" in step, name + ' lacks archive inclusion gate'
+assert 'id: required_exports' in workflow and 'scripts/check-required-export-tests.py --results-dir build/TestResults' in workflow
+assert 'id: archive_contents' in workflow and 'scripts/check-workspace-export-app.py --app build/DSH.xcarchive/Products/Applications/DSH.app' in workflow
+assert workflow.count('python3 scripts/restore-pinned-rootfs.py --output build/root.tar.gz') == 2
 step = workflow.split("      - name: Require this attempt's guest verification before IPA\n", 1)[1].split('      - name:', 1)[0]
 assert 'id: verification_gate' in step and 'python3 scripts/check-verification-gate.py' in step
 assert "if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_ipa }}" in step

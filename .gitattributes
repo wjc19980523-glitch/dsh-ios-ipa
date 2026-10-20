@@ -3,5 +3,7 @@ tests/session-lease-* text eol=lf
 app/WebFetchTransport.bundle/* text eol=lf
 tests/web-fetch-* text eol=lf
 app/JobTracking.bundle/* text eol=lf
+app/OnboardingInteraction.bundle/* text eol=lf
+tests/fixtures/welcome-touch-footer.js text eol=lf
 tests/job-* text eol=lf
 tests/development-tools-test.mjs text eol=lf

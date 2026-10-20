@@ -56,9 +56,10 @@ class ArchiveGateTests(unittest.TestCase):
         for bundle, names in GATE.BUNDLES.items():
             for name in names:
                 relative = "app/" + bundle + "/" + name
-                # Immutable Git blob models the LF checkout used on the Mac;
-                # a Windows checkout's CRLF filter must not break this fixture.
-                data = subprocess.check_output(["git", "-C", str(ROOT), "show", "HEAD:" + relative])
+                # Use the current checkout, including a newly added canonical
+                # resource before commit. Do not normalize resource bytes: the
+                # production gate must compare the exact archive/source pair.
+                data = (ROOT / relative).read_bytes()
                 src = cls.source / relative
                 src.parent.mkdir(parents=True, exist_ok=True)
                 src.write_bytes(data)
@@ -106,15 +107,34 @@ class ArchiveGateTests(unittest.TestCase):
         (self.app / "JobTracking.bundle/manifest.json").write_bytes(data)
         (self.source_case / "app/JobTracking.bundle/manifest.json").write_bytes(data)
 
-    def test_actual_production_pins_and_thirteen_resource_contract(self):
+    def write_onboarding_manifest(self, data):
+        (self.app / "OnboardingInteraction.bundle/manifest.json").write_bytes(data)
+        (self.source_case / "app/OnboardingInteraction.bundle/manifest.json").write_bytes(data)
+
+    def edit_onboarding_manifest(self, edit):
+        manifest = json.loads((self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes())
+        edit(manifest)
+        self.write_onboarding_manifest(json.dumps(manifest).encode())
+
+    def test_actual_production_pins_and_fourteen_resource_contract(self):
         self.assertEqual(PINNED_ROOT_BYTES, 157427502)
         self.assertEqual(PINNED_ROOT_SHA, "d3e055a6f98cc5d508a502aed88c3fca3c75f7b3217ee257d7e4773337d903a0")
-        self.assertEqual(sum(map(len, GATE.BUNDLES.values())), 13)
+        self.assertEqual(sum(map(len, GATE.BUNDLES.values())), 14)
+        self.assertEqual(GATE.ONBOARDING_ORIGINAL_BYTES, 186641)
+        self.assertEqual(GATE.ONBOARDING_ORIGINAL_SHA256, "7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa")
+        self.assertEqual(GATE.ONBOARDING_BUILD29_BYTES, 191089)
+        self.assertEqual(GATE.ONBOARDING_BUILD29_SHA256, "b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5")
+        self.assertEqual(GATE.ONBOARDING_PATCHED_BYTES, 200391)
+        self.assertEqual(GATE.ONBOARDING_PATCHED_SHA256, "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c")
 
     def test_valid_synthetic_app_contains_both_native_classes_and_all_resources(self):
         result = self.check()
-        self.assertEqual(result["bundled_resource_count"], 13)
+        self.assertEqual(result["bundled_resource_count"], 14)
         self.assertEqual(result["main_executable"]["slices"][0]["required_objc_class_names_found"], sorted(GATE.NATIVE_CLASSES))
+        upgrade = result["onboarding_canonical_upgrade"]
+        self.assertEqual(upgrade["replayed_sha256"], GATE.ONBOARDING_PATCHED_SHA256)
+        self.assertEqual(upgrade["replacement_count"], 5)
+        self.assertIs(upgrade["canonical_is_installable_guest_file"], False)
 
     def test_old_build_rejected(self):
         self.change_info("CFBundleVersion", "29")
@@ -158,7 +178,7 @@ class ArchiveGateTests(unittest.TestCase):
         names_start = struct.unpack_from("<I", data, name_size_offset + 8)[0]
         data[names_start + old_size:names_start + old_size + 2] = b"\xc1\0"
         (self.app / "DSH").write_bytes(data)
-        self.assertEqual(self.check()["bundled_resource_count"], 13)
+        self.assertEqual(self.check()["bundled_resource_count"], 14)
 
     def test_main_code_signature_command_rejected(self):
         (self.app / "DSH").write_bytes(macho(signed=True))
@@ -225,6 +245,120 @@ class ArchiveGateTests(unittest.TestCase):
             item["sha256"] = hashlib.sha256(data).hexdigest()
         self.edit_manifest(edit)
         with self.assertRaises(GATE.Rejected): self.check()
+
+    def test_missing_onboarding_canonical_resource_rejected(self):
+        (self.app / "OnboardingInteraction.bundle" / GATE.ONBOARDING_SOURCE).unlink()
+        with self.assertRaisesRegex(GATE.Rejected, "missing or unexpected bundled resources"): self.check()
+
+    def test_onboarding_cannot_include_an_additional_resource(self):
+        (self.app / "OnboardingInteraction.bundle/foreign.js").write_bytes(b"unapproved")
+        with self.assertRaisesRegex(GATE.Rejected, "missing or unexpected bundled resources"): self.check()
+
+    def test_onboarding_canonical_hash_is_pinned_even_when_source_matches(self):
+        for base in (self.app, self.source_case / "app"):
+            path = base / "OnboardingInteraction.bundle" / GATE.ONBOARDING_SOURCE
+            data = bytearray(path.read_bytes()); data[0] ^= 1; path.write_bytes(data)
+        with self.assertRaisesRegex(GATE.Rejected, "Onboarding canonical bytes or hash differs"): self.check()
+
+    def test_onboarding_canonical_declaration_has_only_fixed_source_and_hash(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        variants = [None, {"source": "session-backend-original.js", "sha256": GATE.ONBOARDING_ORIGINAL_SHA256},
+                    {"source": GATE.ONBOARDING_SOURCE, "sha256": "0" * 64},
+                    {"source": GATE.ONBOARDING_SOURCE, "sha256": GATE.ONBOARDING_ORIGINAL_SHA256, "target": "/root/user"}]
+        for value in variants:
+            with self.subTest(value=value):
+                self.write_onboarding_manifest(valid)
+                self.edit_onboarding_manifest(lambda m: m["patches"][0].update(original_source=value))
+                with self.assertRaisesRegex(GATE.Rejected, "Onboarding canonical declaration differs"): self.check()
+        self.write_onboarding_manifest(valid)
+        self.edit_onboarding_manifest(lambda m: m["patches"][0].pop("original_source"))
+        with self.assertRaisesRegex(GATE.Rejected, "Onboarding patch shape differs"): self.check()
+
+    def test_onboarding_previous_whitelist_cannot_expand_or_accept_arbitrary_rollback(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for previous in ([], [GATE.ONBOARDING_ORIGINAL_SHA256], ["0" * 64], GATE.ONBOARDING_BUILD29_SHA256,
+                         [GATE.ONBOARDING_BUILD29_SHA256, "0" * 64], [GATE.ONBOARDING_BUILD29_SHA256] * 2):
+            with self.subTest(previous=previous):
+                self.write_onboarding_manifest(valid)
+                self.edit_onboarding_manifest(lambda m: m["patches"][0].update(previous_sha256=previous))
+                with self.assertRaisesRegex(GATE.Rejected, "Onboarding previous-version whitelist differs"): self.check()
+
+    def test_onboarding_cannot_redirect_to_another_package_or_user_file(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for target in ("/root/user/config", "/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js",
+                       "/usr/local/lib/node_modules/@deepseek-ai/dsh-api-session-backend/lib/index.js",
+                       GATE.ONBOARDING_TARGET + "/../client.js"):
+            with self.subTest(target=target):
+                self.write_onboarding_manifest(valid)
+                self.edit_onboarding_manifest(lambda m: m["patches"][0].update(target=target))
+                with self.assertRaisesRegex(GATE.Rejected, "Onboarding patch target or pinned identity differs"): self.check()
+
+    def test_onboarding_canonical_must_never_be_installable_guest_file(self):
+        self.edit_onboarding_manifest(lambda m: m.update(files=[{"source": GATE.ONBOARDING_SOURCE,
+                                                               "target": "/root/user/copy.js"}]))
+        with self.assertRaisesRegex(GATE.Rejected, "empty Guest-file contract differs"): self.check()
+
+    def test_onboarding_rootfs_schema_and_root_shape_are_fixed(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for edit in (lambda m: m.update(schema=True), lambda m: m.update(schema=2),
+                     lambda m: m.update(rootfs_sha256="0" * 64), lambda m: m.update(extra=True)):
+            with self.subTest(edit=edit):
+                self.write_onboarding_manifest(valid); self.edit_onboarding_manifest(edit)
+                with self.assertRaises(GATE.Rejected): self.check()
+
+    def test_onboarding_requires_one_exact_patch_shape(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for edit in (lambda m: m.update(patches=[]), lambda m: m["patches"].append(m["patches"][0]),
+                     lambda m: m["patches"][0].update(extra="unapproved")):
+            with self.subTest(edit=edit):
+                self.write_onboarding_manifest(valid); self.edit_onboarding_manifest(edit)
+                with self.assertRaises(GATE.Rejected): self.check()
+
+    def test_onboarding_requires_all_five_exact_replacements(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for edit in (lambda m: m["patches"][0]["replacements"].pop(),
+                     lambda m: m["patches"][0]["replacements"].append(m["patches"][0]["replacements"][-1])):
+            self.write_onboarding_manifest(valid); self.edit_onboarding_manifest(edit)
+            with self.assertRaisesRegex(GATE.Rejected, "Onboarding requires the three API patches"): self.check()
+
+    def test_onboarding_replacement_match_count_is_strict_integer_one(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for value in (True, 0, 2, 1.0, "1"):
+            with self.subTest(value=value):
+                self.write_onboarding_manifest(valid)
+                self.edit_onboarding_manifest(lambda m: m["patches"][0]["replacements"][0].update(count=value))
+                with self.assertRaisesRegex(GATE.Rejected, "one exact match"): self.check()
+
+    def test_onboarding_replacement_shape_and_find_are_validated(self):
+        valid = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        for edit in (lambda r: r.update(extra=True), lambda r: r.update(find=""),
+                     lambda r: r.update(find="no match for this fixture"), lambda r: r.update(replace=None)):
+            self.write_onboarding_manifest(valid)
+            self.edit_onboarding_manifest(lambda m: edit(m["patches"][0]["replacements"][0]))
+            with self.assertRaises(GATE.Rejected): self.check()
+
+    def test_onboarding_preserves_the_three_original_api_patches(self):
+        def edit(manifest):
+            replacement = manifest["patches"][0]["replacements"][0]
+            replacement["replace"] += " "
+        self.edit_onboarding_manifest(edit)
+        with self.assertRaisesRegex(GATE.Rejected, "do not preserve the Build 29 API patch"): self.check()
+
+    def test_onboarding_replayed_final_client_is_pinned(self):
+        def edit(manifest):
+            replacement = manifest["patches"][0]["replacements"][4]
+            replacement["replace"] += " "
+        self.edit_onboarding_manifest(edit)
+        with self.assertRaisesRegex(GATE.Rejected, "Onboarding replay result differs"): self.check()
+
+    def test_onboarding_cannot_declare_an_alternate_new_client_hash(self):
+        self.edit_onboarding_manifest(lambda m: m["patches"][0].update(patched_sha256="0" * 64))
+        with self.assertRaisesRegex(GATE.Rejected, "pinned identity differs"): self.check()
+
+    def test_onboarding_duplicate_json_keys_rejected_even_when_source_matches(self):
+        data = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()
+        self.write_onboarding_manifest(data.replace(b'"schema": 1', b'"schema": 1, "schema": 1', 1))
+        with self.assertRaisesRegex(GATE.Rejected, "duplicate JSON key"): self.check()
 
     def test_embedded_profile_rejected(self):
         (self.app / "embedded.mobileprovision").write_bytes(b"unauthorized profile")

@@ -5,6 +5,9 @@
 
 #import "DSHSceneDelegate.h"
 #import "DSHRootViewController.h"
+#if TARGET_OS_SIMULATOR
+#import "DSHWelcomeTouchFixtureViewController.h"
+#endif
 #import "AppDelegate.h"
 #import "AboutViewController.h"
 #import "DSHHarness.h"
@@ -29,7 +32,9 @@ static BOOL DSHSceneIsXCTestHost(void) {
         // A dedicated local WK fixture shares the hosted-test isolation: no
         // guest boots, and no fixture exists in a device build.
         BOOL optionalCancelFixture = [NSProcessInfo.processInfo.environment[@"DSH_UI_OPTIONAL_CANCEL_FIXTURE"] isEqualToString:@"1"];
-        self.window.rootViewController = optionalCancelFixture ? [[DSHRootViewController alloc] init] : [UIViewController new];
+        BOOL welcomeTouchFixture = [NSProcessInfo.processInfo.environment[@"DSH_UI_WELCOME_TOUCH_FIXTURE"] isEqualToString:@"1"];
+        self.window.rootViewController = welcomeTouchFixture ? [DSHWelcomeTouchFixtureViewController new] :
+            optionalCancelFixture ? [[DSHRootViewController alloc] init] : [UIViewController new];
 #else
         self.window.rootViewController = [UIViewController new];
 #endif

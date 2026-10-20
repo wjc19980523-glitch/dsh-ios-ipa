@@ -12,6 +12,10 @@ static NSString *const DSHSessionPackagePath = @"/usr/local/lib/node_modules/@de
 static NSString *const DSHWebFetchPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
 static NSString *const DSHJobTrackingPackagePath = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
 static NSString *const DSHOnboardingPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js";
+static NSString *const DSHOnboardingOriginalSource = @"onboarding-client-original.js";
+static NSString *const DSHOnboardingOriginalSHA256 = @"7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa";
+static NSString *const DSHOnboardingPreviousSHA256 = @"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5";
+static NSUInteger const DSHOnboardingOriginalSize = 186641;
 static NSUInteger const DSHSessionMaximumFileSize = 4 * 1024 * 1024;
 
 @implementation DSHSessionLifecycleFileInfo
@@ -178,7 +182,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs", @"workspace-export.mjs"] : onboarding ? @[] : @[@"web-fetch-transport.mjs"];
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs", @"workspace-export.mjs"] : onboarding ? @[DSHOnboardingOriginalSource] : @[@"web-fetch-transport.mjs"];
     for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
@@ -297,10 +301,6 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     BOOL session = self.package == DSHVerifiedSystemPackageSession;
     BOOL jobs = self.package == DSHVerifiedSystemPackageJobTracking;
     BOOL onboarding = self.package == DSHVerifiedSystemPackageOnboardingInteraction;
-    // The onboarding helper is inline in this one module; it may not install
-    // additional guest files or use bundle resources as an upgrade base.
-    if (onboarding && self.resources.count != 0)
-        return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"resource whitelist", nil, nil);
     NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : onboarding ? DSHOnboardingPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
@@ -350,6 +350,15 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         !DSHPreviousHashesAreValid(patch[@"previous_sha256"]) ||
         ![patch[@"replacements"] isKindOfClass:NSArray.class] || ![patch[@"replacements"] count])
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package whitelist", nil, nil);
+    id baseRecord = patch[@"original_source"];
+    BOOL onboardingUpgrade = onboarding && baseRecord != nil;
+    if (onboarding) {
+        // The canonical copy is an in-memory upgrade base, never a guest file.
+        // Legacy inline fixtures declare no base and must still have no resources.
+        NSSet *expected = onboardingUpgrade ? [NSSet setWithObject:DSHOnboardingOriginalSource] : [NSSet set];
+        if (![[NSSet setWithArray:self.resources.allKeys] isEqualToSet:expected])
+            return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"resource whitelist", nil, nil);
+    }
     DSHSessionLifecycleFileInfo *packageInfo = nil;
     if (![self validatePath:packagePath allowMissing:NO info:&packageInfo error:error]) return NO;
     NSData *original = [self readPath:packagePath error:error];
@@ -360,19 +369,25 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     if (!alreadyPatched && ![currentHash isEqual:patch[@"original_sha256"]] && !recognizedPrevious)
         return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"unrecognized package hash", packagePath, nil);
     NSData *base = original;
-    id baseRecord = patch[@"original_source"];
     // An upgrade starts from a pinned copy of the original system module;
     // never try to reverse arbitrary source or trust an unknown installed hash.
     if (baseRecord || [patch[@"previous_sha256"] count]) {
-        if (!session || ![baseRecord isKindOfClass:NSDictionary.class] ||
-            ![baseRecord[@"source"] isEqual:@"session-backend-original.js"] ||
-            ![baseRecord[@"sha256"] isEqual:patch[@"original_sha256"]])
+        NSString *source = session ? @"session-backend-original.js" : onboarding ? DSHOnboardingOriginalSource : nil;
+        if (!source || ![baseRecord isKindOfClass:NSDictionary.class] ||
+            ![baseRecord[@"source"] isEqual:source] ||
+            ![baseRecord[@"sha256"] isEqual:patch[@"original_sha256"]] ||
+            (onboarding && ([baseRecord count] != 2 ||
+                            ![patch[@"original_sha256"] isEqual:DSHOnboardingOriginalSHA256] ||
+                            ![patch[@"previous_sha256"] isEqual:@[DSHOnboardingPreviousSHA256]])))
             return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"upgrade base whitelist", nil, nil);
-        NSData *canonical = self.resources[@"session-backend-original.js"];
+        NSData *canonical = self.resources[source];
         if (![canonical isKindOfClass:NSData.class] || canonical.length > DSHSessionMaximumFileSize ||
+            (onboarding && canonical.length != DSHOnboardingOriginalSize) ||
             ![DSHSessionSHA256(canonical) isEqual:patch[@"original_sha256"]])
             return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"upgrade base hash", nil, nil);
-        if (!alreadyPatched) base = canonical;
+        // The new pinned Onboarding shape validates every replacement from its
+        // canonical source even when the installed target is already current.
+        if (!alreadyPatched || onboardingUpgrade) base = canonical;
     }
     NSString *text = [[NSString alloc] initWithData:base encoding:NSUTF8StringEncoding];
     if (!text) return DSHSessionError(error, DSHSessionLifecycleInstallerUnknownSource, @"package UTF-8", packagePath, nil);
@@ -384,7 +399,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
             [replacement[@"count"] unsignedIntegerValue] > DSHSessionMaximumFileSize ||
             [replacement[@"count"] doubleValue] != [replacement[@"count"] unsignedIntegerValue])
             return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"replacement entry", nil, nil);
-        if (alreadyPatched) continue;
+        if (alreadyPatched && !onboardingUpgrade) continue;
         NSString *find = replacement[@"find"];
         NSUInteger count = [text componentsSeparatedByString:find].count - 1;
         if (count != [replacement[@"count"] unsignedIntegerValue])
@@ -397,7 +412,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
             return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"oversized replacement", nil, nil);
         text = [text stringByReplacingOccurrencesOfString:find withString:replacement[@"replace"]];
     }
-    NSData *patched = alreadyPatched ? original : [text dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *patched = alreadyPatched && !onboardingUpgrade ? original : [text dataUsingEncoding:NSUTF8StringEncoding];
     if (patched.length > DSHSessionMaximumFileSize || ![DSHSessionSHA256(patched) isEqual:patch[@"patched_sha256"]])
         return DSHSessionError(error, DSHSessionLifecycleInstallerIntegrityFailure, @"patched package hash", packagePath, nil);
     for (NSDictionary *plan in resourcePlans)
@@ -411,6 +426,8 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     // become visible after all required controller files were verified and fsynced.
     if (!alreadyPatched && ![self atomicInstall:patched atPath:packagePath expectedHash:currentHash
                                   permissions:packageInfo.permissions error:error]) return NO;
+    if (alreadyPatched && onboardingUpgrade &&
+        ![self validateExpectedHash:currentHash atPath:packagePath error:error]) return NO;
     return YES;
 }
 @end

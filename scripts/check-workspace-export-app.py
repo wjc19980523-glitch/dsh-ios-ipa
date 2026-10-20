@@ -25,9 +25,18 @@ BUNDLES = {
     "WebFetchTransport.bundle": ("manifest.json", "web-fetch-transport.mjs"),
     "JobTracking.bundle": ("manifest.json", "development-tools.mjs", "job-ledger.mjs",
         "job-tracking.mjs", "workspace-export.mjs"),
-    "OnboardingInteraction.bundle": ("manifest.json",),
+    "OnboardingInteraction.bundle": ("manifest.json", "onboarding-client-original.js"),
 }
 NATIVE_CLASSES = {"DSHWorkspaceExportStore", "DSHWorkspaceExportCapability"}
+ONBOARDING_SOURCE = "onboarding-client-original.js"
+ONBOARDING_TARGET = "/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js"
+ONBOARDING_ROOTFS_SHA256 = ROOTFS_SHA256
+ONBOARDING_ORIGINAL_BYTES = 186641
+ONBOARDING_ORIGINAL_SHA256 = "7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa"
+ONBOARDING_BUILD29_BYTES = 191089
+ONBOARDING_BUILD29_SHA256 = "b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5"
+ONBOARDING_PATCHED_BYTES = 200391
+ONBOARDING_PATCHED_SHA256 = "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c"
 
 
 class Rejected(Exception):
@@ -41,6 +50,69 @@ def require(condition, message):
 
 def digest_bytes(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "duplicate JSON key in Onboarding manifest")
+        result[key] = value
+    return result
+
+
+def inspect_onboarding(app):
+    """Prove the pinned in-memory upgrade contract; never write a guest file."""
+    directory = app / "OnboardingInteraction.bundle"
+    manifest = json.loads(read_file(directory / "manifest.json", 4 * CHUNK_BYTES),
+                          object_pairs_hook=unique_json_object)
+    require(isinstance(manifest, dict) and
+            set(manifest) == {"schema", "rootfs_sha256", "files", "patches"},
+            "Onboarding manifest shape differs")
+    require(type(manifest["schema"]) is int and manifest["schema"] == 1 and
+            manifest["rootfs_sha256"] == ONBOARDING_ROOTFS_SHA256 and manifest["files"] == [],
+            "Onboarding schema/rootfs or empty Guest-file contract differs")
+    patches = manifest["patches"]
+    require(isinstance(patches, list) and len(patches) == 1 and isinstance(patches[0], dict),
+            "Onboarding requires exactly one patch")
+    patch = patches[0]
+    require(set(patch) == {"target", "original_sha256", "patched_sha256", "replacements",
+                           "original_source", "previous_sha256"}, "Onboarding patch shape differs")
+    require(patch["target"] == ONBOARDING_TARGET and
+            patch["original_sha256"] == ONBOARDING_ORIGINAL_SHA256 and
+            patch["patched_sha256"] == ONBOARDING_PATCHED_SHA256,
+            "Onboarding patch target or pinned identity differs")
+    require(patch["original_source"] == {"source": ONBOARDING_SOURCE, "sha256": ONBOARDING_ORIGINAL_SHA256},
+            "Onboarding canonical declaration differs")
+    require(patch["previous_sha256"] == [ONBOARDING_BUILD29_SHA256],
+            "Onboarding previous-version whitelist differs")
+    canonical = read_file(directory / ONBOARDING_SOURCE, 4 * CHUNK_BYTES)
+    require(len(canonical) == ONBOARDING_ORIGINAL_BYTES and digest_bytes(canonical) == ONBOARDING_ORIGINAL_SHA256,
+            "Onboarding canonical bytes or hash differs")
+    replacements = patch["replacements"]
+    require(isinstance(replacements, list) and len(replacements) == 5,
+            "Onboarding requires the three API patches and two interaction/store patches")
+    text = canonical.decode("utf-8")
+    for index, replacement in enumerate(replacements):
+        require(isinstance(replacement, dict) and set(replacement) == {"find", "replace", "count"},
+                "Onboarding replacement shape differs")
+        find, replace, count = replacement["find"], replacement["replace"], replacement["count"]
+        require(isinstance(find, str) and bool(find) and isinstance(replace, str) and
+                type(count) is int and count == 1, "Onboarding replacement must have one exact match")
+        require(text.count(find) == count, "Onboarding replacement match count differs")
+        text = text.replace(find, replace)
+        encoded = text.encode("utf-8")
+        require(len(encoded) <= 4 * CHUNK_BYTES, "Onboarding replacement exceeds its size bound")
+        if index == 2:
+            require(len(encoded) == ONBOARDING_BUILD29_BYTES and digest_bytes(encoded) == ONBOARDING_BUILD29_SHA256,
+                    "Onboarding first three patches do not preserve the Build 29 API patch")
+    require(len(encoded) == ONBOARDING_PATCHED_BYTES and digest_bytes(encoded) == ONBOARDING_PATCHED_SHA256,
+            "Onboarding replay result differs from the pinned interaction/store client")
+    return {"canonical_source": ONBOARDING_SOURCE, "canonical_bytes": len(canonical),
+            "canonical_sha256": digest_bytes(canonical), "target": ONBOARDING_TARGET,
+            "previous_sha256": [ONBOARDING_BUILD29_SHA256], "replacement_count": len(replacements),
+            "replayed_bytes": len(encoded), "replayed_sha256": digest_bytes(encoded),
+            "canonical_is_installable_guest_file": False,
+            "limit": "resource/replay checks prove inclusion and upgrade inputs; actual Native XCTest proves execution separately"}
 
 
 def regular_file(path, maximum=None):
@@ -225,11 +297,13 @@ def inspect(app, source_root):
     require(read_file(app / "root.tar.gz.sha256", 4096).decode("ascii").strip() == ROOTFS_SHA256,
             "embedded rootfs SHA sidecar differs")
     resources = inspect_resources(app, source_root)
+    onboarding = inspect_onboarding(app)
     return {"info": expected, "main_executable": macho,
             "rootfs": {"bytes": root_bytes, "sha256": root_hash, "decompressed_or_modified": False},
             "bundled_resource_count": len(resources), "bundle_resources": resources,
             "unsigned": {"main_code_signature_present": False, "profile_present": False, "signature_resources_present": False},
             "guest_registration_and_build29_upgrade_hash_present": True,
+            "onboarding_canonical_upgrade": onboarding,
             "untracked_cloud_drafts_included": False}
 
 

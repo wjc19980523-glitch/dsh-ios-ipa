@@ -83,7 +83,7 @@ test('pinned package patch has exact scope and no extra guest resources', () => 
   assert.deepEqual(manifest.files, []); assert.equal(manifest.patches.length, 1);
   assert.equal(patch.target, '/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js');
   assert.equal(patch.original_sha256, '7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa');
-  assert.equal(patch.replacements.length, 3);
+  assert.equal(patch.replacements.length, 5);
   assert.equal(replacement.split(begin).length, 2); assert.equal(replacement.split(end).length, 2);
   assert.match(replacement, /props\.touchCancel === true && props\.cancelLabelKey === "onboardingLater"/);
   assert.match(replacement, /onClick: touchCancel \? cancelOnce : props\.onCancel/);

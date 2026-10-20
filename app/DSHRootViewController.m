@@ -147,71 +147,6 @@ static NSString *const DSHGuestDialogObservationScript =
 "})();\n";
 // END DSH_GUEST_DIALOG_OBSERVER
 
-// Temporary simulator-only diagnosis: no layout queries, DOM mutation,
-// application actions, input reads, or acceptance authorization.
-static NSString *const DSHPassiveGuestDialogEventScript =
-@"(() => {\n"
-"  'use strict';\n"
-"  const bridge = window.webkit?.messageHandlers?.dshGuestDialog;\n"
-"  if (!bridge || window.__dshPassiveDialogEvents) return;\n"
-"  window.__dshPassiveDialogEvents = true;\n"
-"  const started = performance.now();\n"
-"  const kinds = new Map([['Preview Notice', 'welcome'], ['预览版说明', 'welcome'],\n"
-"    ['Add an API key to get started', 'api'], ['添加一个 API Key 开始使用', 'api']]);\n"
-"  const actions = new Map([['Continue', 'welcome'], ['继续', 'welcome'],\n"
-"    ['Configure later', 'api'], ['稍后配置', 'api']]);\n"
-"  const ids = new WeakMap();\n"
-"  let nextId = 0, sequence = 0, stopped = false;\n"
-"  const id = element => {\n"
-"    if (!element) return 0;\n"
-"    if (!ids.has(element)) ids.set(element, ++nextId);\n"
-"    return ids.get(element);\n"
-"  };\n"
-"  const identify = event => {\n"
-"    const action = event.target?.closest?.('button');\n"
-"    const dialog = action?.closest?.('[role=\"dialog\"]');\n"
-"    const heading = dialog?.querySelector('h2');\n"
-"    const kind = heading && kinds.get(heading.textContent.trim());\n"
-"    return kind && actions.get(action.textContent.trim()) === kind ? {action, dialog, kind} : null;\n"
-"  };\n"
-"  const state = item => item ? {\n"
-"    ui_dialog: item.kind, ui_dialog_present: item.dialog.isConnected,\n"
-"    ui_modal_instance: id(item.dialog), ui_action_instance: id(item.action),\n"
-"    ui_action_enabled: !item.action.disabled, ui_action_connected: !!item.action.isConnected, ui_target_action: true\n"
-"  } : {ui_dialog: 'other', ui_target_action: false};\n"
-"  const emit = (phase, record, extra = {}) => {\n"
-"    if (stopped || sequence >= 192) return;\n"
-"    bridge.postMessage({...record, ...extra, ui_phase: phase, ui_sequence: ++sequence,\n"
-"      ui_elapsed_ms: Math.max(0, Math.round(performance.now() - started))});\n"
-"  };\n"
-"  const observe = (event, phase) => {\n"
-"    if (stopped) return;\n"
-"    const item = identify(event);\n"
-"    const extra = {ui_trusted: !!event.isTrusted, ui_default_prevented: !!event.defaultPrevented};\n"
-"    emit(phase, state(item), extra);\n"
-"    queueMicrotask(() => {\n"
-"      if (!stopped) emit('after_event', state(item),\n"
-"        {...extra, ui_default_prevented: !!event.defaultPrevented});\n"
-"    });\n"
-"  };\n"
-"  const listeners = [];\n"
-"  for (const name of ['pointerdown', 'pointerup', 'pointercancel', 'touchstart', 'touchend',\n"
-"      'touchcancel', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click']) {\n"
-"    const listener = event => observe(event, name === 'click' ? 'click_capture' : name);\n"
-"    listeners.push([name, listener, true]);\n"
-"    window.addEventListener(name, listener, {capture: true, passive: true});\n"
-"  }\n"
-"  const bubble = event => observe(event, 'click_bubble');\n"
-"  listeners.push(['click', bubble, false]);\n"
-"  window.addEventListener('click', bubble, {passive: true});\n"
-"  emit('listener_started', {ui_dialog: 'observer'});\n"
-"  setTimeout(() => {\n"
-"    emit('listener_finished', {ui_dialog: 'observer'});\n"
-"    stopped = true;\n"
-"    for (const [name, listener, capture] of listeners) window.removeEventListener(name, listener, capture);\n"
-"  }, 600000);\n"
-"})();\n";
-
 @interface DSHGuestDialogMessageHandler : NSObject <WKScriptMessageHandler>
 @property (nonatomic) NSUInteger count;
 @end
@@ -226,7 +161,7 @@ static NSString *const DSHPassiveGuestDialogEventScript =
     NSMutableDictionary *record = [NSMutableDictionary new];
     for (NSString *key in @[@"ui_dialog", @"ui_phase", @"ui_sequence", @"ui_elapsed_ms", @"ui_modal_instance", @"ui_action_instance",
           @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root",
-          @"ui_action_enabled", @"ui_action_connected", @"ui_action_visible", @"ui_hit_action", @"ui_target_action",
+          @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action",
           @"ui_dialog_present", @"ui_view_width", @"ui_view_height"]) {
         if (body[key]) record[key] = body[key];
     }
@@ -412,9 +347,7 @@ static NSString *const DSHPassiveGuestDialogEventScript =
     config.defaultWebpagePreferences.allowsContentJavaScript = YES;
 #if TARGET_OS_SIMULATOR
     NSString *dialogObservation = NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"];
-    BOOL observeGeometry = [dialogObservation isEqual:@"1"];
-    BOOL observePassiveEvents = [dialogObservation isEqual:@"events"];
-    BOOL observeDialogs = observeGeometry || observePassiveEvents;
+    BOOL observeDialogs = [dialogObservation isEqual:@"1"];
     if ([dialogObservation isEqual:@"0"] || observeDialogs) {
         // Record the mode actually received by the app; neither mode nor this
         // native metadata event queries the DOM or changes the input path.
@@ -424,7 +357,7 @@ static NSString *const DSHPassiveGuestDialogEventScript =
     }
     if (observeDialogs) {
         [config.userContentController addScriptMessageHandler:[DSHGuestDialogMessageHandler new] name:@"dshGuestDialog"];
-        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:(observePassiveEvents ? DSHPassiveGuestDialogEventScript : DSHGuestDialogObservationScript)
+        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:DSHGuestDialogObservationScript
             injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
     }
 #endif

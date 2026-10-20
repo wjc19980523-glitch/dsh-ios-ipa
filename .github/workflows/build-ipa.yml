@@ -69,6 +69,10 @@ on:
       - "tests/workspace-export-app-test.py"
       - "scripts/check-required-export-tests.py"
       - "tests/required-export-tests-test.py"
+      - "scripts/check-required-welcome-tests.py"
+      - "tests/required-welcome-tests-test.py"
+      - "tests/welcome-touch*.mjs"
+      - "tests/fixtures/welcome-touch-footer.js"
       - "ish-arm64/**"
       - "app/**"
       - "scripts/gen-xcode-project.rb"
@@ -279,13 +283,14 @@ jobs:
           make project 2>&1 | tee cilogs/03-project.log
 
       - name: Execute simulator XCTest (units + real guest integration + UI)
-        env:
-          DSH_UI_WELCOME_EVENTS_ONLY: "1" # Temporary diagnostic, always exits nonzero.
         run: bash scripts/run-xctests.sh
 
       - name: Require all workspace export Native tests and original confirmations
         id: required_exports
-        run: python3 scripts/check-required-export-tests.py --results-dir build/TestResults --json-output cilogs/required-export-tests.json
+        run: |
+          set -euo pipefail
+          python3 scripts/check-required-export-tests.py --results-dir build/TestResults --json-output cilogs/required-export-tests.json
+          python3 scripts/check-required-welcome-tests.py --results-dir build/TestResults --logs-dir cilogs --json-output cilogs/required-welcome-tests.json
 
       - name: Upload XCTest result bundles
         if: always()
@@ -494,10 +499,12 @@ jobs:
           set -euo pipefail
           node --test tests/ui-dialog-observer-test.mjs 2>&1 | tee cilogs-verify/ui-dialog-observer.log
           DSH_ONBOARDING_ROOTFS_REQUIRED=1 node --test tests/onboarding-touch-test.mjs 2>&1 | tee cilogs-verify/onboarding-touch.log
+          node --test tests/welcome-touch-test.mjs 2>&1 | tee cilogs-verify/welcome-touch.log
           DSH_TAPGAME_IPA=tests/fixtures/cloud-build/TapGame_unsigned.ipa node --test tests/workspace-export-test.mjs 2>&1 | tee cilogs-verify/workspace-export.log
           python3 tests/pinned-rootfs-restore-test.py 2>&1 | tee cilogs-verify/pinned-rootfs-restore-tests.log
           python3 tests/workspace-export-app-test.py 2>&1 | tee cilogs-verify/workspace-export-app-tests.log
           python3 tests/required-export-tests-test.py 2>&1 | tee cilogs-verify/required-export-tests-tests.log
+          python3 tests/required-welcome-tests-test.py 2>&1 | tee cilogs-verify/required-welcome-tests-tests.log
           python3 tests/helper-diagnostics-test.py 2>&1 | tee cilogs-verify/helper-diagnostics.log
           python3 tests/observer-timing-test.py 2>&1 | tee cilogs-verify/observer-timing.log
           python3 tests/runner-resource-test.py 2>&1 | tee cilogs-verify/runner-resource.log

@@ -40,6 +40,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
 @property (nonatomic) NSString *failureTarget;
 @property (nonatomic) NSUInteger failuresRemaining;
 @property (nonatomic, copy) void (^onCreate)(void);
+@property (nonatomic, copy) void (^onCloseRead)(NSString *path);
 - (BOOL)failOperation:(NSString *)operation path:(NSString *)path error:(NSError **)error;
 @end
 
@@ -72,7 +73,9 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     NSAssert(!self.closed, @"Fixture handles must close exactly once");
     self.closed = YES;
     self.filesystem.openHandles--;
-    return ![self.filesystem failOperation:self.writable ? @"closeWrite" : @"closeRead" path:self.path error:error];
+    BOOL success = ![self.filesystem failOperation:self.writable ? @"closeWrite" : @"closeRead" path:self.path error:error];
+    if (!self.writable && self.filesystem.onCloseRead) self.filesystem.onCloseRead(self.path);
+    return success;
 }
 @end
 
@@ -160,6 +163,7 @@ static NSString *DSHInstallerTestHash(NSData *data) {
 @property (nonatomic) NSDictionary<NSString *, NSData *> *userSentinels;
 @property (nonatomic) NSData *original;
 @property (nonatomic) NSData *patched;
+@property (nonatomic) NSData *onboardingPrevious;
 @end
 
 @implementation DSHSessionLifecycleInstallerTests
@@ -811,9 +815,256 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertEqual([patch[@"patched_sha256"] length], 64u);
     XCTAssertNotEqualObjects(patch[@"original_sha256"], patch[@"patched_sha256"]);
     XCTAssertGreaterThan([patch[@"replacements"] count], 0u);
-    XCTAssertNil(patch[@"original_source"]);
-    XCTAssertEqual([patch[@"previous_sha256"] count], 0u);
+    NSDictionary *base = patch[@"original_source"];
+    XCTAssertTrue([base isKindOfClass:NSDictionary.class]);
+    if (![base isKindOfClass:NSDictionary.class]) return;
+    XCTAssertEqualObjects(base, (@{@"source": @"onboarding-client-original.js",
+        @"sha256": @"7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa"}));
+    XCTAssertEqualObjects(patch[@"original_sha256"], base[@"sha256"]);
+    XCTAssertEqualObjects(patch[@"previous_sha256"],
+        (@[@"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5"]));
+    NSData *canonical = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"onboarding-client-original.js"]];
+    XCTAssertNotNil(canonical);
+    XCTAssertEqual(canonical.length, 186641u);
+    XCTAssertEqualObjects(DSHInstallerTestHash(canonical), base[@"sha256"]);
 }
+
+// Actual bundled canonical bytes are required. These tests must not skip when
+// the future Onboarding upgrade resource/manifest has not been integrated.
+- (NSData *)applyOnboardingReplacements:(NSArray *)replacements toData:(NSData *)original {
+    NSString *text = [[NSString alloc] initWithData:original encoding:NSUTF8StringEncoding];
+    XCTAssertNotNil(text);
+    if (!text) return nil;
+    for (NSDictionary *replacement in replacements) {
+        NSString *find = replacement[@"find"], *value = replacement[@"replace"];
+        NSUInteger count = [text componentsSeparatedByString:find].count - 1;
+        XCTAssertEqual(count, [replacement[@"count"] unsignedIntegerValue]);
+        if (count != [replacement[@"count"] unsignedIntegerValue]) return nil;
+        text = [text stringByReplacingOccurrencesOfString:find withString:value];
+    }
+    return [text dataUsingEncoding:NSUTF8StringEncoding];
+}
+- (BOOL)prepareActualOnboardingUpgradeFixture {
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:@"OnboardingInteraction" withExtension:@"bundle"];
+    NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]] : nil;
+    NSData *canonical = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"onboarding-client-original.js"]] : nil;
+    XCTAssertNotNil(manifestData); XCTAssertNotNil(canonical);
+    if (!manifestData || !canonical) return NO;
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+    XCTAssertEqualObjects(manifest[@"files"], @[]);
+    XCTAssertEqual([manifest[@"patches"] count], 1u);
+    NSDictionary *patch = [manifest[@"patches"] firstObject];
+    NSArray *replacements = patch[@"replacements"];
+    XCTAssertGreaterThan(replacements.count, 3u, @"retain the three original API touch patches and add the explicit Welcome change");
+    if (replacements.count <= 3) return NO;
+    XCTAssertEqual(canonical.length, 186641u);
+    XCTAssertEqualObjects(DSHInstallerTestHash(canonical), @"7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa");
+    NSData *previous = [self applyOnboardingReplacements:[replacements subarrayWithRange:NSMakeRange(0, 3)] toData:canonical];
+    XCTAssertEqual(previous.length, 191089u);
+    XCTAssertEqualObjects(DSHInstallerTestHash(previous), @"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5");
+    NSData *patched = [self applyOnboardingReplacements:replacements toData:canonical];
+    XCTAssertNotNil(patched);
+    XCTAssertEqualObjects(DSHInstallerTestHash(patched), patch[@"patched_sha256"]);
+    if (!previous || !patched) return NO;
+    self.manifest = manifest;
+    self.resources = @{@"onboarding-client-original.js": canonical};
+    self.original = canonical; self.onboardingPrevious = previous; self.patched = patched;
+    NSString *parent = DSHInstallerTestOnboarding.stringByDeletingLastPathComponent;
+    while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+    self.filesystem.files[DSHInstallerTestOnboarding] = previous;
+    return YES;
+}
+- (void)testActualOnboardingFreshAndBuild29UpgradeAreExactAndIdempotent {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSDictionary *peers = [self.filesystem.files copy];
+    for (NSData *source in @[self.original, self.onboardingPrevious]) {
+        self.filesystem.files[DSHInstallerTestOnboarding] = source;
+        NSUInteger writes = self.filesystem.writeCalls, renames = self.filesystem.renamedTargets.count;
+        NSError *error = nil;
+        XCTAssertTrue([self installOnboarding:&error], @"%@", error);
+        XCTAssertNil(error);
+        XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], self.patched);
+        XCTAssertEqual(self.filesystem.writeCalls, writes + 1);
+        XCTAssertEqualObjects([self.filesystem.renamedTargets subarrayWithRange:NSMakeRange(renames, 1)], (@[DSHInstallerTestOnboarding]));
+        writes = self.filesystem.writeCalls;
+        XCTAssertTrue([self installOnboarding:&error], @"%@", error);
+        XCTAssertNil(error);
+        XCTAssertEqual(self.filesystem.writeCalls, writes);
+    }
+    for (NSString *path in peers)
+        if (![path isEqual:DSHInstallerTestOnboarding]) XCTAssertEqualObjects(self.filesystem.files[path], peers[path]);
+}
+- (void)testOnboardingUpgradeResourceWhitelistAndHashFailEvenWhenAlreadyCurrent {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSDictionary *valid = self.resources;
+    NSData *canonical = valid[@"onboarding-client-original.js"];
+    NSArray *invalid = @[@{}, @{@"onboarding-client-original.js": DSHInstallerTestData(@"corrupt")},
+        @{@"onboarding-client-original.js": [NSMutableData dataWithLength:4 * 1024 * 1024 + 1]},
+        @{@"onboarding-client-original.js": (id)@"wrong type"},
+        @{@"session-backend-original.js": canonical},
+        @{@"onboarding-client-original.js": canonical, @"unexpected.mjs": canonical}];
+    for (NSData *source in @[self.onboardingPrevious, self.patched]) for (NSDictionary *resources in invalid) {
+        self.filesystem.files[DSHInstallerTestOnboarding] = source;
+        self.resources = resources;
+        NSDictionary *before = [self.filesystem.files copy]; NSError *error = nil;
+        XCTAssertFalse([self installOnboarding:&error]); XCTAssertNotNil(error);
+        XCTAssertEqualObjects(self.filesystem.files, before);
+        XCTAssertEqual(self.filesystem.writeCalls, 0u); XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    }
+    self.resources = valid;
+}
+- (void)testOnboardingUpgradeRequiresOnlyPinnedBaseAndKnownBuild29Previous {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSDictionary *valid = self.manifest;
+    NSArray *badBases = @[@{},
+        @{@"source": @"onboarding-client-original.js", @"sha256": DSHInstallerTestHash(self.original), @"unexpected": @YES},
+        @{@"source": @"session-backend-original.js", @"sha256": DSHInstallerTestHash(self.original)},
+        @{@"source": @"onboarding-client-original.js", @"sha256": DSHInstallerTestHash(self.onboardingPrevious)}];
+    NSArray *badPrevious = @[@[], @[@"invalid"], @[@"7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa"],
+        @[@"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5", @"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5"]];
+    NSMutableArray *patches = [NSMutableArray array];
+    for (id base in badBases) { NSMutableDictionary *p = [valid[@"patches"][0] mutableCopy]; p[@"original_source"] = base; [patches addObject:p]; }
+    for (id previous in badPrevious) { NSMutableDictionary *p = [valid[@"patches"][0] mutableCopy]; p[@"previous_sha256"] = previous; [patches addObject:p]; }
+    NSMutableDictionary *missingBase = [valid[@"patches"][0] mutableCopy]; [missingBase removeObjectForKey:@"original_source"]; [patches addObject:missingBase];
+    NSMutableDictionary *missingPrevious = [valid[@"patches"][0] mutableCopy]; [missingPrevious removeObjectForKey:@"previous_sha256"]; [patches addObject:missingPrevious];
+    NSMutableDictionary *wrongOriginal = [valid[@"patches"][0] mutableCopy]; wrongOriginal[@"original_sha256"] = DSHInstallerTestHash(self.onboardingPrevious); [patches addObject:wrongOriginal];
+    for (NSDictionary *patch in patches) {
+        NSMutableDictionary *manifest = [valid mutableCopy]; manifest[@"patches"] = @[patch]; self.manifest = manifest;
+        self.resources = patch[@"original_source"] ? @{@"onboarding-client-original.js": self.original} : @{};
+        self.filesystem.files[DSHInstallerTestOnboarding] = self.original;
+        NSDictionary *before = [self.filesystem.files copy]; NSError *error = nil;
+        XCTAssertFalse([self installOnboarding:&error]); XCTAssertNotNil(error);
+        XCTAssertEqualObjects(self.filesystem.files, before);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u); XCTAssertEqual(self.filesystem.writeCalls, 0u);
+    }
+}
+- (void)testOnboardingUpgradeCannotCrossTargetsOrInstallAdditionalGuestFiles {
+    NSDictionary *session = self.manifest, *sessionResources = self.resources;
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSDictionary *valid = self.manifest;
+    for (NSString *target in @[DSHInstallerTestPackage, @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js",
+                              @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js", @"/root/.dsh/settings.json"]) {
+        NSMutableDictionary *p = [valid[@"patches"][0] mutableCopy]; p[@"target"] = target;
+        NSMutableDictionary *m = [valid mutableCopy]; m[@"patches"] = @[p]; self.manifest = m;
+        NSError *error = nil; XCTAssertFalse([self installOnboarding:&error]);
+        XCTAssertEqualObjects(error.userInfo[@"operation"], @"package whitelist");
+    }
+    NSMutableDictionary *extra = [valid mutableCopy];
+    extra[@"files"] = @[@{@"source": @"helper.mjs", @"target": @"/usr/local/share/dsh/helper.mjs", @"sha256": DSHInstallerTestHash(self.original)}];
+    self.manifest = extra; NSError *error = nil;
+    XCTAssertFalse([self installOnboarding:&error]); XCTAssertEqualObjects(error.userInfo[@"operation"], @"schema");
+    // Give Session its valid schema/resources; only the forbidden canonical name differs.
+    NSMutableDictionary *foreign = [session mutableCopy], *patch = [session[@"patches"][0] mutableCopy];
+    patch[@"original_source"] = @{@"source": @"onboarding-client-original.js", @"sha256": patch[@"original_sha256"]};
+    patch[@"previous_sha256"] = @[@"b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5"];
+    foreign[@"patches"] = @[patch];
+    DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc] initWithManifest:foreign resources:sessionResources filesystem:self.filesystem package:DSHVerifiedSystemPackageSession];
+    XCTAssertFalse([installer installWithError:&error]);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"upgrade base whitelist");
+    // Web and Jobs also get their complete valid file whitelists before testing
+    // that an Onboarding original_source cannot authorize their package kind.
+    NSArray *targets = @[@"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js",
+                         @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js"];
+    NSArray *kinds = @[@(DSHVerifiedSystemPackageWebFetch), @(DSHVerifiedSystemPackageJobTracking)];
+    NSArray *fileMaps = @[@{@"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs"}, @{
+        @"development-tools.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/development-tools.mjs",
+        @"job-tracking.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
+        @"job-ledger.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
+        @"workspace-export.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/workspace-export.mjs"}];
+    for (NSUInteger i = 0; i < targets.count; i++) {
+        NSMutableDictionary *m = [valid mutableCopy], *p = [valid[@"patches"][0] mutableCopy];
+        NSMutableDictionary *resources = [self.resources mutableCopy]; NSMutableArray *files = [NSMutableArray array];
+        NSDictionary *mapping = fileMaps[i];
+        for (NSString *source in mapping) {
+            NSData *bytes = DSHInstallerTestData(@"valid peer fixture"); resources[source] = bytes;
+            [files addObject:@{@"source": source, @"target": mapping[source], @"sha256": DSHInstallerTestHash(bytes)}];
+            NSString *parent = [mapping[source] stringByDeletingLastPathComponent];
+            while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+        }
+        p[@"target"] = targets[i]; m[@"patches"] = @[p]; m[@"files"] = files;
+        self.filesystem.files[targets[i]] = self.original;
+        NSString *parent = [targets[i] stringByDeletingLastPathComponent];
+        while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+        DSHSessionLifecycleInstaller *peer = [[DSHSessionLifecycleInstaller alloc] initWithManifest:m resources:resources filesystem:self.filesystem package:[kinds[i] unsignedIntegerValue]];
+        XCTAssertFalse([peer installWithError:&error]);
+        XCTAssertEqualObjects(error.userInfo[@"operation"], @"upgrade base whitelist");
+    }
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u); XCTAssertEqual(self.filesystem.writeCalls, 0u);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], self.onboardingPrevious);
+}
+- (void)testOnboardingUpgradeRejectsUnknownAndLinkedSourcesBeforeWrites {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    self.filesystem.files[DSHInstallerTestOnboarding] = DSHInstallerTestData(@"user edited or newer client");
+    NSDictionary *before = [self.filesystem.files copy]; NSError *error = nil;
+    XCTAssertFalse([self installOnboarding:&error]); XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    self.filesystem.files[DSHInstallerTestOnboarding] = self.onboardingPrevious;
+    for (NSString *path in @[DSHInstallerTestOnboarding, @"/usr/local/lib/node_modules/@deepseek-ai"]) {
+        DSHSessionLifecycleFileInfo *info = [DSHSessionLifecycleFileInfo new]; info.type = DSHSessionLifecycleFileSymbolicLink; info.linkCount = 1;
+        self.filesystem.overrides[path] = info;
+        XCTAssertFalse([self installOnboarding:&error]); XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+        [self.filesystem.overrides removeAllObjects];
+    }
+    DSHSessionLifecycleFileInfo *hardlink = [DSHSessionLifecycleFileInfo new]; hardlink.type = DSHSessionLifecycleFileRegular; hardlink.linkCount = 2;
+    self.filesystem.overrides[DSHInstallerTestOnboarding] = hardlink;
+    XCTAssertFalse([self installOnboarding:&error]); XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u); XCTAssertEqual(self.filesystem.writeCalls, 0u);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], self.onboardingPrevious);
+}
+- (void)testOnboardingUpgradeDoesNotOverwriteTargetChangedAfterPreflight {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSData *changed = DSHInstallerTestData(@"changed after preflight");
+    __weak DSHInstallerMemoryFilesystem *filesystem = self.filesystem;
+    self.filesystem.onCreate = ^{ filesystem.files[DSHInstallerTestOnboarding] = changed; };
+    NSError *error = nil; XCTAssertFalse([self installOnboarding:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], changed);
+    XCTAssertFalse([self.filesystem.renamedTargets containsObject:DSHInstallerTestOnboarding]);
+    XCTAssertEqual(self.filesystem.openHandles, 0u);
+    // Idempotence still rechecks the installed target; no write exists to act
+    // as a final race guard on this path.
+    self.filesystem.onCreate = nil;
+    self.filesystem.files[DSHInstallerTestOnboarding] = self.patched;
+    NSUInteger writes = self.filesystem.writeCalls;
+    __block NSUInteger reads = 0;
+    self.filesystem.onCloseRead = ^(NSString *path) {
+        if ([path isEqual:DSHInstallerTestOnboarding] && ++reads == 1) filesystem.files[path] = changed;
+    };
+    XCTAssertFalse([self installOnboarding:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], changed);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+    XCTAssertEqual(self.filesystem.openHandles, 0u);
+}
+- (void)testOnboardingUpgradeIOFailuresPreserveBuild29AndAllowExplicitRetry {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    for (NSString *operation in @[@"openRead", @"read", @"closeRead", @"create", @"write", @"shortWrite", @"fsync", @"closeWrite", @"corruptWrite", @"rename"]) {
+        self.filesystem.files[DSHInstallerTestOnboarding] = self.onboardingPrevious;
+        NSDictionary *before = [self.filesystem.files copy];
+        [self setFailure:operation target:DSHInstallerTestOnboarding]; NSError *error = nil;
+        XCTAssertFalse([self installOnboarding:&error], @"%@", operation); XCTAssertNotNil(error);
+        XCTAssertEqualObjects(self.filesystem.files, before, @"%@", operation);
+        XCTAssertEqual(self.filesystem.openHandles, 0u);
+        XCTAssertTrue([self installOnboarding:&error], @"%@ retry: %@", operation, error); XCTAssertNil(error);
+        XCTAssertEqualObjects(self.filesystem.files[DSHInstallerTestOnboarding], self.patched);
+    }
+}
+- (void)testOnboardingUpgradeValidatesCanonicalPatchEvenOnIdempotentPath {
+    if (![self prepareActualOnboardingUpgradeFixture]) return;
+    NSDictionary *valid = self.manifest;
+    for (NSData *source in @[self.onboardingPrevious, self.patched]) for (NSString *fault in @[@"count", @"hash"]) {
+        self.filesystem.files[DSHInstallerTestOnboarding] = source;
+        NSMutableDictionary *m = [valid mutableCopy], *p = [valid[@"patches"][0] mutableCopy];
+        if ([fault isEqual:@"hash"]) p[@"patched_sha256"] = DSHInstallerTestHash(DSHInstallerTestData(@"wrong new hash"));
+        else { NSMutableArray *r = [p[@"replacements"] mutableCopy]; NSMutableDictionary *first = [r[0] mutableCopy]; first[@"count"] = @2; r[0] = first; p[@"replacements"] = r; }
+        m[@"patches"] = @[p]; self.manifest = m;
+        NSDictionary *before = [self.filesystem.files copy]; NSError *error = nil;
+        XCTAssertFalse([self installOnboarding:&error]); XCTAssertNotNil(error);
+        XCTAssertEqualObjects(self.filesystem.files, before);
+        XCTAssertEqual(self.filesystem.createdPaths.count, 0u); XCTAssertEqual(self.filesystem.writeCalls, 0u);
+    }
+}
+
 - (void)testActualBundledManifestInstallsItsPinnedCanonicalPackage {
     NSURL *bundle = [NSBundle.mainBundle URLForResource:@"SessionLifecycle" withExtension:@"bundle"];
     XCTAssertNotNil(bundle);

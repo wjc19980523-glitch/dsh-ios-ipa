@@ -31,8 +31,7 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     // Hosted unit tests use a blank scene; UI tests must launch the real app.
     // Required UI acceptance follows the production input path. Opt in only
     // for a diagnostic run; geometry observation can itself affect WebKit.
-    // Temporary event-only diagnostic: this commit must never authorize an IPA.
-    NSString *observeDialogs = @"events";
+    NSString *observeDialogs = [NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"] isEqual:@"1"] ? @"1" : @"0";
     self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0", @"DSH_UI_DIALOG_DIAGNOSTICS": observeDialogs };
     __weak DSHLaunchUITests *weakSelf = self;
     [self addUIInterruptionMonitorWithDescription:@"Refuse DSH system permission requests"
@@ -146,41 +145,6 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     // Keep the original closure budget, include readiness in it, and record the
     // actual successful observation without extra AX calls on the critical path.
     NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + closureTimeout;
-    // First-launch workspace initialization can show a transient notification
-    // over the web UI. Preserve that warning, then let it finish naturally
-    // before the single Welcome tap. This is test input stabilization, not a
-    // workspace repair or a bypass of Welcome's persistence acknowledgement.
-    // It shares the original deadline; a persistent warning still fails.
-    if ([dialogLabels containsObject:@"Preview Notice, web dialog"]) {
-        NSArray<NSString *> *startupWarningLabels = @[
-            @"无法创建默认工作区，请通过“选择工作区”选择文件夹",
-            @"Unable to create default workspace. Use Choose workspace to select a folder."
-        ];
-        XCUIElement *warning = [[web descendantsMatchingType:XCUIElementTypeAny] matchingPredicate:
-                                [NSPredicate predicateWithFormat:@"label IN %@", startupWarningLabels]].firstMatch;
-        NSTimeInterval warningStarted = NSProcessInfo.processInfo.systemUptime;
-        BOOL warningObserved = warning.exists;
-        XCTWaiterResult warningResult = XCTWaiterResultCompleted;
-        if (warningObserved) {
-            [self attachScreenshot:@"startup-workspace-warning-before-welcome"];
-            XCTNSPredicateExpectation *warningGone = [[XCTNSPredicateExpectation alloc]
-                                                       initWithPredicate:[NSPredicate predicateWithFormat:@"exists == NO"]
-                                                       object:warning];
-            warningResult = [XCTWaiter waitForExpectations:@[warningGone]
-                                                  timeout:MAX(0, deadline - NSProcessInfo.processInfo.systemUptime)];
-        }
-        NSTimeInterval warningFinished = NSProcessInfo.processInfo.systemUptime;
-        BOOL warningClearedInTime = warningResult == XCTWaiterResultCompleted && warningFinished <= deadline;
-        [self attachGuestDialogState:@{@"warning_observed": @(warningObserved),
-                                      @"warning_wait_started_uptime": @(warningStarted),
-                                      @"warning_wait_finished_uptime": @(warningFinished),
-                                      @"waiter_result": @(warningResult),
-                                      @"deadline_uptime": @(deadline),
-                                      @"cleared_in_time": @(warningClearedInTime)}
-                              phase:@"startup-workspace-warning" labels:dialogLabels];
-        XCTAssertTrue(warningClearedInTime,
-                      @"the observed startup warning must finish within the original Welcome deadline");
-    }
     __block NSDictionary *readyState;
     NSPredicate *actionReady = [NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
         (void)bindings;

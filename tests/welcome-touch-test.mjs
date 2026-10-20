@@ -26,7 +26,7 @@ function apply(text,replacements){
 }
 const patched=apply(original.toString(),actualPatch.replacements);
 assert.equal(sha(Buffer.from(patched)),actualPatch.patched_sha256);
-assert.equal(actualPatch.patched_sha256,'08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c');
+assert.equal(actualPatch.patched_sha256,'d4f3634c7483237ad9627b0a4b06f6b5b04d538a5d96b304841afe09078bf9d5');
 new Script(patched);
 const segment=(source,start,end)=>{
   const i=source.indexOf(start);assert.ok(i>=0);const j=source.indexOf(end,i+start.length);
@@ -47,7 +47,7 @@ assert.equal(touchOnly.patches[0].patched_sha256,'c7b1fbd4b95a222f57ef8c565d6cde
 const manifests={'touch-only':touchOnly,'touch-plus-store':actualManifest};
 const clients={'touch-only':control,'touch-plus-store':patched};
 
-// Transaction and actual Store behavior (23).
+// Transaction and actual Store behavior (25).
 {
 const deferred = () => {
   let resolve, reject;
@@ -72,6 +72,7 @@ function storeFixture(code = originalStore) {
   let calls = 0;
   let behavior = async () => false;
   const listeners = new Set();
+  const history = [];
   const scope = {
     getSnapshot: () => snapshot,
     subscribe(listener) {listeners.add(listener); return () => listeners.delete(listener);},
@@ -88,14 +89,14 @@ function storeFixture(code = originalStore) {
     _deepseek_ai_dsh_client_store: {createSnapshotStore(initial) {
       let current = {...initial};
       return {getSnapshot: () => current, update(change) {
-        const next = {...current}; change(next); current = next;
+        const next = {...current}; change(next); current = next; history.push({...next});
       }};
     }},
   });
   const store = new Store(scope);
   store.load();
   return {
-    store, scope, calls: () => calls,
+    store, scope, calls: () => calls, history: () => history.map(state => ({...state})),
     behavior(fn) {behavior = fn;},
     publish(next) {snapshot = {...snapshot, ...next}; for (const fn of listeners) fn();},
     snapshot: () => store.store.getSnapshot(),
@@ -223,7 +224,7 @@ test('candidate set-rejection settlement returns false/error then allows explici
   f.behavior(async () => {f.publish({value: {}}); throw new Error('sensitive fixture path');});
   assert.equal(await f.store.acknowledge(), false);
   assert.equal(f.store.saving, false); assert.equal(f.snapshot().status, 'error');
-  assert.equal(f.snapshot().error, 'the acknowledgement did not persist');
+  assert.equal(f.snapshot().error, 'the acknowledgement could not be confirmed');
   f.behavior(async () => {f.publish({value: {welcomeNoticeVersion: '2026-09-28.1'}}); return true;});
   assert.equal(await f.store.acknowledge(), true);
   assert.equal(f.snapshot().acknowledged, true); assert.equal(f.calls(), 2);
@@ -240,14 +241,50 @@ test('candidate never acknowledges an old or missing version after mutation fail
   }
 });
 
-test('post-commit response failure can complete only when exact version is already observed', async () => {
+test('rejected write fails closed even when held scope already shows the exact version', async () => {
   const f = storeFixture(candidateStore);
   f.behavior(async () => {
     f.publish({value: {welcomeNoticeVersion: '2026-09-28.1'}});
     throw new Error('response lost after independent mirror publication');
   });
-  assert.equal(await f.store.acknowledge(), true);
-  assert.equal(f.snapshot().acknowledged, true); assert.equal(f.calls(), 1);
+  assert.equal(await f.store.acknowledge(), false);
+  assert.equal(f.snapshot().acknowledged, false); assert.equal(f.calls(), 1);
+  assert.equal(f.snapshot().status, 'error'); assert.equal(f.store.saving, false);
+  assert.equal(f.snapshot().error, 'the acknowledgement could not be confirmed');
+  assert.ok(f.history().every(state => state.acknowledged === false));
+});
+
+test('held exact-version then rejected pending gesture never finishes; next explicit gesture retries', async () => {
+  const f = storeFixture(candidateStore), d = deferred(); let complete = 0;
+  f.behavior(() => d.promise);
+  const gate = createWelcomeAttemptGate({getState: f.snapshot,
+    acknowledge: () => f.store.acknowledge(), finish: () => {complete++;}});
+  const first = gate.newGesture(), pending = gate.activate(first);
+  assert.equal(f.store.saving, true); assert.equal(f.calls(), 1);
+  f.publish({value: {welcomeNoticeVersion: '2026-09-28.1'}});
+  assert.equal(f.snapshot().status, 'saving'); assert.equal(complete, 0);
+  d.reject(new Error('unconfirmed Host write may later roll back'));
+  assert.equal(await pending, false);
+  assert.equal(f.store.saving, false); assert.equal(f.snapshot().status, 'error');
+  assert.equal(f.snapshot().acknowledged, false); assert.equal(complete, 0);
+  assert.ok(f.history().every(state => state.acknowledged === false));
+  f.publish({value: {}}); // Controlled rollback after the rejected operation.
+  assert.equal(await gate.activate(first), false);
+  assert.equal(f.calls(), 1); assert.equal(complete, 0);
+  f.behavior(async () => {f.publish({value: {welcomeNoticeVersion: '2026-09-28.1'}}); return true;});
+  const second = gate.newGesture();
+  assert.equal(await gate.activate(second), true); await gate.activate(second);
+  assert.equal(f.calls(), 2); assert.equal(complete, 1); assert.equal(f.snapshot().acknowledged, true);
+});
+
+test('a later independent scope publication retains the original subscription semantics after rejection', async () => {
+  const f = storeFixture(candidateStore);
+  f.behavior(async () => {throw new Error('fixture');});
+  assert.equal(await f.store.acknowledge(), false);
+  assert.equal(f.snapshot().status, 'error'); assert.equal(f.snapshot().acknowledged, false);
+  f.publish({value: {welcomeNoticeVersion: '2026-09-28.1'}});
+  assert.equal(f.snapshot().status, 'ready'); assert.equal(f.snapshot().acknowledged, true);
+  assert.equal(f.calls(), 1); // No automatic write or retry was introduced.
 });
 
 test('gate plus candidate actual store: rejected tap, late click, new tap persist once each', async () => {

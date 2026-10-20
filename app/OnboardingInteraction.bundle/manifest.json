@@ -5,7 +5,7 @@
     {
       "target": "/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
       "original_sha256": "7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa",
-      "patched_sha256": "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c",
+      "patched_sha256": "d4f3634c7483237ad9627b0a4b06f6b5b04d538a5d96b304841afe09078bf9d5",
       "replacements": [
         {
           "find": "\t\tfunction EditorFooter(props) {\n\t\t\tconst { t } = props;\n\t\t\treturn (0, react_jsx_runtime.jsxs)(\"div\", {\n\t\t\t\tclassName: ModelsSection_module_css_default[\"editorActions\"],\n\t\t\t\tchildren: [(0, react_jsx_runtime.jsx)(\"button\", {\n\t\t\t\t\ttype: \"button\",\n\t\t\t\t\tclassName: ModelsSection_module_css_default[\"secondaryButton\"],\n\t\t\t\t\tdisabled: props.busy,\n\t\t\t\t\tonClick: props.onCancel,\n\t\t\t\t\tchildren: t(props.cancelLabelKey ?? \"cancel\")\n\t\t\t\t}), (0, react_jsx_runtime.jsx)(\"button\", {\n\t\t\t\t\ttype: \"button\",\n\t\t\t\t\tclassName: ModelsSection_module_css_default[\"primaryButton\"],\n\t\t\t\t\tdisabled: props.submitDisabled,\n\t\t\t\t\tonClick: props.onSubmit,\n\t\t\t\t\tchildren: props.busy ? t(props.submitBusyLabelKey) : t(props.submitLabelKey)\n\t\t\t\t})]\n\t\t\t});\n\t\t}",
@@ -29,7 +29,7 @@
         },
         {
           "find": "\t\t\t\ttry {\n\t\t\t\t\tawait this.scope.set(WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_VERSION);\n\t\t\t\t} finally {\n\t\t\t\t\tthis.saving = false;\n\t\t\t\t}",
-          "replace": "\t\t\t\ttry {\n\t\t\t\t\tawait this.scope.set(WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_VERSION);\n\t\t\t\t} catch {\n\t\t\t\t\t// Derive the exact persisted version below; never assume a failed write saved.\n\t\t\t\t} finally {\n\t\t\t\t\tthis.saving = false;\n\t\t\t\t}",
+          "replace": "\t\t\t\ttry {\n\t\t\t\t\tawait this.scope.set(WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_VERSION);\n\t\t\t\t} catch {\n\t\t\t\t\tthis.store.update((state) => {\n\t\t\t\t\t\tstate.status = \"error\";\n\t\t\t\t\t\tstate.acknowledged = false;\n\t\t\t\t\t\tstate.error = \"the acknowledgement could not be confirmed\";\n\t\t\t\t\t});\n\t\t\t\t\treturn false;\n\t\t\t\t} finally {\n\t\t\t\t\tthis.saving = false;\n\t\t\t\t}",
           "count": 1
         }
       ],

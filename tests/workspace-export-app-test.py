@@ -124,8 +124,8 @@ class ArchiveGateTests(unittest.TestCase):
         self.assertEqual(GATE.ONBOARDING_ORIGINAL_SHA256, "7674ed0ba2eef60fa7db91b4bf8cea4dc23e1f0a2f3dd1e6a2a67ad4c0d005fa")
         self.assertEqual(GATE.ONBOARDING_BUILD29_BYTES, 191089)
         self.assertEqual(GATE.ONBOARDING_BUILD29_SHA256, "b687b66611b19ac8ebb793bc128c4c56675fc0fc6c7df8f7ddae6195134339b5")
-        self.assertEqual(GATE.ONBOARDING_PATCHED_BYTES, 200391)
-        self.assertEqual(GATE.ONBOARDING_PATCHED_SHA256, "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c")
+        self.assertEqual(GATE.ONBOARDING_PATCHED_BYTES, 200500)
+        self.assertEqual(GATE.ONBOARDING_PATCHED_SHA256, "d4f3634c7483237ad9627b0a4b06f6b5b04d538a5d96b304841afe09078bf9d5")
 
     def test_valid_synthetic_app_contains_both_native_classes_and_all_resources(self):
         result = self.check()
@@ -354,6 +354,39 @@ class ArchiveGateTests(unittest.TestCase):
     def test_onboarding_cannot_declare_an_alternate_new_client_hash(self):
         self.edit_onboarding_manifest(lambda m: m["patches"][0].update(patched_sha256="0" * 64))
         with self.assertRaisesRegex(GATE.Rejected, "pinned identity differs"): self.check()
+
+    def permissive_catch_candidate(self):
+        # Exact prior 11b2c31 candidate, kept as an adverse resource fixture.
+        # Do not require repository history in the shallow macOS CI checkout.
+        manifest = json.loads((self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes())
+        patch = manifest["patches"][0]
+        patch["replacements"][4]["replace"] = (
+            "\t\t\t\ttry {\n"
+            "\t\t\t\t\tawait this.scope.set(WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_VERSION);\n"
+            "\t\t\t\t} catch {\n"
+            "\t\t\t\t\t// Derive the exact persisted version below; never assume a failed write saved.\n"
+            "\t\t\t\t} finally {\n"
+            "\t\t\t\t\tthis.saving = false;\n"
+            "\t\t\t\t}")
+        text = (self.app / "OnboardingInteraction.bundle" / GATE.ONBOARDING_SOURCE).read_bytes().decode("utf-8")
+        for replacement in patch["replacements"]:
+            self.assertEqual(text.count(replacement["find"]), replacement["count"])
+            text = text.replace(replacement["find"], replacement["replace"])
+        data = text.encode("utf-8")
+        self.assertEqual(len(data), 200391)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c")
+        return manifest
+
+    def test_prior_permissive_catch_candidate_rejected_even_when_source_agrees(self):
+        manifest = self.permissive_catch_candidate()
+        manifest["patches"][0]["patched_sha256"] = "08bca6d6bcc92bc16fde2daadb2d50469c5573d7f90180e74e147eb9fe5e9c1c"
+        self.write_onboarding_manifest(json.dumps(manifest).encode())
+        with self.assertRaisesRegex(GATE.Rejected, "pinned identity differs"): self.check()
+
+    def test_permissive_catch_cannot_hide_behind_the_new_client_declaration(self):
+        manifest = self.permissive_catch_candidate()
+        self.write_onboarding_manifest(json.dumps(manifest).encode())
+        with self.assertRaisesRegex(GATE.Rejected, "Onboarding replay result differs"): self.check()
 
     def test_onboarding_duplicate_json_keys_rejected_even_when_source_matches(self):
         data = (self.app / "OnboardingInteraction.bundle/manifest.json").read_bytes()

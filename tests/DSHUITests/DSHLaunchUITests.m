@@ -31,7 +31,8 @@ static const NSTimeInterval kBootTimeout = 300;   // first launch imports the ro
     // Hosted unit tests use a blank scene; UI tests must launch the real app.
     // Required UI acceptance follows the production input path. Opt in only
     // for a diagnostic run; geometry observation can itself affect WebKit.
-    NSString *observeDialogs = [NSProcessInfo.processInfo.environment[@"DSH_UI_DIALOG_DIAGNOSTICS"] isEqual:@"1"] ? @"1" : @"0";
+    // Temporary event-only diagnostic: this commit must never authorize an IPA.
+    NSString *observeDialogs = @"events";
     self.app.launchEnvironment = @{ @"DSH_TEST_HOST": @"0", @"DSH_UI_DIALOG_DIAGNOSTICS": observeDialogs };
     __weak DSHLaunchUITests *weakSelf = self;
     [self addUIInterruptionMonitorWithDescription:@"Refuse DSH system permission requests"

@@ -48,7 +48,7 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"gate_waiters", @"gate_waits_omitted", @"gate_wait_tracking_overflows", @"entered_generation",
             @"read_metadata_misses", @"read_fd_observed", @"read_guest_fd",
             @"ui_sequence", @"ui_native_sequence", @"ui_elapsed_ms", @"ui_host_ms", @"ui_wait_result", @"ui_view_width", @"ui_view_height", @"ui_modal_instance", @"ui_action_instance",
-            @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present",
+            @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_connected", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present",
             @"id", @"host_fd", @"thread", @"guest_fd_at_last_lock", @"guest_tgid", @"started_monotonic_ns",
             @"age_ms", @"host_device", @"host_inode", @"identity_stat_errno", @"identity_path_errno",
             @"connection", @"mode", @"cached_autocommit", @"sqlite_result", @"recovery_required", @"recovery_result",
@@ -67,8 +67,8 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
             @"read_metadata_scope": @[@"retained_stream_read_only"],
             @"process_metadata_scope": @[@"guest_pid_tgid_only"],
             @"peer_metadata_scope": @[@"not_observed"],
-            @"ui_dialog": @[@"welcome", @"api"],
-            @"ui_phase": @[@"started", @"state", @"pointerdown", @"pointerup", @"pointercancel", @"touchstart", @"touchend", @"touchcancel", @"click_capture", @"click_bubble", @"after_event", @"finished"],
+            @"ui_dialog": @[@"welcome", @"api", @"other", @"observer"],
+            @"ui_phase": @[@"started", @"state", @"pointerdown", @"pointerup", @"pointercancel", @"touchstart", @"touchend", @"touchcancel", @"click_capture", @"click_bubble", @"after_event", @"finished", @"mouseover", @"mousemove", @"mousedown", @"mouseup", @"listener_started", @"listener_finished"],
             @"type": @[@"LOCK_SH", @"LOCK_EX"],
             @"host_start_source": @[@"first_observation_sysctl_unavailable", @"kernel_process_start"],
             @"stage": @[@"image_preparation", @"guest_kernel_boot", @"web_interface_loaded", @"active_startup"],
@@ -84,7 +84,7 @@ static id safeMetadataValue(NSString *key, id value, NSUInteger depth) {
     }
     if ([numbers containsObject:key]) {
         if (![value isKindOfClass:NSNumber.class] || !isfinite([value doubleValue])) return nil;
-        BOOL flag = [@[@"quiescing", @"session_drain_active", @"active_fakefs_operations_complete", @"registered", @"transition_pending", @"poll_pending", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"session_recovery_awaiting_registration", @"read_fd_observed", @"cached_autocommit", @"recovery_required", @"details_omitted", @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present"] containsObject:key];
+        BOOL flag = [@[@"quiescing", @"session_drain_active", @"active_fakefs_operations_complete", @"registered", @"transition_pending", @"poll_pending", @"session_ack_required", @"session_acknowledged", @"session_recovery_needs_attention", @"session_recovery_awaiting_registration", @"read_fd_observed", @"cached_autocommit", @"recovery_required", @"details_omitted", @"ui_trusted", @"ui_default_prevented", @"ui_root_inert", @"ui_modal_inert", @"ui_modal_under_root", @"ui_action_enabled", @"ui_action_connected", @"ui_action_visible", @"ui_hit_action", @"ui_target_action", @"ui_dialog_present"] containsObject:key];
         if (!flag && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
         BOOL fractional = [@[@"host_started_epoch", @"observed_epoch", @"wait_ms", @"duration_seconds"] containsObject:key];
         if (!fractional && floor([value doubleValue]) != [value doubleValue]) return nil;

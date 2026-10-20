@@ -146,6 +146,13 @@ xcrun simctl install "$SIMULATOR_ID" \
   "$PWD/build/DerivedData-XCTest/Build/Products/Release-iphonesimulator/DSH.app"
 xcrun simctl privacy "$SIMULATOR_ID" revoke all com.xnuapp.dsh
 rc_ui=0
+if [ "${DSH_UI_WELCOME_EVENTS_ONLY:-0}" = 1 ]; then
+  # Diagnostic only. Units/integration above remain real; this
+  # single UI case observes the first Welcome without layout reads.
+  run_batch ui -only-testing:DSHUITests/DSHLaunchUITests/testActivityScreenIsReachableAndReadable || rc_ui=$?
+  echo "DIAGNOSTIC ONLY: UI case exit=$rc_ui; no full UI acceptance or IPA authorization"
+  exit 1
+fi
 run_batch ui -only-testing:DSHUITests || rc_ui=$?
 
 # Counts are disjoint because classes are partitioned above; filters are not

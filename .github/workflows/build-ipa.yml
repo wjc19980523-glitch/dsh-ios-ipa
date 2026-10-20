@@ -279,6 +279,8 @@ jobs:
           make project 2>&1 | tee cilogs/03-project.log
 
       - name: Execute simulator XCTest (units + real guest integration + UI)
+        env:
+          DSH_UI_WELCOME_EVENTS_ONLY: "1" # Temporary diagnostic, always exits nonzero.
         run: bash scripts/run-xctests.sh
 
       - name: Require all workspace export Native tests and original confirmations

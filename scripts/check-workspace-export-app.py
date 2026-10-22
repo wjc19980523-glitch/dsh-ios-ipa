@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only acceptance gate for the unsigned Build 30 iOS archive app.
+"""Read-only acceptance gate for the unsigned Build 31 iOS archive app.
 
 Checks package inclusion, identity, the fixed guest image and exact source
 resource bytes. Actual XCTest and iPad Files saving are separate evidence.
@@ -288,9 +288,9 @@ def inspect(app, source_root):
     require(app.is_dir() and not app.is_symlink(), "archive app directory missing or symlinked")
     info = plistlib.loads(read_file(app / "Info.plist", 2 * CHUNK_BYTES))
     require(isinstance(info, dict), "Info.plist must be a dictionary")
-    expected = {"CFBundleIdentifier": APP_ID, "CFBundleShortVersionString": "1.1.0", "CFBundleVersion": "30",
+    expected = {"CFBundleIdentifier": APP_ID, "CFBundleShortVersionString": "1.1.0", "CFBundleVersion": "31",
                 "CFBundleExecutable": "DSH", "MinimumOSVersion": "16.0", "CFBundlePackageType": "APPL"}
-    require(all(info.get(key) == value for key, value in expected.items()), "App identity/version/minimum OS differs from Build 30 contract")
+    require(all(info.get(key) == value for key, value in expected.items()), "App identity/version/minimum OS differs from Build 31 contract")
     require(not (app / "embedded.mobileprovision").exists() and not (app / "_CodeSignature").exists(),
             "archive app unexpectedly has provisioning or signature resources")
     macho = inspect_macho(read_file(app / "DSH", 128 * CHUNK_BYTES))

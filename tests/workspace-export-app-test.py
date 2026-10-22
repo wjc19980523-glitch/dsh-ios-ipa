@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Portable positive/negative tests for the strict archive inclusion gate.
 
-These synthetic archives do not replace XCTest or actual Build 30 inspection.
+These synthetic archives do not replace XCTest or actual Build 31 inspection.
 Only the test module's rootfs constants are replaced with a small fixture.
 """
 import hashlib
@@ -48,7 +48,7 @@ def macho(platform=2, minimum=0x100000, classes=None, signed=False, cpu=0x010000
 class ArchiveGateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.container = tempfile.TemporaryDirectory(prefix="dsh-build30-gate-")
+        cls.container = tempfile.TemporaryDirectory(prefix="dsh-build31-gate-")
         cls.fixture = Path(cls.container.name)
         cls.source = cls.fixture / "source"
         cls.original = cls.fixture / "original.app"
@@ -66,7 +66,7 @@ class ArchiveGateTests(unittest.TestCase):
                 dest = cls.original / bundle / name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(data)
-        info = {"CFBundleIdentifier": GATE.APP_ID, "CFBundleVersion": "30", "CFBundleShortVersionString": "1.1.0",
+        info = {"CFBundleIdentifier": GATE.APP_ID, "CFBundleVersion": "31", "CFBundleShortVersionString": "1.1.0",
                 "CFBundleExecutable": "DSH", "CFBundlePackageType": "APPL", "MinimumOSVersion": "16.0"}
         (cls.original / "Info.plist").write_bytes(plistlib.dumps(info))
         (cls.original / "DSH").write_bytes(macho())

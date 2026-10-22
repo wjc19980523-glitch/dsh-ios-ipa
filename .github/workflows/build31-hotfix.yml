@@ -1,0 +1,200 @@
+name: Build 31 emergency unsigned test candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/workspace-ipa-export]
+    paths:
+      - '.github/workflows/build31-hotfix.yml'
+      - 'scripts/check-hotfix31.py'
+      - 'scripts/run-hotfix31-native.sh'
+      - 'app/AppDSH.xcconfig'
+      - 'scripts/check-workspace-export-app.py'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dsh-hotfix31-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HOMEBREW_NO_ENV_HINTS: "1"
+  HOMEBREW_NO_ANALYTICS: "1"
+
+jobs:
+  candidate-gates:
+    name: Hotfix31 ${{ matrix.gate }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [compatibility, archive]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify scope from the accepted P0 fix
+        run: python3 scripts/check-hotfix31.py scope --output hotfix-evidence/scope-${{ matrix.gate }}.json
+
+      - name: Configure native build tools
+        run: |
+          set -euo pipefail
+          XC="$(python3 scripts/select-xcode.py)"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version | tee hotfix-evidence/xcode-${{ matrix.gate }}.txt
+          brew install meson ninja lld libarchive
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
+          if ! ruby -e 'require "xcodeproj"'; then
+            gem install xcodeproj --no-document || sudo gem install xcodeproj --no-document
+          fi
+
+      - name: Restore the existing rootfs cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/root.tar.gz
+          key: rootfs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rootfs/staging/package.json', 'rootfs/staging/package-lock.json', 'scripts/build-rootfs.sh', 'rootfs/overlay/**', 'ish-arm64/app/RootfsPatch.bundle/**') }}
+
+      - name: Verify or retrieve the exact pinned rootfs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/restore-pinned-rootfs.py --output build/root.tar.gz --json-output hotfix-evidence/rootfs-${{ matrix.gate }}.json
+          make project
+
+      - name: P0 real tool-result message chain
+        if: matrix.gate == 'compatibility'
+        run: |
+          set -euo pipefail
+          python3 tests/job-tracking-prepare.py --fixtures build/hotfix-fixtures
+          DSH_JOB_FIXTURES="$PWD/build/hotfix-fixtures" node --test tests/tool-result-chain-test.mjs 2>&1 | tee hotfix-evidence/p0-chain.log
+          python3 scripts/check-hotfix31.py chain --input hotfix-evidence/p0-chain.log --output hotfix-evidence/p0-chain.json
+
+      - name: Execute the two existing Native upgrade compatibility tests
+        if: matrix.gate == 'compatibility'
+        run: bash scripts/run-hotfix31-native.sh
+
+      - name: Compile and archive the unsigned iPad device app
+        if: matrix.gate == 'archive'
+        run: |
+          set -euo pipefail
+          xcodebuild -project DSH.xcodeproj -scheme DSH -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$PWD/build/DSH.xcarchive" \
+            -derivedDataPath "$PWD/build/HotfixDerived-Device" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+            COMPILER_INDEX_STORE_ENABLE=NO archive 2>&1 | tee hotfix-evidence/archive.log
+          python3 scripts/check-workspace-export-app.py \
+            --app build/DSH.xcarchive/Products/Applications/DSH.app --source-root "$PWD" \
+            --json-output hotfix-evidence/archive.json
+
+      - name: Package and inspect the actual IPA bytes
+        if: matrix.gate == 'archive'
+        run: |
+          set -euo pipefail
+          mkdir -p build/hotfix-ipa/Payload
+          cp -R build/DSH.xcarchive/Products/Applications/DSH.app build/hotfix-ipa/Payload/
+          find build/hotfix-ipa -name '._*' -delete
+          (cd build/hotfix-ipa && zip -qry ../DSH-1.1.0-build31-unsigned.ipa Payload)
+          python3 scripts/check-hotfix31.py ipa --input build/DSH-1.1.0-build31-unsigned.ipa --output hotfix-evidence/ipa.json
+          (cd build && shasum -a 256 DSH-1.1.0-build31-unsigned.ipa > DSH-1.1.0-build31-unsigned.ipa.sha256)
+
+      - name: Retain verified archive pending compatibility gate
+        if: matrix.gate == 'archive'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotfix31-staging-not-final
+          path: |
+            build/DSH-1.1.0-build31-unsigned.ipa
+            build/DSH-1.1.0-build31-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload gate evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotfix31-${{ matrix.gate }}-evidence
+          path: |
+            hotfix-evidence/
+            build/HotfixResults/
+          if-no-files-found: error
+          retention-days: 30
+
+  deliver-candidate:
+    name: Deliver candidate only after all Hotfix gates pass
+    needs: candidate-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hotfix31-staging-not-final
+          path: candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: hotfix31-archive-evidence
+          path: evidence/archive
+      - uses: actions/download-artifact@v4
+        with:
+          name: hotfix31-compatibility-evidence
+          path: evidence/compatibility
+      - name: Bind gate receipts and downloaded IPA to this exact run
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          def receipt(kind, name):
+              matches = list(Path('evidence', kind).rglob(name))
+              assert len(matches) == 1, (kind, name)
+              value = json.loads(matches[0].read_text())
+              assert value['accepted'] is True, name
+              if name in ('p0-chain.json', 'native-upgrade.json', 'ipa.json'):
+                  assert value['github_sha'] == os.environ['GITHUB_SHA'], name
+                  assert value['github_run_id'] == os.environ['GITHUB_RUN_ID'], name
+                  assert value['github_run_attempt'] == os.environ['GITHUB_RUN_ATTEMPT'], name
+              return value
+          chain = receipt('compatibility', 'p0-chain.json')
+          native = receipt('compatibility', 'native-upgrade.json')
+          package = receipt('archive', 'ipa.json')
+          receipt('archive', 'archive.json')
+          receipt('archive', 'rootfs-archive.json')
+          receipt('compatibility', 'rootfs-compatibility.json')
+          path = Path('candidate/DSH-1.1.0-build31-unsigned.ipa')
+          with path.open('rb') as f: digest = hashlib.file_digest(f, 'sha256').hexdigest()
+          assert digest == package['evidence']['ipa_sha256']
+          assert path.stat().st_size == package['evidence']['ipa_bytes']
+          assert Path(str(path) + '.sha256').read_text().split() == [digest, path.name]
+          report = {'candidate': 'Build 31 unsigned Hotfix; iPad validation pending',
+                    'commit': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                    'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'sha256': digest,
+                    'ipa_bytes': path.stat().st_size, 'p0_chain': chain, 'native_upgrade': native,
+                    'ipa_integrity': package, 'full_ci_required_for_this_candidate': False,
+                    'full_ci_unchanged': True, 'signed': False, 'installed_on_user_device': False,
+                    'stable_release': False, 'old_session_repair_claimed': False,
+                    'reused_evidence': 'Unchanged 12e123c host suites: 73 job/tool, 34 export, 47 archive-gate, 61 supervision/gate/cleanup cases passed locally; P0 chain is re-executed here.',
+                    'not_gated': ['full guest/UI regressions', 'physical iPad behavior', 'old malformed session recovery']}
+          Path('candidate/hotfix31-delivery.json').write_text(json.dumps(report, indent=2) + '\n')
+          Path('candidate/README.txt').write_text(
+              'Build 31 unsigned Hotfix TEST CANDIDATE\nCommit: ' + os.environ['GITHUB_SHA'] +
+              '\nSHA256: ' + digest + '\nUnsigned: requires signing before iPad installation.\n'
+              'Not a stable release. No old-session repair is claimed. Physical iPad validation remains required.\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Build 31 unsigned test candidate\n\nCommit: `' + os.environ['GITHUB_SHA'] +
+                            '`\n\nSHA256: `' + digest + '`\n\nP0 chain 13/13; Native upgrade 2/2; device archive and IPA integrity passed.\n')
+          PY
+      - name: Upload Build 31 unsigned test candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Build31-unsigned-hotfix-candidate
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 30

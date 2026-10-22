@@ -1,113 +1,67 @@
-<h1 align="center">
-  <img src="app/DSHAssets.xcassets/DSHAppIcon.appiconset/icon-1024.png" width="96" alt="DSH icon"><br>
-  DSHIOS — DeepSeek Harness on iPad &amp; iPhone
-</h1>
+# DSH iOS — 1.1.0 (Build 31)
 
-<p align="center">
-  <b>Run <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (<code>dsh</code>) entirely on your iPad or iPhone — no jailbreak, no server, no Mac in the loop.</b>
-</p>
+This repository is a **fork of [everettjf/dsh-ios](https://github.com/everettjf/dsh-ios)**.
+Thank you to Everett and the upstream contributors for the original iOS integration,
+and to DeepSeek Harness, iSH / iSH-ARM64, Alpine Linux and the other dependencies.
+This fork is maintained at [wjc19980523-glitch/dsh-ios-ipa](https://github.com/wjc19980523-glitch/dsh-ios-ipa).
 
-<p align="center">
-  <a href="https://xnu.app/dsh-ios/">Project page</a> ·
-  <a href="README.zh.md">中文说明</a> ·
-  <a href="docs/dsh-ios-walkthrough.mp4">12-second walkthrough</a> ·
-  <a href="https://discord.gg/eGzEaP6TzR">Discord</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#tests">Tests</a> ·
-  <a href="#faq">FAQ</a>
-</p>
+[中文说明](README.zh.md) · [Changes](CHANGELOG.md) · [Cloud builds](docs/cloud-build.md) ·
+[Signing and installation](docs/install-sign.md) · [FAQ](docs/faq.md)
 
-<p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/iOS%20%7C%20iPadOS-16%2B-blue">
-  <img alt="Guest" src="https://img.shields.io/badge/guest-Alpine%203.21%20%C2%B7%20Node%2022%20%C2%B7%20dsh%200.1-1f6feb">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-emu%20%C2%B7%20rootfs%20%C2%B7%20XCTest%20%C2%B7%20XCUITest-success">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-green"></a>
-</p>
+DSH embeds an Alpine Linux guest and DeepSeek Harness in an iPad/iPhone app.
+The Agent, shell and sessions run on the device; model inference uses the configured online API.
+**The iOS app is compiled on cloud macOS/Xcode through GitHub Actions. The IPA is unsigned;
+you must sign it yourself before installation.** iOS/iPadOS 16 or later is required.
 
-> **Project status:** DSHIOS is an experimental project. Although it can run on
-> iPhone and iPad through iSH-ARM64, performance is still quite limited. The
-> project will not be submitted to the App Store or receive further releases.
-> If you would like to try it, please download the source and build it yourself.
+> **Status:** Build 31 is a Hotfix test candidate, not a stable release. Its P0 message-chain
+> tests, two native upgrade tests, device archive and IPA integrity gates passed.
+> Physical iPad validation remains pending. Old malformed session history is not repaired.
 
-DSHIOS is a native iOS app that embeds the [iSH-ARM64](ish-arm64) userspace Linux
-emulator, boots a bundled Alpine Linux image with Node.js 22 and
-`@deepseek-ai/dsh`, supervises `dsh web`, and shows the harness's own web UI in
-a `WKWebView`. The agent loop, sessions, tools and the shell all run on the
-device. Model requests use the standard DeepSeek API configured in the harness.
+## Changes in this fork
 
-▶ **[Watch the 12-second product walkthrough](docs/dsh-ios-walkthrough.mp4)** — real-device first launch, the full workspace, and the iPhone interface.
+- Chinese UI by default on a fresh guest configuration; existing language preferences are preserved.
+- Session-scoped task history and status (`job_history`, `job_status`) and clearer Activity states.
+- Read-only development preflight, including a clear indication that native iOS builds require macOS/Xcode.
+- Large workspace file export (`workspace_export`): chunked transfer, hash verification and native save confirmation,
+  up to 512 MiB per file subject to storage and lifecycle limits. Legacy 8 MiB file tools remain available.
+- Harness authentication, startup/lifecycle handling, diagnostics and related regression coverage.
+- Build 31 fixes the `output.render(args, value)` contract so tool arguments are not emitted as text results.
 
-| Real iPad Air (M3, iPadOS 27) — first launch | Sessions & workspace |
-|---|---|
-| ![First launch on iPad Air](docs/screenshots/ipad-air-m3-first-launch.png) | ![Workspace on iPad Air](docs/screenshots/ipad-air-workspace.png) |
+See [CHANGELOG.md](CHANGELOG.md) for the 1.0.16 → 1.1.0 transition and validation boundaries.
 
-<sub>Left: the guest has booted and DeepSeek Harness is served on
-127.0.0.1:3080 (green dot in the DSH bar). Right: a workspace with sessions —
-model picker, the “Guest Ask” permission preset and everything else is the
-stock dsh web UI.</sub>
+## Known limitations
 
-<details>
-<summary>iPhone 17 Pro: startup overlay, UI, terminal, server log</summary>
-<p align="center"><img src="docs/screenshots/iphone-17-pro-montage.png" alt="DSH on iPhone 17 Pro"></p>
-</details>
-
-<details>
-<summary>Also runs on the Apple Silicon iPad simulator</summary>
-<p align="center"><img src="docs/screenshots/simulator-ipad-air-m4.png" width="420" alt="DSH on the iPad Air simulator"></p>
-</details>
-
-## Features
-
-- **Standard DeepSeek API** — Alpine 3.21, Node 22 and dsh run inside the app;
-  model inference uses DeepSeek's API and the harness manages its API key.
-- **The real harness UI** — dsh's own web app served on loopback: sessions,
-  workspaces, tools, permission presets, settings.
-- **A shell when you want one** — `>_` in the DSH bar opens an Alpine terminal
-  in the same guest (`apk add`, `npm i -g`, look at `~/.dsh`); the `⋯` menu has
-  Reload, Server Log, Restart Harness, Open in Safari, About.
-- **Supervised server** — free-port selection, HTTP readiness probe, crash
-  restart with back-off, health check when the app returns to the foreground,
-  live log tail on the startup overlay.
-- **Safe updates** — a new guest image shipped with an app update is imported
-  as a fresh root; `~/.dsh` (sessions, credentials, settings) and the workspace
-  are migrated automatically.
-- **Real LLM streaming under emulation** — Node runs jitless (no WebAssembly),
-  so DSH ships a `fetch()` polyfill with proper streaming `Response` bodies;
-  the SSE round trip is covered by a test against a mock DeepSeek server.
-- **Downloads & files** — session-log exports land in *Files ▸ DSH ▸ Downloads*.
-- Keyboard: ⌘R reload, ⇧⌘T terminal. iPad first; iPhone works too, portrait and landscape.
+- **The iPad Linux guest cannot compile a native iOS app locally.** It has no Xcode or iPhoneOS SDK.
+- **In-app one-click cloud builds are unfinished.** The modules under `experimental/cloud-build/` are unintegrated drafts,
+  excluded from Build 31. Maintainer-driven GitHub Actions builds are a separate capability.
+- iOS may suspend or terminate the app; task history does not guarantee background execution or process recovery.
+- Sharing the repository does not supply model credentials, Apple signing credentials or an immediately installable IPA.
 
 ## Quick start
 
-**Prerequisites:** macOS on Apple Silicon, Xcode 27, iOS/iPadOS 16 or later, `brew install meson ninja lld`.
-(`ld.lld` builds the guest VDSO; without it the guest cannot run),
-Node.js ≥ 20 + npm, the `xcodeproj` Ruby gem (`gem install xcodeproj`, or
-CocoaPods), an Apple developer team for device signing.
+1. Open the [successful Build 31 run](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)
+   and download `DSH-Build31-unsigned-hotfix-candidate` from Artifacts while it remains available.
+2. Extract the ZIP and verify the IPA SHA256 against [the release metadata](releases/1.1.0-build31.json).
+3. Follow [the signing and installation steps](docs/install-sign.md): use your own signing account/tool,
+   connect and trust the device, sign/install, then enable Developer Mode if required.
+4. For an upgrade, back up data and preserve the existing app and signing identity. Configure your own model key in DSH.
 
-Because the app reads Apple Health, it needs the `com.apple.developer.healthkit`
-entitlement, which the team *wildcard* profile does not carry: on your first
-device build, open Signing & Capabilities, pick your team, and let Xcode create
-an explicit App ID for the bundle id. (If you would rather not, remove the
-`HealthKit` capability and `app/DSH.entitlements` — everything else works
-without it.)
+The download is an unsigned test candidate with a retention deadline, not a permanent GitHub Release.
+See [cloud-build.md](docs/cloud-build.md) for the two workflows and fixed RootFS availability constraints.
 
-```bash
-git clone https://github.com/everettjf/dsh-ios.git && cd dsh-ios
-make emulator        # iSH-ARM64 CLI + fakefsify (used to build and test the guest image)
-make rootfs          # build/root.tar.gz — Alpine + Node 22 + dsh (~81 MB, ~6 min, needs network)
-open DSH.xcodeproj   # DSH scheme → your iPad → set the team → Run
-```
-
-Or from the command line:
+## Clone and build from source
 
 ```bash
-make run TEAM=XXXXXXXXXX DEVICE=<udid>   # build, sign, install, launch on the iPad
+git clone https://github.com/wjc19980523-glitch/dsh-ios-ipa.git
+cd dsh-ios-ipa
 ```
 
-First launch imports the guest image (~30 s, progress on the overlay); later
-launches take a few seconds. Configure a DeepSeek API key in the harness when
-prompted; it is stored with the harness settings in the guest.
+Native compilation requires macOS, a suitable Xcode installation and the emulator toolchain.
+Use the cloud workflow or follow [the local Mac build steps](docs/install-sign.md#3-使用自己的-mac-从源码构建).
+The checked-in signing settings contain no developer certificate or account credentials;
+your local signing profile must match the enabled entitlements.
+
+The original screenshots and walkthrough in `docs/` are upstream reference material, not Build 31 acceptance evidence.
 
 ## How it works
 
@@ -170,11 +124,9 @@ make test-device        # + UI tests on the iPad (enable Settings ▸ Developer 
 | `DSHTests` (XCTest, hosted in the app) | port allocator, log ring, readiness probe, harness state machine (fake launcher + local HTTP server); host bridge auth/gating/limits; the confirmation gate (background → refuse, no stacking, always answers); every capability route (refused when switched off, refused before the framework is touched, validated before the user is asked, empty Health answers always explain themselves); guest integration: real server answers, `dsh-selftest`, node/dsh versions, root-image bookkeeping, **whole agent turns calling `device_info` and `health_query` through the bridge against an in-app mock model** | simulator / device |
 | `DSHUITests` (XCUITest) | app boots to the DeepSeek Harness UI, port in the bar, server-log sheet, terminal sheet, landscape layout, the Capabilities screen's switches | simulator / device |
 
-Status: all suites green (`make test`: 3 emulator + 37 rootfs + 114 app + 6 UI checks; the same
-unit + guest-integration tests also run on the iPad Air, where a report test
-prints what each capability actually returned — counts and shapes, never values). Everything runs locally — the build
-needs an Apple Silicon Mac with Xcode, an emulator toolchain and (for the
-device suites) a connected iPhone or iPad, so there is no hosted CI.
+For Build 31, the verified Hotfix gates are 13 message-chain tests, two native upgrade tests,
+unsigned device compilation and IPA integrity. Unchanged host regression evidence was reused.
+This does not claim a fresh full-suite or physical-device pass. See [cloud build evidence](docs/cloud-build.md).
 
 ## Project layout
 
@@ -188,7 +140,7 @@ tests/          emu-test.sh · rootfs-test.sh · mock-deepseek.mjs · fetch-poly
 docs/           screenshots
 build/          generated: root.tar.gz, work dirs, xcresult bundles (git-ignored)
 ish-arm64/      the emulator (vendored, see its UPSTREAM.md)
-site/           project page (GitHub Pages → https://xnu.app/dsh-ios/)
+site/           inherited upstream website sources (not this fork's download authority)
 ```
 
 `DSH.xcodeproj` is generated by `scripts/gen-xcode-project.rb`
@@ -267,22 +219,8 @@ the script tests fail when either side drifts from it.
 
 ## FAQ
 
-**Does it need a jailbreak, TrollStore or a special entitlement?** No. It is a
-normal sandboxed app: the emulator is userspace-only and node runs jitless.
-
-**How fast is it?** Node under emulation is several times slower than native.
-Chatting and normal tool use are fine on an M-series iPad; big `npm install`s or
-compiles inside the guest are slow.
-
-**Where is my data?** Inside the guest image in the app's container:
-`/root/.dsh` (sessions, credentials, settings) and `/root/workspace`. Both
-survive app updates (see *Safe updates*). Downloads go to *Files ▸ DSH*.
-
-**Can I install more tools?** Yes — open the terminal (`>_`) and `apk add …`,
-`npm i -g …`, `pip …`. It is a normal Alpine root.
-
-**Why GPL?** Because the app compiles and statically links the GPLv3 iSH
-emulator. See [License](#license).
+See [the FAQ](docs/faq.md) for signing, local versus cloud compilation, task/export limits,
+model credentials, test certificates and unfinished cloud-build integration.
 
 ## Contributing
 
@@ -294,6 +232,8 @@ bundled dsh: edit `rootfs/staging/package.json`, run `make rootfs`, then
 
 ## Credits
 
+- [everettjf/dsh-ios](https://github.com/everettjf/dsh-ios) — original project and upstream implementation.
+
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — the agent harness (MIT).
 - [iSH](https://github.com/ish-app/ish) and [iSH-ARM64](https://github.com/OpenMinis/ish-arm64) — the emulator this app is built on (GPLv3).
 - [libarchive](https://github.com/libarchive/libarchive), [hterm](https://chromium.googlesource.com/apps/libapps/), [Alpine Linux](https://alpinelinux.org).
@@ -304,6 +244,6 @@ bundled dsh: edit `rootfs/staging/package.json`, run `make rootfs`, then
 emulator, so the whole app is GPLv3; iSH's additional App Store terms in
 [`ish-arm64/LICENSE.IOS`](ish-arm64/LICENSE.IOS) apply as well. Full text in
 [LICENSE](LICENSE); third-party notices (libarchive, hterm, DeepSeek Harness,
-Alpine packages) in [LICENSE.md](LICENSE.md).
+Alpine packages) in [第三方声明 / Third-party notices](docs/third-party-notices.md).
 
 Not affiliated with DeepSeek or the iSH project.

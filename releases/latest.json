@@ -1,0 +1,37 @@
+{
+  "version": "1.1.0",
+  "build": 31,
+  "status": "unsigned-hotfix-test-candidate",
+  "commit": "c91549133e103844e5354be8849bf517f23b1322",
+  "p0_fix_commit": "12e123c4a54260b84de443b1c7b334a7c798bbfa",
+  "ipa_filename": "DSH-1.1.0-build31-unsigned.ipa",
+  "ipa_bytes": 157739414,
+  "ipa_sha256": "e0e73f9f2c94755eec14b71d1dfa32b96bd59fe63c7bbc76bdf820b4ae496685",
+  "workflow_run_id": 39781925031,
+  "artifact_id": 12428440122,
+  "artifact_name": "DSH-Build31-unsigned-hotfix-candidate",
+  "workflow_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031",
+  "download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031/artifacts/12428440122",
+  "artifact_expires_at": "2026-11-21T13:02:37Z",
+  "rootfs_sha256": "d3e055a6f98cc5d508a502aed88c3fca3c75f7b3217ee257d7e4773337d903a0",
+  "signed": false,
+  "stable_release": false,
+  "physical_ipad_validation": "pending",
+  "old_session_history_repair": false,
+  "in_app_one_click_cloud_build": "unfinished",
+  "gates": {
+    "p0_chain": {
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    "native_upgrade": {
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "native_device_archive": "passed",
+    "ipa_integrity": "passed"
+  },
+  "note": "This identifies the delivered IPA source commit, not later main documentation commits."
+}

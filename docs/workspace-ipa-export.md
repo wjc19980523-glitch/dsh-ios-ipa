@@ -103,7 +103,7 @@ packaging, another gate checks Build 30 identity, unsigned arm64 device code,
 both Native classes, all 13 bundled resources and the unchanged RootFS. Portable
 tests of these gate readers are controls, not evidence of Native execution.
 
-## Validation status and remaining acceptance
+## Historical Gate A validation and remaining device acceptance
 
 Gate A local results (WSL Ubuntu): export 34/34, packaged Harness runtime
 60/60, script contracts 10/10, XCTest runner offline contracts 14/14. All have
@@ -117,8 +117,9 @@ those attempts failed on POSIX paths/symlink permissions and the Python3/bash
 environment. The Linux reruns above are the applicable results. No path
 protection was relaxed to accommodate Windows.
 
-See `D:\AI项目\DSHIOS\WorkspaceExport-20261019` for exact commands, original test
-logs, read-only TapGame receipts and the current continuation checkpoint.
+The original Gate A logs are maintainer-local evidence, not repository downloads.
+For the Build 31 candidate and its narrower verified gates, see
+[the release record](../releases/1.1.0-build31.json) and [cloud build guide](cloud-build.md).
 Linux Node tests exercise real file descriptors, binary HTTP transfers, hostile
 paths, source mutation, lost acknowledgements, cancellation and checkpoints.
 The UI protocol fixture is not an iPad Files save. Native XCTest source covers

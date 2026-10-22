@@ -1,90 +1,66 @@
-<h1 align="center">
-  <img src="app/DSHAssets.xcassets/DSHAppIcon.appiconset/icon-1024.png" width="96" alt="DSH 图标"><br>
-  DSHIOS — 在 iPad / iPhone 上运行 DeepSeek Harness
-</h1>
+# DSH iOS — 1.1.0（Build 31）
 
-<p align="center">
-  <b>把 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>（<code>dsh</code>）完整地跑在你的 iPad 或 iPhone 上——不越狱、不需要服务器、不依赖 Mac。</b>
-</p>
+本仓库 **fork 自 [everettjf/dsh-ios](https://github.com/everettjf/dsh-ios)**。
+感谢 Everett 和上游贡献者提供原始 iOS 集成，也感谢 DeepSeek Harness、iSH / iSH-ARM64、
+Alpine Linux 及其他依赖项目。本 fork 的维护仓库为
+[wjc19980523-glitch/dsh-ios-ipa](https://github.com/wjc19980523-glitch/dsh-ios-ipa)。
 
-<p align="center">
-  <a href="https://xnu.app/dsh-ios/">项目主页</a> ·
-  <a href="README.md">English</a> ·
-  <a href="docs/dsh-ios-walkthrough.mp4">12 秒产品导览</a> ·
-  <a href="https://discord.gg/eGzEaP6TzR">Discord</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#工作原理">工作原理</a> ·
-  <a href="#测试">测试</a> ·
-  <a href="#常见问题">常见问题</a>
-</p>
+[English](README.md) · [更新记录](CHANGELOG.md) · [云端构建](docs/cloud-build.md) ·
+[签名安装步骤](docs/install-sign.md) · [常见问题](docs/faq.md)
 
-<p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/iOS%20%7C%20iPadOS-16%2B-blue">
-  <img alt="Guest" src="https://img.shields.io/badge/guest-Alpine%203.21%20%C2%B7%20Node%2022%20%C2%B7%20dsh%200.1-1f6feb">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-emu%20%C2%B7%20rootfs%20%C2%B7%20XCTest%20%C2%B7%20XCUITest-success">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-green"></a>
-</p>
+DSH 在 iPad/iPhone App 中运行 Alpine Linux guest 与 DeepSeek Harness。
+Agent、会话和 shell 在设备上运行，模型推理请求发送到所配置的在线 API。
+**iOS 安装包由 GitHub Actions 的云端 macOS/Xcode 编译，产物是未签名 IPA，需要自行签名安装。**
+要求 iOS/iPadOS 16 或更高版本。
 
-> **项目状态：** DSHIOS 是一个实验性质的项目。虽然可以通过 iSH-ARM64 在
-> iPhone 和 iPad 上运行，但目前性能仍然比较有限。本项目后续不会提交至 App Store，
-> 也不会继续发布新版本。如需体验，请自行下载源码并构建运行。
+> **当前状态：** Build 31 是 Hotfix 测试候选，非稳定版。P0 消息链、两项原生升级兼容性、
+> 真机架构归档和 IPA 完整性门禁已通过，最终 iPad 真机功能仍待验收。
+> 本版不修复旧会话里已经保存的异常历史消息。
 
-DSH 是一个原生 iOS app：它内嵌 [iSH-ARM64](ish-arm64) 用户态 Linux 模拟器，启动内置的
-Alpine Linux 镜像（含 Node.js 22 和 `@deepseek-ai/dsh`），托管 `dsh web` 进程，并在
-`WKWebView` 里显示 harness 自己的 Web 界面。Agent 循环、会话、工具、shell 全部在设备本地
-运行；模型请求使用 harness 中配置的标准 DeepSeek API。
+## 本版改动
 
-▶ **[观看 12 秒产品导览](docs/dsh-ios-walkthrough.mp4)**——包含真机首次启动、完整工作区和 iPhone 界面。
+- 新安装的 Harness 界面默认中文，已有语言设置继续保留。
+- 增加会话隔离的任务历史、任务状态（`job_history`、`job_status`）和更明确的 Activity 状态。
+- 增加只读开发预检，明确提示原生 iOS 编译需要 macOS/Xcode。
+- 增加大文件工作区导出 `workspace_export`：分块传输、哈希校验、原生保存确认，
+  单文件最高 512 MiB，仍受存储和生命周期限制；保留原 8 MiB 小文件接口。
+- 改进 Harness 认证、启动、前后台生命周期及诊断，补充相关回归测试。
+- Build 31 修正 `output.render(args, value)` 参数契约，避免把工具参数对象作为文本结果发给模型。
 
-| iPad Air 真机（M3，iPadOS 27）首次启动 | 会话与工作区 |
-|---|---|
-| ![iPad Air 首次启动](docs/screenshots/ipad-air-m3-first-launch.png) | ![iPad Air 工作区](docs/screenshots/ipad-air-workspace.png) |
+从 1.0.16 到 1.1.0 的变化和验收边界见 [CHANGELOG.md](CHANGELOG.md)。
 
-<sub>左：guest 已启动，DeepSeek Harness 服务在 127.0.0.1:3080（DSH 状态栏绿点）。右：带会话的
-工作区——模型选择、"Guest Ask" 权限预设等都是 dsh 原生的 Web UI。</sub>
+## 已知限制
 
-<details>
-<summary>iPhone 17 Pro：启动页、界面、终端、服务日志</summary>
-<p align="center"><img src="docs/screenshots/iphone-17-pro-montage.png" alt="iPhone 17 Pro 上的 DSH"></p>
-</details>
-
-<details>
-<summary>也能在 Apple Silicon 的 iPad 模拟器上运行</summary>
-<p align="center"><img src="docs/screenshots/simulator-ipad-air-m4.png" width="420" alt="iPad Air 模拟器上的 DSH"></p>
-</details>
-
-## 特性
-
-- **标准 DeepSeek API**——Alpine 3.21、Node 22 和 dsh 都在 app 内运行；模型推理使用 DeepSeek API，API key 由 harness 管理。
-- **原汁原味的 harness 界面**——dsh 自己的 Web 应用通过本机回环端口提供：会话、工作区、工具、权限预设、设置。
-- **随时可用的 shell**——DSH 状态栏的 `>_` 打开同一 guest 里的 Alpine 终端（`apk add`、`npm i -g`、查看 `~/.dsh`）；`⋯` 菜单提供 重新加载 / 服务日志 / 重启 Harness / 在 Safari 打开 / 关于。
-- **受监督的服务进程**——自动选择空闲端口、HTTP 就绪探测、崩溃退避重启、回到前台时健康检查、启动页实时日志。
-- **安全升级**——app 更新携带新的 guest 镜像时，会作为新 root 导入，并自动迁移 `~/.dsh`（会话、凭据、设置）和工作区。
-- **模拟环境下的真实 LLM 流式输出**——Node 以 jitless 模式运行（没有 WebAssembly），DSH 自带一个返回真实流式 `Response` 的 `fetch()` polyfill；SSE 全链路有针对 mock DeepSeek 服务器的测试。
-- **下载与文件**——会话日志导出保存在「文件 ▸ DSH ▸ Downloads」。
-- 快捷键：⌘R 重新加载，⇧⌘T 终端。以 iPad 为主，iPhone 横竖屏也都可用。
+- **iPad 本地不能编译原生 iOS App。** 内置 Linux guest 没有 Xcode / iPhoneOS SDK。
+- **App 内一键云端构建尚未完成。** `experimental/cloud-build/` 是未接入草稿，不在 Build 31 资源包中；
+  维护者手动运行 GitHub Actions 是另一条流程。
+- iOS 仍可能挂起或终止 App；任务历史不等于后台常驻或进程恢复。
+- 分享仓库不包含模型 Key、Apple 签名账号或证书，也不等于别人下载后即可直接安装。
 
 ## 快速开始
 
-**环境要求：** Apple Silicon 的 macOS，Xcode 27，iOS/iPadOS 16 或更高版本，`brew install meson ninja lld`。
-（`ld.lld` 用于构建 guest 的 VDSO，缺少它 guest 无法运行），Node.js ≥ 20 + npm，
-`xcodeproj` Ruby gem（`gem install xcodeproj`，或随 CocoaPods 一起），以及一个 Apple 开发者团队用于真机签名。
+1. 打开 [Build 31 成功构建](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)，
+   在 Artifacts 中下载 `DSH-Build31-unsigned-hotfix-candidate`。
+2. 解压并按照[版本记录](releases/1.1.0-build31.json)核对 IPA 的 SHA256。
+3. 按[签名安装步骤](docs/install-sign.md)，使用自己的账号和签名工具，连接并信任 iPad，
+   签名安装后按系统提示启用开发者模式。
+4. 覆盖升级前备份，保留原 App 和签名身份；首次使用在 DSH 内配置自己的模型 Key。
+
+该下载是有保留期限的未签名测试 artifact，不是永久稳定版 Release。
+两条工作流和固定 RootFS 的获取限制见[云端构建说明](docs/cloud-build.md)。
+
+## 克隆与源码构建
 
 ```bash
-git clone https://github.com/everettjf/dsh-ios.git && cd dsh-ios
-make emulator        # 构建 iSH-ARM64 命令行版 + fakefsify（用于构建和测试 guest 镜像）
-make rootfs          # build/root.tar.gz —— Alpine + Node 22 + dsh（约 95 MB，约 6 分钟，需要联网）
-open DSH.xcodeproj   # 选 DSH scheme → 你的 iPad → 设置 team → Run
+git clone https://github.com/wjc19980523-glitch/dsh-ios-ipa.git
+cd dsh-ios-ipa
 ```
 
-也可以全部命令行完成：
+原生编译需要 macOS、合适的 Xcode 和模拟器工具链；可使用云端流程，
+或按照[本地 Mac 构建步骤](docs/install-sign.md#3-使用自己的-mac-从源码构建)操作。
+仓库不提供开发者证书或账号凭据，自己的签名 profile 必须与启用的 entitlement 匹配。
 
-```bash
-make run TEAM=XXXXXXXXXX DEVICE=<udid>   # 构建、签名、安装、启动到 iPad
-```
-
-首次启动会导入 guest 镜像（约 30 秒，启动页有进度），之后启动只需几秒。首次使用模型时，
-请按 harness 的提示配置 DeepSeek API key；它会随 harness 设置保存在 guest 中。
+`docs/` 中原有截图与导览属于上游参考资料，不作为 Build 31 的真机验收证据。
 
 ## 工作原理
 
@@ -140,7 +116,8 @@ make test-device        # 再加 UI 测试（需先在 iPad 设置 ▸ 开发者
 | `DSHTests`（XCTest，宿主在 app 内） | 端口分配、日志环、就绪探测、监督器状态机（假 launcher + 本地 HTTP 服务器）；host bridge 的认证/能力开关/限流；guest 集成：真实服务响应、`dsh-selftest`、node/dsh 版本、镜像簿记、**用 app 内 mock 模型跑完整一轮 agent 对话并通过 bridge 调用 `device_info`** | 模拟器 / 真机 |
 | `DSHUITests`（XCUITest） | 启动到 DeepSeek Harness 界面、状态栏端口、服务日志页、终端页、横屏布局 | 模拟器 / 真机 |
 
-现状：全部通过（`make test`：3 + 16 + 32 + 4 项；iPad Air 真机 32/32 单元 + guest 集成测试）。测试都在本地跑：构建需要 Apple Silicon Mac + Xcode + 模拟器工具链，真机套件还需要连着 iPhone / iPad，因此没有托管 CI。
+Build 31 已通过的 Hotfix 门禁为：13 项消息链、2 项原生升级测试、未签名真机归档和 IPA 完整性。
+未变化的宿主测试复用已有证据，不代表重新完成全量或真机验收。详见[云构建证据](docs/cloud-build.md)。
 
 ## 目录结构
 
@@ -154,7 +131,7 @@ tests/          emu-test.sh · rootfs-test.sh · mock-deepseek.mjs · fetch-poly
 docs/           截图
 build/          生成物：root.tar.gz、工作目录、xcresult（已 gitignore）
 ish-arm64/      模拟器（vendored，见其 UPSTREAM.md）
-site/           项目主页（GitHub Pages → https://xnu.app/dsh-ios/）
+site/           上游遗留网站源码（不作为本 fork 下载入口）
 ```
 
 `DSH.xcodeproj` 由 `scripts/gen-xcode-project.rb`（`make project`）生成，增删源码文件后重新运行即可。
@@ -212,15 +189,7 @@ Apple Health 有个值得注意的地方：iOS 从不告诉 app **读**权限是
 
 ## 常见问题
 
-**需要越狱、TrollStore 或特殊 entitlement 吗？** 不需要。它就是一个普通的沙箱 app：模拟器纯用户态，node 以 jitless 运行。
-
-**速度如何？** 模拟环境下的 Node 比原生慢数倍。在 M 系列 iPad 上聊天和常规工具调用没问题；guest 内大规模 `npm install` 或编译会比较慢。
-
-**我的数据在哪？** 在 app 容器内的 guest 镜像里：`/root/.dsh`（会话、凭据、设置）和 `/root/workspace`，app 升级时会自动迁移（见「安全升级」）。下载文件在「文件 ▸ DSH」。
-
-**能装更多工具吗？** 可以——打开终端（`>_`）然后 `apk add …`、`npm i -g …`、`pip …`，这就是一个正常的 Alpine 根文件系统。
-
-**为什么是 GPL？** 因为 app 编译并静态链接了 GPLv3 的 iSH 模拟器，见[许可证](#许可证)。
+详见 [FAQ](docs/faq.md)：签名安装、本地与云端编译、任务与导出限制、模型凭据、测试证书和未完成的一键云构建。
 
 ## 参与贡献
 
@@ -230,6 +199,8 @@ Apple Health 有个值得注意的地方：iOS 从不告诉 app **读**权限是
 
 ## 致谢
 
+- [everettjf/dsh-ios](https://github.com/everettjf/dsh-ios) —— 原始项目与上游实现。
+
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) —— agent harness 本体（MIT）。
 - [iSH](https://github.com/ish-app/ish) 与 [iSH-ARM64](https://github.com/OpenMinis/ish-arm64) —— 本 app 所依赖的模拟器（GPLv3）。
 - [libarchive](https://github.com/libarchive/libarchive)、[hterm](https://chromium.googlesource.com/apps/libapps/)、[Alpine Linux](https://alpinelinux.org)。
@@ -238,6 +209,6 @@ Apple Health 有个值得注意的地方：iOS 从不告诉 app **读**权限是
 
 **GPL-3.0。** DSH 编译并静态链接了 GPLv3 的 iSH / iSH-ARM64 模拟器，因此整个 app 以 GPLv3 发布；iSH
 在 [`ish-arm64/LICENSE.IOS`](ish-arm64/LICENSE.IOS) 中关于 App Store 的附加条款同样适用。全文见
-[LICENSE](LICENSE)，第三方声明（libarchive、hterm、DeepSeek Harness、Alpine 软件包）见 [LICENSE.md](LICENSE.md)。
+[LICENSE](LICENSE)，第三方声明（libarchive、hterm、DeepSeek Harness、Alpine 软件包）见 [第三方声明 / Third-party notices](docs/third-party-notices.md)。
 
 本项目与 DeepSeek 及 iSH 项目无隶属关系。

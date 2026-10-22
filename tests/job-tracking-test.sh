@@ -41,7 +41,8 @@ python3 "$HERE/guest-runner.py" run --host-only --phase job-tracking \
     phase syntax:done
     phase suite:start
     node --import "$1/job-tracking-trace.mjs" --test --test-reporter=tap \
-      "$1/job-ledger-test.mjs" "$1/job-tracking-runtime-test.mjs" "$1/development-tools-test.mjs"
+      "$1/job-ledger-test.mjs" "$1/job-tracking-runtime-test.mjs" "$1/development-tools-test.mjs" \
+      "$1/tool-result-chain-test.mjs"
     phase suite:done
   ' bash "$HERE" "$WORK" 2>&1 | tee "$DIAGNOSTICS/suite.log"
 PIPELINE_STATUS=("${PIPESTATUS[@]}")
@@ -49,5 +50,5 @@ set -e
 # A simultaneous tee failure must not hide the supervised command's exit code.
 if [ "${PIPELINE_STATUS[0]}" -ne 0 ]; then exit "${PIPELINE_STATUS[0]}"; fi
 if [ "${PIPELINE_STATUS[1]}" -ne 0 ]; then exit "${PIPELINE_STATUS[1]}"; fi
-python3 "$HERE/check-job-tracking-result.py" --expected 60 \
+python3 "$HERE/check-job-tracking-result.py" --expected 73 \
   --result "$DIAGNOSTICS/result.json" --log "$DIAGNOSTICS/suite.log"

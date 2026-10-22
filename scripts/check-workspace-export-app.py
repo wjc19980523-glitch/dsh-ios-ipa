@@ -267,6 +267,8 @@ def inspect_resources(app, source_root):
     tracking = next(item for item in files if item["source"] == "job-tracking.mjs")
     require("f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510" in tracking.get("previous_sha256", []),
             "Build 29 Guest tracking upgrade hash missing")
+    require("c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb" in tracking.get("previous_sha256", []),
+            "Build 30 Guest tracking upgrade hash missing")
     patches = manifest.get("patches")
     require(isinstance(patches, list) and len(patches) == 1 and isinstance(patches[0], dict), "Guest index patch missing")
     patch = patches[0]

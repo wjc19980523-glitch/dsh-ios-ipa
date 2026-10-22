@@ -49,7 +49,9 @@ export function installJobTracking(ctx, defineTool, options = {}) {
     + 'bounds connect/stall/total time, verifies before publication and never retries automatically. '
     + 'It does not install packages or speed up a slow network. Do not use arbitrary downloaded hashes as independent trust evidence. '
     + 'job_status includes live numeric output observations; no recent output alone is not proof of a hang.' });
-  const output = { schema: { type: 'string' }, render: value => [{ type: 'text', text: value }] };
+  // Harness passes (arguments, validated output); rendering the first argument
+  // would put an object in text and invalidate the next model request.
+  const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] };
   ctx.tools.register(defineTool({ name: 'development_preflight', description:
     'Read the actual development environment before installing tools. Native iOS requires a real Mac/Xcode; no install, network request or build is started.',
     parameters: { target: { type: 'string', required: true, enum: ['native-ios', 'web', 'script'] } }, output,

@@ -62,6 +62,8 @@ on:
       - "tests/DSHUITests/**"
       - "tests/ui-dialog-observer-test.mjs"
       - "tests/workspace-export-test.mjs"
+      - "tests/tool-result-chain-test.mjs"
+      - "tests/job-tracking-*"
       - "tests/fixtures/cloud-build/**"
       - "scripts/restore-pinned-rootfs.py"
       - "tests/pinned-rootfs-restore-test.py"

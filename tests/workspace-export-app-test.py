@@ -235,6 +235,14 @@ class ArchiveGateTests(unittest.TestCase):
         self.edit_manifest(lambda manifest: manifest["patches"][0].update(patched_sha256="0" * 64))
         with self.assertRaises(GATE.Rejected): self.check()
 
+    def test_build30_upgrade_hash_required_even_when_build29_is_retained(self):
+        def edit(manifest):
+            item = next(item for item in manifest["files"] if item["source"] == "job-tracking.mjs")
+            item["previous_sha256"].remove("c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb")
+        self.edit_manifest(edit)
+        with self.assertRaisesRegex(GATE.Rejected, "Build 30 Guest tracking upgrade hash missing"):
+            self.check()
+
     def test_removing_tool_registration_rejected_even_with_coherent_new_hash(self):
         path = self.app / "JobTracking.bundle/workspace-export.mjs"
         data = path.read_bytes().replace(b"name: 'file_export_from_workspace'", b"name: 'removed_tool'")

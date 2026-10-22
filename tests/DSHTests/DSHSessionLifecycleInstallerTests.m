@@ -676,6 +676,95 @@ static NSString *DSHInstallerTestHash(NSData *data) {
         [prefix stringByAppendingString:@"workspace-export.mjs"], controller]));
     XCTAssertEqualObjects(self.filesystem.files[ledger], self.resources[@"job-ledger.mjs"]);
 }
+// Exercise the actual bundled resource bytes and upgrade whitelist. The bridge
+// index remains the existing synthetic fixture; this is not a guest/rootfs test.
+- (BOOL)prepareActualBuild30TrackingUpgradeFixture {
+    [self prepareJobTrackingFixture];
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:@"JobTracking" withExtension:@"bundle"];
+    NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]] : nil;
+    XCTAssertNotNil(manifestData, @"actual JobTracking bundle is required");
+    if (!manifestData) return NO;
+    NSDictionary *bundledManifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:nil];
+    NSArray *records = bundledManifest[@"files"];
+    XCTAssertEqual(records.count, 4u);
+    if (records.count != 4) return NO;
+    NSMutableDictionary *resources = [NSMutableDictionary dictionary];
+    NSDictionary *trackingRecord = nil;
+    for (NSDictionary *record in records) {
+        NSString *source = record[@"source"];
+        NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
+        XCTAssertNotNil(data, @"missing actual JobTracking resource %@", source);
+        if (!data) return NO;
+        XCTAssertEqualObjects(DSHInstallerTestHash(data), record[@"sha256"]);
+        resources[source] = data;
+        self.filesystem.files[record[@"target"]] = data;
+        if ([source isEqual:@"job-tracking.mjs"]) trackingRecord = record;
+    }
+    XCTAssertNotNil(trackingRecord);
+    if (!trackingRecord) return NO;
+    NSString *fixed = @"  // Harness passes (arguments, validated output); rendering the first argument\n"
+        @"  // would put an object in text and invalidate the next model request.\n"
+        @"  const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] };";
+    NSString *build30 = @"  const output = { schema: { type: 'string' }, render: value => [{ type: 'text', text: value }] };";
+    NSString *current = [[NSString alloc] initWithData:resources[@"job-tracking.mjs"] encoding:NSUTF8StringEncoding];
+    XCTAssertEqual([current componentsSeparatedByString:fixed].count, 2u, @"reverse exactly this P0 change");
+    if ([current componentsSeparatedByString:fixed].count != 2) return NO;
+    NSData *previous = DSHInstallerTestData([current stringByReplacingOccurrencesOfString:fixed withString:build30]);
+    NSString *build30Hash = @"c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb";
+    XCTAssertEqualObjects(DSHInstallerTestHash(previous), build30Hash, @"fixture must reproduce the shipped Build 30 bytes");
+    XCTAssertTrue([trackingRecord[@"previous_sha256"] containsObject:build30Hash], @"actual manifest must authorize a Build 30 upgrade");
+    self.filesystem.files[trackingRecord[@"target"]] = previous;
+    self.filesystem.files[@"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js"] = self.patched;
+    NSMutableDictionary *manifest = [self.manifest mutableCopy];
+    manifest[@"files"] = records; // Keep the actual record and all its allowed previous hashes unchanged.
+    self.manifest = manifest; self.resources = resources;
+    NSMutableDictionary *sentinels = [self.userSentinels mutableCopy];
+    sentinels[@"/root/.dsh/.job-history/v1.json"] = DSHInstallerTestData(@"synthetic-retained-job-ledger");
+    sentinels[@"/root/.dsh/.workspace-export-v1/retained.json"] = DSHInstallerTestData(@"synthetic-resumable-export");
+    self.userSentinels = sentinels;
+    [self.filesystem.files addEntriesFromDictionary:sentinels];
+    return YES;
+}
+- (void)testActualBuild30TrackingUpgradeChangesOnlyControllerAndPreservesUserData {
+    if (![self prepareActualBuild30TrackingUpgradeFixture]) return;
+    NSString *controller = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs";
+    NSMutableDictionary *expected = [self.filesystem.files mutableCopy];
+    expected[controller] = self.resources[@"job-tracking.mjs"];
+    NSSet *directories = [self.filesystem.directories copy];
+    NSError *error = nil;
+    XCTAssertTrue([self installJobs:&error], @"%@", error);
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(self.filesystem.files, expected, @"sessions, keys, ledger, export state and peer tools must remain byte-identical");
+    XCTAssertEqualObjects(self.filesystem.directories, directories);
+    XCTAssertEqualObjects(self.filesystem.renamedTargets, (@[controller]));
+    XCTAssertEqual(self.filesystem.createdPaths.count, 1u);
+    XCTAssertTrue([self.filesystem.createdPaths.firstObject hasPrefix:[controller stringByAppendingString:@".dsh-session-"]]);
+    XCTAssertEqual(self.filesystem.writeCalls, 1u);
+    XCTAssertEqual(self.filesystem.removedPaths.count, 0u);
+    XCTAssertTrue([self installJobs:&error], @"idempotent upgrade: %@", error);
+    XCTAssertNil(error);
+    XCTAssertEqual(self.filesystem.writeCalls, 1u);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 1u);
+    XCTAssertEqual(self.filesystem.renamedTargets.count, 1u);
+    XCTAssertEqual(self.filesystem.removedPaths.count, 0u);
+    XCTAssertEqualObjects(self.filesystem.files, expected);
+}
+- (void)testActualBuild30TrackingUpgradeRejectsUnknownControllerWithoutWrites {
+    if (![self prepareActualBuild30TrackingUpgradeFixture]) return;
+    NSString *controller = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs";
+    self.filesystem.files[controller] = DSHInstallerTestData(@"unknown user-modified tracking controller");
+    NSDictionary *before = [self.filesystem.files copy];
+    NSError *error = nil;
+    XCTAssertFalse([self installJobs:&error]);
+    XCTAssertEqual(error.code, DSHSessionLifecycleInstallerUnknownSource);
+    XCTAssertEqualObjects(error.userInfo[@"operation"], @"unrecognized existing controller");
+    XCTAssertEqualObjects(error.userInfo[@"target"], controller);
+    XCTAssertEqualObjects(self.filesystem.files, before);
+    XCTAssertEqual(self.filesystem.writeCalls, 0u);
+    XCTAssertEqual(self.filesystem.createdPaths.count, 0u);
+    XCTAssertEqual(self.filesystem.renamedTargets.count, 0u);
+    XCTAssertEqual(self.filesystem.removedPaths.count, 0u);
+}
 - (void)prepareOnboardingFixture {
     NSString *parent = DSHInstallerTestOnboarding.stringByDeletingLastPathComponent;
     while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }

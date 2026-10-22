@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/job-tracking-prepare.py --fixtures build/hotfix-fixtures
-          DSH_JOB_FIXTURES="$PWD/build/hotfix-fixtures" node --test tests/tool-result-chain-test.mjs 2>&1 | tee hotfix-evidence/p0-chain.log
+          DSH_JOB_FIXTURES="$PWD/build/hotfix-fixtures" node --test --test-reporter=tap tests/tool-result-chain-test.mjs 2>&1 | tee hotfix-evidence/p0-chain.log
           python3 scripts/check-hotfix31.py chain --input hotfix-evidence/p0-chain.log --output hotfix-evidence/p0-chain.json
 
       - name: Execute the two existing Native upgrade compatibility tests

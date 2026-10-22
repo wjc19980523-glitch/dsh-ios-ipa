@@ -11,3 +11,18 @@ ish-arm64/deps/build/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Local credentials and signing outputs (public TLS fixtures remain tracked).
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+AuthKey_*.p8
+ExportOptions.local.plist
+releases/*.ipa
+releases/*.zip

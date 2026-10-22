@@ -2809,7 +2809,7 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 			};
 			name = Release;
@@ -2818,7 +2818,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AA000015AF96D90D00FFB7A4 /* AppARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = "Debug-ApplePleaseFixFB19282108";
 		};
@@ -2826,7 +2826,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AA000015AF96D90D00FFB7A4 /* AppARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = DebugLinux;
 		};
@@ -2834,7 +2834,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AA000015AF96D90D00FFB7A4 /* AppARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = Release;
 		};
@@ -2842,7 +2842,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AA000015AF96D90D00FFB7A4 /* AppARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = ReleaseLinux;
 		};
@@ -2866,7 +2866,7 @@
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 			};
 			name = "Debug-ApplePleaseFixFB19282108";
@@ -3006,7 +3006,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = BB0B86CD2586FD8800208600 /* App.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = "Debug-ApplePleaseFixFB19282108";
 		};
@@ -3014,7 +3014,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = BB0B86CD2586FD8800208600 /* App.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = Release;
 		};
@@ -3030,7 +3030,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = BB0B86CD2586FD8800208600 /* App.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = DebugLinux;
 		};
@@ -3053,7 +3053,7 @@
 			baseConfigurationReference = BB0B86D52587009D00208600 /* iOS.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = app/FileProvider/iSHFileProvider.entitlements;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = app/FileProvider/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).FileProvider";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3131,7 +3131,7 @@
 			baseConfigurationReference = BB0B86D52587009D00208600 /* iOS.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = app/FileProvider/iSHFileProvider.entitlements;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = app/FileProvider/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).FileProvider";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3143,7 +3143,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AAF20031AF96D90D00FFB7A4 /* FileProviderARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = "Debug-ApplePleaseFixFB19282108";
 		};
@@ -3151,7 +3151,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AAF20031AF96D90D00FFB7A4 /* FileProviderARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = DebugLinux;
 		};
@@ -3159,7 +3159,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AAF20031AF96D90D00FFB7A4 /* FileProviderARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = Release;
 		};
@@ -3167,7 +3167,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = AAF20031AF96D90D00FFB7A4 /* FileProviderARM64.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = ReleaseLinux;
 		};
@@ -3176,7 +3176,7 @@
 			baseConfigurationReference = BB0B86D52587009D00208600 /* iOS.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = app/FileProvider/iSHFileProvider.entitlements;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = app/FileProvider/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).FileProvider";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -3312,7 +3312,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = BB0B86CD2586FD8800208600 /* App.xcconfig */;
 			buildSettings = {
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 			};
 			name = ReleaseLinux;
 		};
@@ -3335,7 +3335,7 @@
 			baseConfigurationReference = BB0B86D52587009D00208600 /* iOS.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = app/FileProvider/iSHFileProvider.entitlements;
-				DEVELOPMENT_TEAM = K8Q74NT2BG;
+				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = app/FileProvider/Info.plist;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).FileProvider";
 				PRODUCT_NAME = "$(TARGET_NAME)";

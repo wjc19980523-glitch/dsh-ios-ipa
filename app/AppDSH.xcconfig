@@ -27,8 +27,8 @@ SUPPORTED_PLATFORMS = iphoneos iphonesimulator
 SUPPORTS_MACCATALYST = NO
 
 // Signing: automatic; pass DSH_DEVELOPMENT_TEAM=XXXXXXXXXX to xcodebuild or
-// set it here for local builds. The wildcard team profile is enough — the app
-// declares no special entitlements.
+// provide it through local build settings. The selected profile must support
+// the entitlements requested by the signed build; see docs/install-sign.md.
 CODE_SIGN_STYLE = Automatic
 DEVELOPMENT_TEAM = $(DSH_DEVELOPMENT_TEAM)
 

@@ -49,10 +49,11 @@ Web/脚本项目，随后将 iOS 项目交给外部 macOS 构建。
 Build 31 保持固定 RootFS，测试覆盖已知 Build 30 模块升级的数据保留边界；
 这不意味着所有设备、签名方式及历史会话都已经验收。升级前备份，勿先卸载。
 
-## 为什么下载链接会过期？
+## 应该从哪里下载？
 
-当前提供 Actions 测试 artifact，受保留期限约束，并非永久 GitHub Release。
-过期后的重新构建还依赖固定 RootFS 的可获取性。详见[云构建说明](cloud-build.md)。
+从 [Build 31 Pre-release](https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31) 的 Assets 下载 IPA。
+原 Actions artifact 有保留期限，Release 附件不受该期限影响。重新构建仍依赖固定 RootFS
+的可获取性，不能把附件可下载等同于构建依赖永久可用。详见[云构建说明](cloud-build.md)。
 
 ## 仓库里的测试证书是什么？
 

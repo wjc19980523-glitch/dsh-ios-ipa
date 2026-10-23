@@ -39,14 +39,14 @@ See [CHANGELOG.md](CHANGELOG.md) for the 1.0.16 → 1.1.0 transition and validat
 
 ## Quick start
 
-1. Open the [successful Build 31 run](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)
-   and download `DSH-Build31-unsigned-hotfix-candidate` from Artifacts while it remains available.
-2. Extract the ZIP and verify the IPA SHA256 against [the release metadata](releases/1.1.0-build31.json).
+1. Open the [Build 31 Pre-release](https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31)
+   and download `DSH-1.1.0-build31-unsigned.ipa` from Assets.
+2. Verify the IPA SHA256 against [the release metadata](releases/1.1.0-build31.json).
 3. Follow [the signing and installation steps](docs/install-sign.md): use your own signing account/tool,
    connect and trust the device, sign/install, then enable Developer Mode if required.
 4. For an upgrade, back up data and preserve the existing app and signing identity. Configure your own model key in DSH.
 
-The download is an unsigned test candidate with a retention deadline, not a permanent GitHub Release.
+This is an unsigned Pre-release test candidate; physical iPad validation remains required.
 See [cloud-build.md](docs/cloud-build.md) for the two workflows and fixed RootFS availability constraints.
 
 ## Clone and build from source

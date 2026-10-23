@@ -11,7 +11,7 @@
   "artifact_id": 12428440122,
   "artifact_name": "DSH-Build31-unsigned-hotfix-candidate",
   "workflow_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031",
-  "download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031/artifacts/12428440122",
+  "download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31",
   "artifact_expires_at": "2026-11-21T13:02:37Z",
   "rootfs_sha256": "d3e055a6f98cc5d508a502aed88c3fca3c75f7b3217ee257d7e4773337d903a0",
   "signed": false,
@@ -33,5 +33,9 @@
     "native_device_archive": "passed",
     "ipa_integrity": "passed"
   },
-  "note": "This identifies the delivered IPA source commit, not later main documentation commits."
+  "note": "This identifies the delivered IPA source commit, not later main documentation commits.",
+  "artifact_download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031/artifacts/12428440122",
+  "release_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31",
+  "release_tag": "v1.1.0-build31",
+  "ipa_download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/download/v1.1.0-build31/DSH-1.1.0-build31-unsigned.ipa"
 }

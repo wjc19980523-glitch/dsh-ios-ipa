@@ -9,14 +9,15 @@ iPad 内的 Alpine Linux guest 可以运行 Agent、shell 和适配 Linux 的工
 
 - 版本：1.1.0 (31)，未签名 Hotfix 测试候选，非稳定版。
 - [成功构建记录](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)
-- [候选包 artifact](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031/artifacts/12428440122)
+- [Pre-release 下载](https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31)
+- [原构建 artifact（溯源）](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031/artifacts/12428440122)
 - artifact 名称：`DSH-Build31-unsigned-hotfix-candidate`。
 - 源码提交：`c91549133e103844e5354be8849bf517f23b1322`。
 - [版本、大小与 SHA256](../releases/1.1.0-build31.json)。SHA256 对应解压后的 IPA，不是外层 artifact ZIP。
 
-登录有下载权限的 GitHub 账号，打开运行记录底部的 Artifacts，下载并解压。
-Actions artifact 有保留期限；本次候选预计于 2026-11-21 UTC 到期。
-到期后链接失效不代表源码丢失，也不应改用来源不明的同名包。
+优先从 Pre-release 页面 Assets 下载带版本号的 IPA，无需解压 Actions ZIP。
+Release 附件与原 Actions 构建产物哈希一致，不受原 artifact 保留期限影响。
+原 Actions artifact 仅作为构建溯源，预计于 2026-11-21 UTC 到期。
 本仓库的 `releases/` 保存版本元数据，不存放 150 MB 的 IPA 二进制。
 签名与安装步骤见 [install-sign.md](install-sign.md)。
 

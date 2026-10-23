@@ -6,9 +6,10 @@
 
 ## 1. 下载并校验
 
-从 [Build 31 成功构建](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)
-的 Artifacts 下载 `DSH-Build31-unsigned-hotfix-candidate`，解压得到
-`DSH-1.1.0-build31-unsigned.ipa`、SHA256 文件和构建记录。
+从 [Build 31 Pre-release](https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31)
+的 Assets 下载 `DSH-1.1.0-build31-unsigned.ipa`。该附件与
+[原 Actions 构建](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)的 IPA 完全一致，
+版本与来源见 [releases/1.1.0-build31.json](../releases/1.1.0-build31.json)。
 
 在下载目录执行其中一条：
 

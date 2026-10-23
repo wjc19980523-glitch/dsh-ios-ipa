@@ -39,14 +39,14 @@ Agent、会话和 shell 在设备上运行，模型推理请求发送到所配�
 
 ## 快速开始
 
-1. 打开 [Build 31 成功构建](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/39781925031)，
-   在 Artifacts 中下载 `DSH-Build31-unsigned-hotfix-candidate`。
-2. 解压并按照[版本记录](releases/1.1.0-build31.json)核对 IPA 的 SHA256。
+1. 打开 [Build 31 Pre-release](https://github.com/wjc19980523-glitch/dsh-ios-ipa/releases/tag/v1.1.0-build31)，
+   在 Assets 中下载 `DSH-1.1.0-build31-unsigned.ipa`。
+2. 按照[版本记录](releases/1.1.0-build31.json)核对 IPA 的 SHA256。
 3. 按[签名安装步骤](docs/install-sign.md)，使用自己的账号和签名工具，连接并信任 iPad，
    签名安装后按系统提示启用开发者模式。
 4. 覆盖升级前备份，保留原 App 和签名身份；首次使用在 DSH 内配置自己的模型 Key。
 
-该下载是有保留期限的未签名测试 artifact，不是永久稳定版 Release。
+该下载是未签名 Pre-release 测试候选，最终 iPad 真机功能仍需验收。
 两条工作流和固定 RootFS 的获取限制见[云端构建说明](docs/cloud-build.md)。
 
 ## 克隆与源码构建

@@ -1,0 +1,159 @@
+# iOS 多 Bot MVP
+
+这是 dsh-ios 自研的薄层：Chief、每 Bot 一个长期 DSH Session、独立职责和 Markdown 记忆。
+只参考 [DS-Bot 的产品架构](https://github.com/Fei2411/DS-Bot)，未复制、合并或安装其插件代码。
+不宣称兼容官方 ds-bot 插件；没有群聊 @、Bot 交接、Capabilities 商店、桌面数据互通或 Superagent。
+本分支基于 `upgrade/harness-0.2.1-rc.3` 的 `0fbc7b8`。
+
+## Build 33 测试 IPA
+
+2026-11-03（北京时间）已生成 **1.1.1 (33) 未签名测试 IPA**，支持 iOS/iPadOS 16 及以上。
+从 [Build 33 下载附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336/artifacts/13167158445)
+下载 ZIP，解压得到 `DSH-1.1.1-build33-unsigned.ipa` 和 `ipa.sha256`。GitHub 下载需要登录，附件保留至
+2026-12-03 02:18:59（北京时间）。准确哈希、大小和源码提交见[Build 33 记录](../releases/1.1.1-build33.json)。
+
+安装前先备份已有数据，保留原 App；按[签名安装步骤](install-sign.md#2-自行签名安装)使用自己的签名工具，
+选择此处的 **Build 33** 文件并沿用原签名账号和 Bundle ID。安装后确认版本为 1.1.1 (33)，保持前台等待启动，
+然后在“我的 Bots”进入 Chief。覆盖安装的数据保留仍须按下方真机清单验收。
+这是功能分支测试包，尚未发布 GitHub Release，也未替换 `releases/latest.json` 中的 Harness 升级基线。
+
+## 使用
+
+1. 打开 App，完成原有首次启动提示，在侧边栏“我的 Bots”进入 Chief。
+2. 点“+ / 新建 Bot”，或在 Chief 会话中点“创建 Bot”，填写名称和职责；空白会话的入口位于输入区，已有聊天时位于标题旁。
+3. 也可直接对 Chief 说：“创建一个名为作家的 Bot，负责润色中文文章。”Chief 调用 `ios_bot_create`；列表最多约 5 秒刷新。
+4. 点击 Bot 回到同一个长期会话；原生 Harness 聊天、模型选择、工具权限与停止按钮仍然适用。
+5. 点侧边栏或会话标题的“记忆”读取 Markdown。可在聊天中明确要求“记住……”，由 Bot 使用记忆工具保存。
+6. 清空记忆需在界面再次确认；运行中的 Bot 需先停止。清空只影响该文件，不删除聊天记录，也不消除当前上下文中已出现的事实。
+
+## 入口和安装
+
+`app/DSHRootViewController.m` 的 WKWebView 加载 `DSHHarness` 监督的 iSH guest `dsh web`。
+没有新增 WebView、常驻服务或另一个模型后端。
+
+`DSHBootCoordinator` 在启动 Harness 前，通过现有 `DSHSessionLifecycleInstaller` 校验并安装
+`app/JobTracking.bundle/multi-bot-{store.mjs,client.js}` 和 `multi-bot.mjs`。
+独立的 `multi-bot-manifest.json` 只允许修改固定 host-bridge `package.json`，声明 rc.3 的浏览器模块；
+资源写入、fsync 和校验成功后才提交描述文件。随后原有 JobTracking 安装器更新导入 Bot 模块的控制器，允许从 Build 32 的已知哈希升级。
+若安装中断或发现未知系统文件则停止启动，不覆盖用户文件。无需重建已固定的 rootfs，也不修改第三方包源码。
+
+客户端通过 Harness 的 `sidebar.footer.action`、`conversation.session.header.actions`、`conversation.hero.options`、`shell.overlay` 插槽注册。
+rc.3 隐藏空白会话的标题操作区，因此同时使用空白会话选项插槽，保证首次进入 Chief 即可创建 Bot。
+进入 Bot 调用 `uiWorkspace.openSession(sessionId)`，继续使用现有聊天界面。
+`/api/ios-multi-bot` 通过 `connection.fetch.register` 注册，复用 Harness 的启动 token / 会话 cookie 和同源校验，
+没有直接暴露未认证的 webServer 路由。新增 API 不接受任意文件路径。
+
+## 数据与会话
+
+默认根目录为 `/root/.dsh/ios-multi-bot`（设置 `DSH_HOME` 时位于该目录下）：
+
+```text
+bots.json
+<UUID>/memory.md
+<UUID>/workspace/
+```
+
+`bots.json` 为数组，每项包括：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | UUID，不由名称拼路径 |
+| `name` | 1–40 字符，名称不区分大小写唯一 |
+| `role` | 1–1000 字符职责 |
+| `sessionId` | `ios-bot-<UUID>`，创建后不变 |
+| `memoryPath` | 固定的 `<根>/<UUID>/memory.md` |
+| `isMain` | 仅自动创建的 Chief 为 true |
+| `sessionReady` | 首次会话已落盘，用于区分尚未使用与会话文件丢失 |
+
+创建 Bot 只保存目录和清单，不启动模型。首次进入时创建指定 ID 的 DSH 会话并等待 persistence flush，之后检查并打开同一 ID。
+约定目录同时登记为 Harness Workspace，并绑定该会话；rc.3 的空白输入框要求这个成员关系，只有 `cwd` 仍会锁住输入框。Workspace 按目录复用，名称使用 Bot 名称。
+切换使用 `sessionPersistence.stat` 只读会话头，避免为校验再加载一份完整聊天日志；历史仍交给原有聊天 UI 读取。
+**不能每次切换都调用 `session.create`**：rc.3 对已经开始聊天的会话可能分配一个新 ID。
+已使用 Bot 的会话若丢失、目录不匹配或读盘失败，会显示错误，不悄悄替换成空白会话。
+
+每次模型提示词装配都按 agent/session ID 查找 Bot，附加名称、职责、约定目录和当前记忆。
+普通会话不获得 Bot 工具；仅 Chief 的提示词提供创建工具，服务端也检查真实执行者，参数不能冒充 Chief。
+所有 Bot 可读取/写入自己的记忆。Markdown 以引用数据加入提示词，界面仅显示文本，不执行 HTML。
+
+清单写入使用串行队列、临时文件、fsync、rename；损坏 JSON 不会自动初始化覆盖。
+相同名称和职责的创建重试返回原 Bot。记忆写入/清空比较内容 revision，拒绝过期覆盖。
+最多 24 个 Bot（包括 Chief），每份记忆最多 16 KiB；不将完整会话复制到清单或内存文件中。
+当前只支持单个 App 监督的 Harness 实例。不要并行启动多个进程修改同一清单。
+
+工作目录和记忆分区是产品约定，**不是 Bot 之间的安全沙箱**。现有 guest 内的 bash/文件工具仍可能访问其他目录。
+不要在记忆中保存密钥。此 MVP 没有 Bot 删除/重命名、自动记忆提炼或会话重建功能。
+
+## 持久化和 iOS 限制
+
+- 同一安装内，清单、已完成写入的记忆和 Harness 已落盘的会话保存在 App 的 guest 文件系统，不依赖 WebView localStorage。
+- 普通页面重载或 App 重开会重新读取清单。已有 rootfs 升级流程迁移整个 `/root/.dsh`，因此包含此目录。
+- 挂起、锁屏、强杀或内存回收可能中断模型流、工具和网络连接。尚未落盘的尾部输出可能丢失；“持久化会话”不等于“后台继续执行”。
+- 回到前台后用户主动续聊；本薄层不自动重发消息、重做工具或恢复进程。既有 Harness 生命周期和会话恢复机制仍决定日志恢复边界。
+- 切换 Bot 不等于停止旧 Bot。请用原有停止按钮结束工作，避免同时运行多个重任务。每个打开过的会话仍可能占用 Harness 内存；24 个清单条目不是 24 个并行运行承诺。
+- 卸载 App、清除 guest 数据、失败的外部备份恢复可能丢失数据。这里没有云同步或跨设备备份承诺。
+- iOS 真机的 jetsam、锁屏和资源压力必须单独验收，桌面浏览器和模拟器结果不能替代。
+
+## 自动测试
+
+准备 rc.3 原始镜像为 `build/root.tar.gz`，只使用 `rootfs/harness-0.2.1-rc.3-image.json` 中固定的哈希：
+
+```sh
+python3 tests/multi-bot-prepare.py
+python3 tests/job-tracking-prepare.py --fixtures build/job-tracking-fixtures
+node --test tests/multi-bot-test.mjs tests/multi-bot-runtime-test.mjs tests/job-ledger-test.mjs
+python3 tests/workspace-export-app-test.py
+```
+
+测试覆盖 Chief 初始化、并发创建/重试、跨重启身份、记忆隔离与清空、过期写入、大小/数量限制、损坏文件保留、
+符号链接拒绝、已有会话不重复创建、缺失会话报错、真实 rc.3 提示词/工具身份检查。
+Native XCTest 验证生产 bundle 安装顺序、幂等和失败重试；UI XCTest 在真实 iSH + WKWebView 中验证 Chief、表单创建、
+记忆查看、切换和杀 App 后列表恢复。`.github/workflows/multi-bot-mvp.yml` 执行这些门禁并保存 xcresult。
+
+浏览器交互夹具使用实际客户端模块和 HTTP/存储实现，Harness 插槽由小型适配器替代，不能替代 WKWebView 测试：
+
+```sh
+npm install --prefix build/multi-bot-browser --no-audit --no-fund playwright@1.56.1 react@18.3.1 react-dom@18.3.1
+node build/multi-bot-browser/node_modules/playwright/cli.js install chromium
+node tests/multi-bot-browser-test.mjs
+```
+
+Windows 已安装 Edge 时，可设置 `DSH_BROWSER_CHANNEL=msedge`，无需下载 Chromium。
+截图保存到 `build/multi-bot-evidence`；夹具覆盖 1024px/390px、创建、切换、Markdown 纯文本显示、清空和重载。
+390px 夹具使用 Harness 的紧凑侧栏模式，记忆操作由当前 Bot 会话区进入；宽侧栏仍检查列表内的记忆入口。
+
+## 人工验收清单
+
+- [ ] iPad 和 iPhone 侧边栏可操作；横竖屏、键盘、深色模式和长名称不遮挡控件。
+- [ ] Chief / Bot A / Bot B 各聊两轮，交替切换，不串会话；重开 App 后继续原聊天。
+- [ ] Chief 一句话创建成功；新 Bot 出现在列表，职责正确；普通 Bot 无法调用创建工具。
+- [ ] A、B 保存不同记忆；界面与下一轮提示词分别读取；清空 A 后 B 保持不变；聊天历史仍在。
+- [ ] 在回复中锁屏/切后台，随后返回：检查中断状态，不重复提交副作用工具。
+- [ ] 强杀 App、模拟器 terminate、真机内存压力回收后，区分已保存与尾部未保存输出，不宣称任务完成。
+- [ ] 从 Build 32 覆盖安装后，旧会话/设置保留，Chief 只初始化一次；不要卸载旧 App 来模拟升级。
+
+本地已通过 WSL 存储/回归 31 项、真实 rc.3 装配 1 项、原有工具运行链回归 26 项、打包校验 47 项，以及两个宽度的浏览器夹具。
+另外在隔离的 Harness Web 实例中验证了完整客户端装载、Chief 表单创建、可编辑输入框、记忆读取/清空、往返切换和页面重载后进入原会话；没有发送付费模型请求。该补充检查在 x64 WSL 中使用同版本 `node-addon-system-linux-x64@0.1.2`，不修改 iOS 镜像的 ARM64 依赖。
+[模拟器验收 41460074711](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41460074711) 在代码提交 `b129c53` 上通过：**5 执行 / 5 通过 / 0 失败 / 0 跳过**。
+其中 4 项为原生安装/升级测试，1 项为真实 iSH + WKWebView 全流程，验证 Chief、表单创建、可编辑输入框、记忆查看、往返切换和终止 App 后重开进入原 Bot。
+[验收附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41460074711/artifacts/13150756866) 包含 xcresult、计数 JSON、日志和截图，GitHub 保留到 2026-11-16。本次模拟器首次就绪约 284 秒、重开约 329 秒，不代表真机性能。
+真机锁屏、jetsam、真实模型多轮对话和覆盖安装的人工验收尚未完成；上面的清单保持未勾选，不以模拟器替代真机结论。
+
+### Build 33 的实际验收
+
+IPA 来自提交 `9b163210c556d6faaf1c162dbc431f149800ab4d`。
+[完整构建 41484088336](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336) 通过：
+单元 385、guest 集成 13、UI 11 项，共 **409 执行 / 409 通过 / 0 失败 / 6 跳过**。
+6 项跳过均需系统授权或人工观察；导出 51、升级 8、WK 输入 3 项必需门禁无跳过，且属于上述套件子集，不重复计数。
+同次完整 guest 验证的 RootFS 检查为 62/62、无重试，任务回归为 74/74。
+真机架构归档、IPA 内容与 18 项资源校验均通过。
+
+[同提交多 Bot 专项验收](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484087047)
+为 **5 执行 / 5 通过 / 0 失败 / 0 跳过**；[附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484087047/artifacts/13161399437)
+包含计数、xcresult、截图和日志。完整 UI 套件也执行了 Chief 创建、记忆查看和终止后重开原 Bot 的流程。
+此前完整套件在紧凑侧栏中误查仅宽侧栏显示的记忆按钮；修正为使用当前 Bot 会话区的记忆入口，并补充紧凑布局夹具，保留全部原有门禁。
+这些结果不替代上述真机、签名安装和真实模型验收。
+
+## 许可
+
+保留仓库 `LICENSE`、`LICENSE.md` 与 `docs/third-party-notices.md` 的既有许可及第三方说明。
+本次自研薄层不改变 iSH/GPL 相关代码的分发要求，也不引入 DS-Bot 源码或其桌面数据格式。

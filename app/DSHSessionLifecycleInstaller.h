@@ -18,6 +18,7 @@ typedef NS_ENUM(NSUInteger, DSHVerifiedSystemPackage) {
     DSHVerifiedSystemPackageWebFetch,
     DSHVerifiedSystemPackageJobTracking,
     DSHVerifiedSystemPackageOnboardingInteraction,
+    DSHVerifiedSystemPackageMultiBot,
 };
 
 typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
@@ -63,6 +64,7 @@ typedef NS_ENUM(NSUInteger, DSHSessionLifecycleFileType) {
 + (BOOL)installBundledWebFetchPatchWithError:(NSError **)error;
 + (BOOL)installBundledJobTrackingPatchWithError:(NSError **)error;
 + (BOOL)installBundledOnboardingPatchWithError:(NSError **)error;
++ (BOOL)installBundledMultiBotPatchWithError:(NSError **)error;
 
 /// Exposed for real-fakefs integration tests as well as fault adapters. This
 /// returns an adapter, not a mounted filesystem or an admission permit.

@@ -1,0 +1,110 @@
+name: Multi Bot MVP acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/multi-bot-mvp]
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'rootfs/**'
+      - '.gitattributes'
+      - '.github/workflows/multi-bot-mvp.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: multi-bot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator:
+    runs-on: macos-26
+    timeout-minutes: 55
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ANALYTICS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Restore pinned rc.3 guest image
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 41269402665
+          name: harness-0.2.1-rc.3-rootfs
+          path: build
+      - name: Verify image and run portable tests against packaged Harness
+        run: |
+          set -euo pipefail
+          mkdir -p build/multi-bot-evidence
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          pin = json.loads(Path('rootfs/harness-0.2.1-rc.3-image.json').read_text())
+          image = Path('build/root.tar.gz').read_bytes()
+          assert len(image) == pin['rootfs_bytes']
+          assert hashlib.sha256(image).hexdigest() == pin['rootfs_sha256']
+          PY
+          python3 tests/multi-bot-prepare.py
+          python3 tests/job-tracking-prepare.py --fixtures build/job-tracking-fixtures
+          node --test tests/multi-bot-test.mjs tests/multi-bot-runtime-test.mjs tests/job-ledger-test.mjs 2>&1 | tee build/multi-bot-evidence/portable.log
+          python3 tests/workspace-export-app-test.py
+      - name: Configure native build tools
+        run: |
+          set -euo pipefail
+          XC="$(python3 scripts/select-xcode.py)"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          brew install meson ninja lld libarchive
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "$GITHUB_ENV"
+          if ! ruby -e 'require "xcodeproj"'; then gem install xcodeproj --no-document || sudo gem install xcodeproj --no-document; fi
+          make project
+      - name: Execute native installer and real WKWebView tests
+        run: |
+          set -euo pipefail
+          SIM="$(bash scripts/pick-simulator.sh)"
+          xcrun simctl boot "$SIM" 2>/dev/null || true
+          xcrun simctl bootstatus "$SIM" -b
+          xcodebuild -project DSH.xcodeproj -scheme DSH -configuration Release \
+            -destination "platform=iOS Simulator,name=$SIM" -destination-timeout 120 \
+            -derivedDataPath "$PWD/build/MultiBotDerived" -resultBundlePath "$PWD/build/multi-bot-evidence/acceptance.xcresult" \
+            -parallel-testing-enabled NO -collect-test-diagnostics never \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 1200 -maximum-test-execution-time-allowance 1500 \
+            -only-testing:DSHTests/DSHSessionLifecycleInstallerTests/testMultiBotBundleInstallsBeforeDescriptorAndIsIdempotent \
+            -only-testing:DSHTests/DSHSessionLifecycleInstallerTests/testMultiBotFailedResourceInstallNeverCommitsDescriptorAndCanRetry \
+            -only-testing:DSHTests/DSHSessionLifecycleInstallerTests/testActualBuild30TrackingUpgradeChangesOnlyControllerAndPreservesUserData \
+            -only-testing:DSHTests/DSHSessionLifecycleInstallerTests/testActualBuild30TrackingUpgradeRejectsUnknownControllerWithoutWrites \
+            -only-testing:DSHUITests/DSHLaunchUITests/testMultiBotChiefCreatesAndReopensBotInRealWebView \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+            COMPILER_INDEX_STORE_ENABLE=NO test 2>&1 | tee build/multi-bot-evidence/native.log
+          python3 scripts/report-xctests.py --xcresult build/multi-bot-evidence/acceptance.xcresult \
+            --label multi-bot --json-output build/multi-bot-evidence/counts.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          counts = json.loads(Path('build/multi-bot-evidence/counts.json').read_text())
+          assert counts['executed'] == 5 and counts['passed'] == 5 and counts['skipped'] == 0, counts
+          PY
+      - name: Export simulator screenshots
+        if: always()
+        run: |
+          if [ -d build/multi-bot-evidence/acceptance.xcresult ]; then
+            xcrun xcresulttool export attachments --path build/multi-bot-evidence/acceptance.xcresult \
+              --output-path build/multi-bot-evidence/attachments
+          fi
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-bot-mvp-evidence
+          path: build/multi-bot-evidence
+          if-no-files-found: error
+          retention-days: 14

@@ -215,6 +215,12 @@ static const NSTimeInterval kBootTimeout = 600;
                                  labels:@[@"添加一个 API Key 开始使用, web dialog", @"Add an API key to get started, web dialog"]
                            actionLabels:@[@"稍后配置", @"Configure later"]
                          closureTimeout:20];
+    // rc.3 account onboarding uses a separate optional sign-in dialog. Its
+    // modal backdrop hides the otherwise loaded Bot sidebar from AX queries.
+    [self closeKnownGuestDialogInWebView:web
+                                 labels:@[@"开始使用, web dialog", @"Get started, web dialog"]
+                           actionLabels:@[@"关闭", @"Close"]
+                         closureTimeout:20];
 }
 
 /// Waits until the harness overlay is gone (server answered and page loaded).
@@ -235,6 +241,83 @@ static const NSTimeInterval kBootTimeout = 600;
     NSLog(@"[ui-startup] service and web view ready after %.3f seconds",
           NSProcessInfo.processInfo.systemUptime - started);
     [self completeGuestFirstLaunchOnboardingIfPresent];
+}
+
+- (XCUIElement *)currentBotGroup:(NSString *)name {
+    // Workspace rows also show the Bot name; assert the active conversation's
+    // own accessible group, never an incidental duplicate in the sidebar.
+    return [self.app.webViews[@"dsh.webview"].otherElements matchingPredicate:
+            [NSPredicate predicateWithFormat:@"label BEGINSWITH %@", [@"当前 Bot：" stringByAppendingString:name]]].firstMatch;
+}
+
+- (void)tapReadyBotControl:(XCUIElement *)control {
+    XCTNSPredicateExpectation *ready = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithFormat:@"exists == YES AND enabled == YES AND hittable == YES"] object:control];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[ready] timeout:60], XCTWaiterResultCompleted);
+    [control tap];
+}
+
+- (void)waitForBotConversation:(NSString *)name {
+    XCUIElement *web = self.app.webViews[@"dsh.webview"];
+    XCUIElement *group = [self currentBotGroup:name];
+    NSArray *labels = @[@"开始使用, web dialog", @"Get started, web dialog"];
+    XCUIElement *signIn = [web.otherElements matchingPredicate:
+                          [NSPredicate predicateWithFormat:@"label IN %@", labels]].firstMatch;
+    // With no API key, rc.3 may prompt again when a new Session is selected.
+    // Wait for navigation before dismissing only this optional account gate.
+    XCTNSPredicateExpectation *arrived = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            (void)object; (void)bindings; return group.exists || signIn.exists;
+        }] object:web];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[arrived] timeout:60], XCTWaiterResultCompleted);
+    [self closeKnownGuestDialogInWebView:web labels:labels actionLabels:@[@"关闭", @"Close"] closureTimeout:20];
+    XCTAssertTrue([group waitForExistenceWithTimeout:30]);
+}
+
+- (void)testMultiBotChiefCreatesAndReopensBotInRealWebView {
+    [self waitForHarnessReady];
+    XCUIElement *web = self.app.webViews[@"dsh.webview"];
+    XCUIElement *chief = web.buttons[@"进入 Chief"];
+    XCTAssertTrue([chief waitForExistenceWithTimeout:60]);
+    [self tapReadyBotControl:chief];
+    [self waitForBotConversation:@"Chief"];
+    XCUIElement *create = web.buttons[@"创建 Bot"].firstMatch;
+    XCTAssertTrue([create waitForExistenceWithTimeout:60]);
+    [create tap];
+    XCUIElement *name = web.textFields[@"名称"];
+    XCTAssertTrue([name waitForExistenceWithTimeout:10]);
+    NSString *botName = [@"UITest-" stringByAppendingString:[NSUUID.UUID.UUIDString substringToIndex:8]];
+    [name tap]; [name typeText:botName];
+    XCUIElement *role = web.textViews[@"职责"];
+    XCTAssertTrue(role.exists); [role tap]; [role typeText:@"Help test persistent bot sessions."];
+    // Dialog submit and Chief header share their copy; the modal submit is last.
+    [[web.buttons matchingIdentifier:@"创建 Bot"].allElementsBoundByIndex.lastObject tap];
+    XCUIElement *enter = web.buttons[@"进入 Bot"];
+    XCTAssertTrue([enter waitForExistenceWithTimeout:60]); [self tapReadyBotControl:enter];
+    [self waitForBotConversation:botName];
+    // Without Workspace membership rc.3 makes the blank composer inert even
+    // when the Session itself exists. Verify it is exposed for conversation.
+    XCTAssertTrue([web.textViews.firstMatch waitForExistenceWithTimeout:30]);
+    XCTAssertTrue(web.textViews.firstMatch.enabled);
+    // Harness may preserve a compact sidebar after other UI flows, and that
+    // layout deliberately omits per-row memory buttons. The active Bot's
+    // conversation controls provide the same action at every sidebar width.
+    XCUIElement *memory = [self currentBotGroup:botName].buttons[@"记忆"];
+    [self tapReadyBotControl:memory];
+    XCTAssertTrue([web.staticTexts[@"（记忆为空）"] waitForExistenceWithTimeout:15]);
+    [self attachScreenshot:@"multi-bot-memory"];
+    [web.buttons[@"关闭"].firstMatch tap];
+    [self tapReadyBotControl:chief];
+    [self waitForBotConversation:@"Chief"];
+    XCUIElement *saved = web.buttons[[NSString stringWithFormat:@"进入 %@", botName]];
+    XCTAssertTrue(saved.exists); [self tapReadyBotControl:saved];
+    [self waitForBotConversation:botName];
+    [self attachScreenshot:@"multi-bot-sidebar"];
+    [self.app terminate]; [self.app launch]; [self waitForHarnessReady];
+    saved = self.app.webViews[@"dsh.webview"].buttons[[NSString stringWithFormat:@"进入 %@", botName]];
+    XCTAssertTrue([saved waitForExistenceWithTimeout:60]); [self tapReadyBotControl:saved];
+    [self waitForBotConversation:botName];
+    [self attachScreenshot:@"multi-bot-after-relaunch"];
 }
 
 - (void)testHarnessBootsAndShowsWebUI {

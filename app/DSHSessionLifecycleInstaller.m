@@ -11,6 +11,7 @@ __attribute__((visibility("default"))) NSErrorDomain const DSHSessionLifecycleIn
 static NSString *const DSHSessionPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js";
 static NSString *const DSHWebFetchPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js";
 static NSString *const DSHJobTrackingPackagePath = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/index.js";
+static NSString *const DSHMultiBotPackagePath = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/package.json";
 static NSString *const DSHOnboardingPackagePath = @"/usr/local/lib/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js";
 static NSString *const DSHOnboardingOriginalSource = @"onboarding-client-original.js";
 static NSString *const DSHOnboardingOriginalSHA256 = @"190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28";
@@ -168,13 +169,17 @@ static BOOL DSHPreviousHashesAreValid(id value) {
 + (BOOL)installBundledOnboardingPatchWithError:(NSError **)error {
     return [self installBundledPackage:DSHVerifiedSystemPackageOnboardingInteraction error:error];
 }
++ (BOOL)installBundledMultiBotPatchWithError:(NSError **)error {
+    return [self installBundledPackage:DSHVerifiedSystemPackageMultiBot error:error];
+}
 + (BOOL)installBundledPackage:(DSHVerifiedSystemPackage)package error:(NSError **)error {
     BOOL session = package == DSHVerifiedSystemPackageSession;
     BOOL jobs = package == DSHVerifiedSystemPackageJobTracking;
     BOOL onboarding = package == DSHVerifiedSystemPackageOnboardingInteraction;
-    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : jobs ? @"JobTracking" : onboarding ? @"OnboardingInteraction" : @"WebFetchTransport" withExtension:@"bundle"];
+    BOOL bots = package == DSHVerifiedSystemPackageMultiBot;
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:session ? @"SessionLifecycle" : (jobs || bots) ? @"JobTracking" : onboarding ? @"OnboardingInteraction" : @"WebFetchTransport" withExtension:@"bundle"];
     NSError *underlying = nil;
-    NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"manifest.json"]
+    NSData *manifestData = bundle ? [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:bots ? @"multi-bot-manifest.json" : @"manifest.json"]
         options:0 error:&underlying] : nil;
     if (!manifestData) return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"read manifest", nil, underlying);
     id manifest = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:&underlying];
@@ -182,7 +187,7 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"parse manifest", nil, underlying);
     NSMutableDictionary *resources = [NSMutableDictionary dictionary];
     // Flat, fixed resource names: manifest input never becomes an arbitrary URL.
-    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs", @"workspace-export.mjs"] : onboarding ? @[DSHOnboardingOriginalSource] : @[@"web-fetch-transport.mjs"];
+    NSArray *sources = session ? @[@"session-lifecycle.mjs", @"session-lifecycle-core.mjs", @"session-checkpoint-core.mjs", @"session-backend-original.js"] : jobs ? @[@"development-tools.mjs", @"job-tracking.mjs", @"job-ledger.mjs", @"workspace-export.mjs"] : onboarding ? @[DSHOnboardingOriginalSource] : bots ? @[@"multi-bot-store.mjs", @"multi-bot.mjs", @"multi-bot-client.js"] : @[@"web-fetch-transport.mjs"];
     for (NSString *source in sources) {
         NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:source]];
         if (data) resources[source] = data;
@@ -296,15 +301,17 @@ static BOOL DSHPreviousHashesAreValid(id value) {
     if (![self.manifest isKindOfClass:NSDictionary.class] || ![self.resources isKindOfClass:NSDictionary.class] || !self.filesystem)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"installer inputs", nil, nil);
     if (self.package != DSHVerifiedSystemPackageSession && self.package != DSHVerifiedSystemPackageWebFetch &&
-        self.package != DSHVerifiedSystemPackageJobTracking && self.package != DSHVerifiedSystemPackageOnboardingInteraction)
+        self.package != DSHVerifiedSystemPackageJobTracking && self.package != DSHVerifiedSystemPackageOnboardingInteraction &&
+        self.package != DSHVerifiedSystemPackageMultiBot)
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"package kind", nil, nil);
     BOOL session = self.package == DSHVerifiedSystemPackageSession;
     BOOL jobs = self.package == DSHVerifiedSystemPackageJobTracking;
     BOOL onboarding = self.package == DSHVerifiedSystemPackageOnboardingInteraction;
-    NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : onboarding ? DSHOnboardingPackagePath : DSHWebFetchPackagePath;
+    BOOL bots = self.package == DSHVerifiedSystemPackageMultiBot;
+    NSString *packagePath = session ? DSHSessionPackagePath : jobs ? DSHJobTrackingPackagePath : onboarding ? DSHOnboardingPackagePath : bots ? DSHMultiBotPackagePath : DSHWebFetchPackagePath;
     id patches = self.manifest[@"patches"], files = self.manifest[@"files"];
     if (![self.manifest[@"schema"] isEqual:@1] || ![patches isKindOfClass:NSArray.class] || [patches count] != 1 ||
-        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : jobs ? 4 : onboarding ? 0 : 1))
+        ![files isKindOfClass:NSArray.class] || [files count] != (session ? 3 : jobs ? 4 : onboarding ? 0 : bots ? 3 : 1))
         return DSHSessionError(error, DSHSessionLifecycleInstallerInvalidManifest, @"schema", nil, nil);
     NSDictionary *allowed = session ? @{
         @"session-lifecycle.mjs": @"/usr/local/share/dsh/session-lifecycle.mjs",
@@ -315,7 +322,11 @@ static BOOL DSHPreviousHashesAreValid(id value) {
         @"job-tracking.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
         @"job-ledger.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/job-ledger.mjs",
         @"workspace-export.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/workspace-export.mjs",
-    } : onboarding ? @{} : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
+    } : onboarding ? @{} : bots ? @{
+        @"multi-bot-store.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot-store.mjs",
+        @"multi-bot.mjs": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot.mjs",
+        @"multi-bot-client.js": @"/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot-client.js",
+    } : @{ @"web-fetch-transport.mjs": @"/usr/local/share/dsh/web-fetch-transport.mjs" };
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *resourcePlans = [NSMutableArray array];
     // Complete all bundle, target and original-source validation before writes.

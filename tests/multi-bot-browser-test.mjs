@@ -23,7 +23,7 @@ uiSession:{current:{getSnapshot:()=>current,subscribe:fn=>{listeners.add(fn);ret
 uiWorkspace:{openSession:id=>{current={key:id};listeners.forEach(fn=>fn());document.getElementById('session').textContent=id}},
 effect:fn=>effects.push(fn()),on:(name,fn)=>hooks[name]=fn};plugin.apply(ctx);
 const h=React.createElement;ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,
-h('aside',null,h('h1',null,'DSH · Bot fixture'),h(slots['sidebar.footer.action'],{wide:true})),
+h('aside',null,h('h1',null,'DSH · Bot fixture'),h(slots['sidebar.footer.action'],{wide:!new URLSearchParams(location.search).has('compact')})),
 // Match rc.3's blank conversation: session header actions are hidden.
 h('main',null,h(slots['conversation.hero.options']),h('p',{id:'session'},'Select Chief')),
 h(slots['shell.overlay'])));
@@ -50,7 +50,7 @@ try {
   for (const width of [1024, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 844 } });
     const errors = []; page.on('pageerror', error => { errors.push(error.message); console.error(error.stack); });
-    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.goto(`http://127.0.0.1:${server.address().port}/${width === 390 ? '?compact=1' : ''}`);
     await page.screenshot({ path: `build/multi-bot-evidence/initial-${width}.png` });
     await page.getByRole('button', { name: '进入 Chief', exact: true }).click();
     await page.getByRole('button', { name: '创建 Bot', exact: true }).click();
@@ -63,7 +63,14 @@ try {
     const bot = (await store.list()).find(row => row.name === `Writer-${width}`);
     const blank = await store.memory(bot.id);
     await store.writeMemory(bot.id, '# 偏好\n使用中文。\n<script>window.bad=true</script>', blank.revision);
-    await page.getByRole('button', { name: `查看 Writer-${width} 记忆`, exact: true }).click();
+    const sidebarMemory = page.getByRole('button', { name: `查看 Writer-${width} 记忆`, exact: true });
+    if (width === 390) {
+      assert.equal(await sidebarMemory.count(), 0, 'compact sidebar omits per-row memory buttons');
+      await page.getByRole('group', { name: `当前 Bot：Writer-${width}`, exact: true })
+        .getByRole('button', { name: '记忆', exact: true }).click();
+    } else {
+      await sidebarMemory.click();
+    }
     await dialog.getByText('使用中文。', { exact: false }).waitFor();
     assert.equal(await page.evaluate(() => window.bad), undefined);
     await page.screenshot({ path: `build/multi-bot-evidence/memory-${width}.png` });
@@ -93,7 +100,7 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.close();
   }
-  console.log('MULTI_BOT_BROWSER_PASS: create, enter, text-only memory, clear, reload at 1024px and 390px');
+  console.log('MULTI_BOT_BROWSER_PASS: create, enter, text-only memory, clear, reload with wide and compact sidebars at 1024px and 390px');
 } finally {
   await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await rm(home, { recursive: true, force: true });

@@ -299,8 +299,11 @@ static const NSTimeInterval kBootTimeout = 600;
     // when the Session itself exists. Verify it is exposed for conversation.
     XCTAssertTrue([web.textViews.firstMatch waitForExistenceWithTimeout:30]);
     XCTAssertTrue(web.textViews.firstMatch.enabled);
-    XCUIElement *memory = web.buttons[[NSString stringWithFormat:@"查看 %@ 记忆", botName]];
-    XCTAssertTrue([memory waitForExistenceWithTimeout:30]); [memory tap];
+    // Harness may preserve a compact sidebar after other UI flows, and that
+    // layout deliberately omits per-row memory buttons. The active Bot's
+    // conversation controls provide the same action at every sidebar width.
+    XCUIElement *memory = [self currentBotGroup:botName].buttons[@"记忆"];
+    [self tapReadyBotControl:memory];
     XCTAssertTrue([web.staticTexts[@"（记忆为空）"] waitForExistenceWithTimeout:15]);
     [self attachScreenshot:@"multi-bot-memory"];
     [web.buttons[@"关闭"].firstMatch tap];

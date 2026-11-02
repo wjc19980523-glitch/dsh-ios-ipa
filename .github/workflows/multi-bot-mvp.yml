@@ -93,6 +93,13 @@ jobs:
           counts = json.loads(Path('build/multi-bot-evidence/counts.json').read_text())
           assert counts['executed'] == 5 and counts['passed'] == 5 and counts['skipped'] == 0, counts
           PY
+      - name: Export simulator screenshots
+        if: always()
+        run: |
+          if [ -d build/multi-bot-evidence/acceptance.xcresult ]; then
+            xcrun xcresulttool export attachments --path build/multi-bot-evidence/acceptance.xcresult \
+              --output-path build/multi-bot-evidence/attachments
+          fi
       - name: Preserve acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4

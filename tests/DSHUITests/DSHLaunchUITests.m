@@ -215,6 +215,12 @@ static const NSTimeInterval kBootTimeout = 600;
                                  labels:@[@"添加一个 API Key 开始使用, web dialog", @"Add an API key to get started, web dialog"]
                            actionLabels:@[@"稍后配置", @"Configure later"]
                          closureTimeout:20];
+    // rc.3 account onboarding uses a separate optional sign-in dialog. Its
+    // modal backdrop hides the otherwise loaded Bot sidebar from AX queries.
+    [self closeKnownGuestDialogInWebView:web
+                                 labels:@[@"开始使用, web dialog", @"Get started, web dialog"]
+                           actionLabels:@[@"关闭", @"Close"]
+                         closureTimeout:20];
 }
 
 /// Waits until the harness overlay is gone (server answered and page loaded).

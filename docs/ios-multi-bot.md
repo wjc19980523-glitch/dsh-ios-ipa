@@ -8,7 +8,7 @@
 ## 使用
 
 1. 打开 App，完成原有首次启动提示，在侧边栏“我的 Bots”进入 Chief。
-2. 点“+ / 新建 Bot”，或在 Chief 会话标题旁点“创建 Bot”，填写名称和职责。
+2. 点“+ / 新建 Bot”，或在 Chief 会话中点“创建 Bot”，填写名称和职责；空白会话的入口位于输入区，已有聊天时位于标题旁。
 3. 也可直接对 Chief 说：“创建一个名为作家的 Bot，负责润色中文文章。”Chief 调用 `ios_bot_create`；列表最多约 5 秒刷新。
 4. 点击 Bot 回到同一个长期会话；原生 Harness 聊天、模型选择、工具权限与停止按钮仍然适用。
 5. 点侧边栏或会话标题的“记忆”读取 Markdown。可在聊天中明确要求“记住……”，由 Bot 使用记忆工具保存。
@@ -25,7 +25,8 @@
 资源写入、fsync 和校验成功后才提交描述文件。随后原有 JobTracking 安装器更新导入 Bot 模块的控制器，允许从 Build 32 的已知哈希升级。
 若安装中断或发现未知系统文件则停止启动，不覆盖用户文件。无需重建已固定的 rootfs，也不修改第三方包源码。
 
-客户端通过 Harness 的 `sidebar.footer.action`、`conversation.session.header.actions`、`shell.overlay` 插槽注册。
+客户端通过 Harness 的 `sidebar.footer.action`、`conversation.session.header.actions`、`conversation.hero.options`、`shell.overlay` 插槽注册。
+rc.3 隐藏空白会话的标题操作区，因此同时使用空白会话选项插槽，保证首次进入 Chief 即可创建 Bot。
 进入 Bot 调用 `uiWorkspace.openSession(sessionId)`，继续使用现有聊天界面。
 `/api/ios-multi-bot` 通过 `connection.fetch.register` 注册，复用 Harness 的启动 token / 会话 cookie 和同源校验，
 没有直接暴露未认证的 webServer 路由。新增 API 不接受任意文件路径。

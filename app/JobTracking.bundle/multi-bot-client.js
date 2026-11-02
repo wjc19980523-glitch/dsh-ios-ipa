@@ -4,7 +4,7 @@ window.__ModuleLoader__.load({ id: 'dsh-host-bridge', factory: require => {
   const { createElement: h, useState, useEffect, useRef, useSyncExternalStore } = React;
   const inject = ['slots', 'uiWorkspace', 'uiSession'];
   function apply(ctx) {
-    let snapshot = { bots: [], notice: '', error: '', busy: false, dialog: null };
+    let snapshot = { bots: [], notice: '', error: '', loadError: '', busy: false, dialog: null };
     let alive = true, revision = 0;
     const listeners = new Set();
     const publish = patch => { if (alive) { snapshot = { ...snapshot, ...patch }; listeners.forEach(fn => fn()); } };
@@ -21,8 +21,8 @@ window.__ModuleLoader__.load({ id: 'dsh-host-bridge', factory: require => {
     }
     async function refresh() {
       const serial = ++revision;
-      try { const result = await api(); if (serial === revision) publish({ ...result, error: '' }); }
-      catch (error) { if (serial === revision) publish({ error: error.message }); }
+      try { const result = await api(); if (serial === revision) publish({ ...result, loadError: '' }); }
+      catch (error) { if (serial === revision) publish({ loadError: error.message }); }
     }
     async function action(fn) {
       if (snapshot.busy) return;
@@ -49,8 +49,8 @@ window.__ModuleLoader__.load({ id: 'dsh-host-bridge', factory: require => {
             'aria-label': `进入 ${bot.name}`, className: 'ios-bots-enter' }, wide ? `${bot.isMain ? '◆ ' : '○ '}${bot.name}` : bot.isMain ? '◆' : bot.name.slice(0, 1)),
           wide && h('button', { type: 'button', onClick: () => showMemory(bot), 'aria-label': `查看 ${bot.name} 记忆`, title: '查看记忆' }, '记忆')))),
         wide && h('small', null, '仅前台运行 · 会话独立保存'),
-        model.error && h('div', { role: 'alert', className: 'ios-bots-error' }, model.error,
-          h('button', { type: 'button', disabled: model.busy, onClick: refresh }, '刷新')));
+        (model.error || model.loadError) && h('div', { role: 'alert', className: 'ios-bots-error' }, model.error || model.loadError,
+          h('button', { type: 'button', disabled: model.busy, onClick: () => { publish({ error: '' }); void refresh(); } }, '刷新')));
     }
     function Header() {
       const model = useModel(), current = useCurrent();
@@ -100,12 +100,15 @@ window.__ModuleLoader__.load({ id: 'dsh-host-bridge', factory: require => {
               const result = await api({ action: 'open', id: bot.id });
               if (alive) ctx.uiWorkspace.openSession(result.bot.sessionId); publish({ dialog: null });
             }) }, '进入 Bot')),
-        model.error && h('p', { role: 'alert' }, model.error),
+        (model.error || model.loadError) && h('p', { role: 'alert' }, model.error || model.loadError),
         h('p', { className: 'ios-bots-notice' }, model.notice),
         h('button', { type: 'button', disabled: model.busy, onClick: () => publish({ dialog: null, error: '' }) }, '关闭'));
     }
     ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'ios-bots', order: -100 }, Sidebar));
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({ name: 'conversation.session.header.actions', id: 'ios-bots', order: -100 }, Header));
+    // rc.3 hides session header actions until the first message. Keep the Bot
+    // identity and Chief form available in that blank conversation's controls.
+    ctx.slots.inject('conversation.hero.options', () => ctx.slots.register({ name: 'conversation.hero.options', id: 'ios-bots', order: -100 }, Header));
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'ios-bots' }, Dialog));
     ctx.effect(() => {
       const style = document.createElement('style');

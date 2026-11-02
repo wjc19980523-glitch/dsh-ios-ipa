@@ -24,7 +24,8 @@ uiWorkspace:{openSession:id=>{current={key:id};listeners.forEach(fn=>fn());docum
 effect:fn=>effects.push(fn()),on:(name,fn)=>hooks[name]=fn};plugin.apply(ctx);
 const h=React.createElement;ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,
 h('aside',null,h('h1',null,'DSH · Bot fixture'),h(slots['sidebar.footer.action'],{wide:true})),
-h('main',null,h(slots['conversation.session.header.actions']),h('p',{id:'session'},'Select Chief')),
+// Match rc.3's blank conversation: session header actions are hidden.
+h('main',null,h(slots['conversation.hero.options']),h('p',{id:'session'},'Select Chief')),
 h(slots['shell.overlay'])));
 </script></body></html>`;
 const server = createServer(async (req, res) => {
@@ -76,6 +77,18 @@ try {
     await page.waitForFunction(id => document.getElementById('session').textContent === id, bot.sessionId);
     assert.equal(await page.locator('#session').textContent(), bot.sessionId);
     await page.screenshot({ path: `build/multi-bot-evidence/sidebar-${width}.png` });
+    // A successful background list refresh must not erase an open-session error.
+    await page.route('**/api/ios-multi-bot', async route => {
+      if (route.request().method() === 'POST' && route.request().postDataJSON()?.action === 'open')
+        return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: '会话保存失败，请重试' }) });
+      return route.continue();
+    });
+    await page.getByRole('button', { name: '进入 Chief', exact: true }).click();
+    await page.getByRole('alert').getByText('会话保存失败，请重试', { exact: false }).waitFor();
+    await page.waitForResponse(response => response.url().endsWith('/api/ios-multi-bot') && response.request().method() === 'GET');
+    assert.match(await page.getByRole('alert').textContent(), /会话保存失败/);
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.getByRole('alert').waitFor({ state: 'hidden' });
     assert.deepEqual(errors, []);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.close();

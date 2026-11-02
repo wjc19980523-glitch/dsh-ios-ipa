@@ -1,0 +1,55 @@
+// Real rc.3 Cordis, prompt assembly and tool runtime from the pinned rootfs.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, realpath, readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { installMultiBot } from '../app/JobTracking.bundle/multi-bot.mjs';
+const fixtures = resolve(process.env.DSH_JOB_FIXTURES ?? 'build/job-tracking-fixtures');
+const pkg = name => import(pathToFileURL(join(fixtures, 'node_modules/@deepseek-ai', name, 'lib/index.js')).href);
+const { Context } = await pkg('cordis');
+const { SystemPrompt } = await pkg('dsh-system-prompt');
+const { ToolRuntime, defineTool } = await pkg('dsh-tools');
+
+test('real Harness assembly scopes Chief creation and each Bot memory; output remains valid model text', async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'ios-bot-runtime-')));
+  const ctx = new Context(); new SystemPrompt(ctx, {}); new ToolRuntime(ctx, {});
+  let route;
+  ctx.provide('connection', { fetch: { register(value) { route = value; return () => {}; } } });
+  ctx.provide('sessionController', {}); ctx.provide('sessionQuery', {}); ctx.provide('sessionPersistence', {});
+  ctx.provide('agents', { get: () => undefined });
+  installMultiBot(ctx, defineTool, { home });
+  t.after(async () => { await ctx.fiber.dispose(); await rm(home, { recursive: true, force: true }); });
+  for (let i = 0; i < 100 && !route; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert(route, 'Bot plugin must activate under the real Cordis inject contract');
+  assert.equal(route.path, '/api/ios-multi-bot');
+  const get = () => route.fetch(new Request('http://localhost/api/ios-multi-bot')).then(r => r.json());
+  const [chief] = (await get()).bots;
+  const agent = id => ({ id, ctx: new Context(), session: { id, header: { cwd: process.cwd() } } });
+  const chiefAgent = agent(chief.sessionId);
+  const execute = (owner, name, args = {}) => ctx.get('tools').execute({ name, arguments: args, callId: `call-${name}`,
+    signal: new AbortController().signal, agent: owner, workspace: process.cwd() });
+  const created = await execute(chiefAgent, 'ios_bot_create', { name: '作家', role: '帮助写文章' });
+  assert.equal(created.isError, false, JSON.stringify(created));
+  assert(created.content.every(block => block.type === 'text' && typeof block.text === 'string'));
+  const bot = (await get()).bots.find(b => b.name === '作家'); assert(bot);
+  const botAgent = agent(bot.sessionId);
+  const read = await execute(botAgent, 'ios_bot_memory_read');
+  const memory = JSON.parse(read.content[0].text);
+  const write = await execute(botAgent, 'ios_bot_memory_write', { markdown: '# 偏好\n中文写作', revision: memory.revision });
+  assert.equal(write.isError, false, JSON.stringify(write));
+  assert.equal(await readFile(bot.memoryPath, 'utf8'), '# 偏好\n中文写作');
+  const forbidden = await execute(botAgent, 'ios_bot_create', { name: 'forbidden', role: 'none' });
+  assert.equal(forbidden.isError, true);
+  const outsider = await execute(agent('ordinary-chat'), 'ios_bot_memory_read'); assert.equal(outsider.isError, true);
+  const prompt = owner => ctx.get('systemPrompt').assemble({ agent: owner, scope: owner });
+  const chiefPrompt = await prompt(chiefAgent), botPrompt = await prompt(botAgent), plainPrompt = await prompt(agent('ordinary-chat'));
+  assert(chiefPrompt.tools.some(tool => tool.name === 'ios_bot_create'));
+  assert(!botPrompt.tools.some(tool => tool.name === 'ios_bot_create'));
+  assert(!plainPrompt.tools.some(tool => tool.name.startsWith('ios_bot_')));
+  assert(JSON.stringify(botPrompt.sections).includes('中文写作'));
+  assert(!JSON.stringify(chiefPrompt.sections).includes('中文写作'));
+  assert(!plainPrompt.sections.some(section => section.name === 'dsh:ios-bot'));
+  await chiefAgent.ctx.fiber.dispose(); await botAgent.ctx.fiber.dispose();
+});

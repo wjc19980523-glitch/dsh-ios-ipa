@@ -22,8 +22,9 @@
     {
       "source": "job-tracking.mjs",
       "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/job-tracking.mjs",
-      "sha256": "8b3cdc415483998e545ca340e19b7f18f54e644765596a28719aa6ae1994a988",
+      "sha256": "3b58090286943ae414c11aa8f1da527e19407439bcc888cdce4adfed93d599e5",
       "previous_sha256": [
+        "8b3cdc415483998e545ca340e19b7f18f54e644765596a28719aa6ae1994a988",
         "e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1",
         "f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510",
         "c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb"

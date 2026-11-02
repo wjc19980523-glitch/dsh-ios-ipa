@@ -178,7 +178,7 @@ test('tracking tools and middleware never execute or cancel work, and do not ove
   const tools = new Map(), hooks = {}, listeners = []; let starts = 0;
   const jobs = { events: { subscribe: (_filter, fn) => listeners.push(fn) },
     get: id => ({ ...event().job, id }), start: () => { starts++; throw new Error('must not execute'); } };
-  const ctx = { get: key => key === 'jobs' ? jobs : undefined,
+  const ctx = { inject() {}, get: key => key === 'jobs' ? jobs : undefined,
     tools: { register: tool => tools.set(tool.name, tool) }, on: (name, fn) => { hooks[name] = fn; } };
   const ledger = installJobTracking(ctx, tool => tool, { home, runID: RUN1 }); await ledger.ready;
   listeners[0](event());
@@ -206,7 +206,7 @@ test('live progress separates recent output, silence, failure and unknown withou
   const jobs = { events: { subscribe: (_filter, fn) => listeners.push(fn) },
     get: (_id, owner) => { assert.equal(owner, 'session-A'); if (!current) throw new Error('gone'); return current; },
     kill: () => { cancellations++; } };
-  const ctx = { get: key => key === 'jobs' ? jobs : undefined, tools: { register: tool => tools.set(tool.name, tool) }, on() {} };
+  const ctx = { inject() {}, get: key => key === 'jobs' ? jobs : undefined, tools: { register: tool => tools.set(tool.name, tool) }, on() {} };
   const ledger = installJobTracking(ctx, tool => tool, { home, runID: RUN1, now: () => now });
   t.after(async () => {
     await traceAwait(FILE_TAG, 'progress:ledger.flush', t, () => ledger.flush());

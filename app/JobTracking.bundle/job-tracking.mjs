@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { developmentPreflight } from './development-tools.mjs';
 import { installWorkspaceExport } from './workspace-export.mjs';
+import { installMultiBot } from './multi-bot.mjs';
 
 const singletons = globalThis[Symbol.for('dsh.jobTracking.v1')] ??= new WeakMap();
 const stateText = state => ({ succeeded: 'succeeded (exit 0)', failed: 'failed',
@@ -11,6 +12,7 @@ const stateText = state => ({ succeeded: 'succeeded (exit 0)', failed: 'failed',
 
 // Passive host-plane observer. Does not spawn, kill, replay, or restore jobs.
 export function installJobTracking(ctx, defineTool, options = {}) {
+  installMultiBot(ctx, defineTool, options.multiBot ?? {});
   installWorkspaceExport(ctx, defineTool, options.workspaceExport ?? {});
   const jobs = ctx.get('jobs');
   if (!jobs) return;

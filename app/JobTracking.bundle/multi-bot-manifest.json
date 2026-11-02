@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "source": "multi-bot-store.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot-store.mjs",
+      "sha256": "a296cd79e4d3f40653ef975bf9167c5427b732e61bdb8c53d26221921563bb8f"
+    },
+    {
+      "source": "multi-bot.mjs",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot.mjs",
+      "sha256": "49318905ed670c83fcf40406191d8b172f441d6273b02ba0838a6cb7b6540cdc"
+    },
+    {
+      "source": "multi-bot-client.js",
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot-client.js",
+      "sha256": "8bb1060b7f7ec6868806baa72e4e567c483cc5bb8ea91f7e93c1581d1c7d1b5c"
+    }
+  ],
+  "patches": [
+    {
+      "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/package.json",
+      "original_sha256": "a460b54304e4c096f174ab14de3ddc3a8c0ae933f0738d847ab2127d7e2e0f7a",
+      "patched_sha256": "6616727fbac193991aa93ae5a788bde4af2981affef5b64f85590e6706cb268b",
+      "replacements": [
+        {
+          "find": "\"main\": \"index.js\"",
+          "replace": "\"main\": \"index.js\",\n  \"exports\": { \".\": \"./index.js\", \"./client\": \"./multi-bot-client.js\" },\n  \"dsh\": { \"client\": { \"platform\": \"web\", \"inject\": [\n    \"@deepseek-ai/dsh-client-ui-sidebar\", \"@deepseek-ai/dsh-client-ui-workspace\",\n    \"@deepseek-ai/dsh-client-ui-session\"\n  ], \"external\": [\"react\"] } }",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

@@ -153,6 +153,15 @@ NSNotificationName const DSHBootStateDidChangeNotification = @"DSHBootStateDidCh
         }
         [DSHHarness.shared.log append:@"[network] web transport patch verified"];
 
+        // Install the Bot dependencies and client declaration before the bridge
+        // controller that imports them. No Harness process is alive here.
+        NSError *botInstallError = nil;
+        if (![DSHSessionLifecycleInstaller installBundledMultiBotPatchWithError:&botInstallError]) {
+            [DSHHarness.shared.log append:[NSString stringWithFormat:@"[dsh-ios] multi-bot install failed code=%ld", (long)botInstallError.code]];
+            [self setPhase:DSHBootPhaseFailed message:@"The Bot update could not be installed. Your data has been preserved." progress:-1];
+            return;
+        }
+
         NSError *jobInstallError = nil;
         if (![DSHSessionLifecycleInstaller installBundledJobTrackingPatchWithError:&jobInstallError]) {
             [DSHHarness.shared.log append:[NSString stringWithFormat:@"[dsh-ios] task tracking install failed code=%ld", (long)jobInstallError.code]];

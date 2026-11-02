@@ -237,6 +237,41 @@ static const NSTimeInterval kBootTimeout = 600;
     [self completeGuestFirstLaunchOnboardingIfPresent];
 }
 
+- (void)testMultiBotChiefCreatesAndReopensBotInRealWebView {
+    [self waitForHarnessReady];
+    XCUIElement *web = self.app.webViews[@"dsh.webview"];
+    XCUIElement *chief = web.buttons[@"进入 Chief"];
+    XCTAssertTrue([chief waitForExistenceWithTimeout:60]);
+    [chief tap];
+    XCUIElement *create = web.buttons[@"创建 Bot"].firstMatch;
+    XCTAssertTrue([create waitForExistenceWithTimeout:60]);
+    [create tap];
+    XCUIElement *name = web.textFields[@"名称"];
+    XCTAssertTrue([name waitForExistenceWithTimeout:10]);
+    NSString *botName = [@"UITest-" stringByAppendingString:[NSUUID.UUID.UUIDString substringToIndex:8]];
+    [name tap]; [name typeText:botName];
+    XCUIElement *role = web.textViews[@"职责"];
+    XCTAssertTrue(role.exists); [role tap]; [role typeText:@"Help test persistent bot sessions."];
+    // Dialog submit and Chief header share their copy; the modal submit is last.
+    [web.buttons[@"创建 Bot"].allElementsBoundByIndex.lastObject tap];
+    XCUIElement *enter = web.buttons[@"进入 Bot"];
+    XCTAssertTrue([enter waitForExistenceWithTimeout:60]); [enter tap];
+    XCUIElement *memory = web.buttons[[NSString stringWithFormat:@"查看 %@ 记忆", botName]];
+    XCTAssertTrue([memory waitForExistenceWithTimeout:30]); [memory tap];
+    XCTAssertTrue([web.staticTexts[@"（记忆为空）"] waitForExistenceWithTimeout:15]);
+    [self attachScreenshot:@"multi-bot-memory"];
+    [web.buttons[@"关闭"].firstMatch tap];
+    [chief tap];
+    XCUIElement *saved = web.buttons[[NSString stringWithFormat:@"进入 %@", botName]];
+    XCTAssertTrue(saved.exists); [saved tap];
+    [self attachScreenshot:@"multi-bot-sidebar"];
+    [self.app terminate]; [self.app launch]; [self waitForHarnessReady];
+    saved = self.app.webViews[@"dsh.webview"].buttons[[NSString stringWithFormat:@"进入 %@", botName]];
+    XCTAssertTrue([saved waitForExistenceWithTimeout:60]); [saved tap];
+    XCTAssertTrue([self.app.webViews[@"dsh.webview"].buttons[@"记忆"].firstMatch waitForExistenceWithTimeout:30]);
+    [self attachScreenshot:@"multi-bot-after-relaunch"];
+}
+
 - (void)testHarnessBootsAndShowsWebUI {
     // Import, migration and Harness startup have different progress wording.
     // Every visible phase should expose progress and a nonempty detail line.

@@ -70,7 +70,8 @@ def main():
     resources = ('development-tools.mjs', 'job-ledger.mjs', 'workspace-export.mjs', 'job-tracking.mjs')
     manifest = {'schema': 1, 'files': [{'source': name, 'target': TARGET.rsplit('/', 1)[0] + '/' + name,
         'sha256': sha((BUNDLE / name).read_bytes()),
-        **({'previous_sha256': ['e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1',
+        **({'previous_sha256': ['8b3cdc415483998e545ca340e19b7f18f54e644765596a28719aa6ae1994a988',
+                               'e4c9c3061680436bd042dd322615d3c9f9e13704c2b728fbf68407b7edd034e1',
                                'f79ee0c7467b916fe822dce94df0201c6f905d7ca8a3dac3274673e5d34b3510',
                                'c9cc080296548688fe58f5a8345234fe3c0183a0de29485cec11fb2d4174f3fb']} if name == 'job-tracking.mjs' else
            {'previous_sha256': ['c29375e91bc7fd295c86c5162629632effe736e99fe3e33637342d988bd9f4ac']} if name == 'development-tools.mjs' else {})} for name in resources],
@@ -85,6 +86,8 @@ def main():
         args.fixtures.mkdir(parents=True, exist_ok=True)
         (args.fixtures / 'bridge-patched.mjs').write_text(patched, encoding='utf-8')
         for name in resources:
+            (args.fixtures / name).write_bytes((BUNDLE / name).read_bytes())
+        for name in ('multi-bot.mjs', 'multi-bot-store.mjs'):
             (args.fixtures / name).write_bytes((BUNDLE / name).read_bytes())
     print('JOB_TRACKING_PINNED_AND_PREPARED')
 

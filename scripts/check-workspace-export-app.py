@@ -24,7 +24,8 @@ BUNDLES = {
         "session-checkpoint-core.mjs", "session-lifecycle-core.mjs", "session-lifecycle.mjs"),
     "WebFetchTransport.bundle": ("manifest.json", "web-fetch-transport.mjs"),
     "JobTracking.bundle": ("manifest.json", "development-tools.mjs", "job-ledger.mjs",
-        "job-tracking.mjs", "workspace-export.mjs"),
+        "job-tracking.mjs", "workspace-export.mjs", "multi-bot-manifest.json",
+        "multi-bot-store.mjs", "multi-bot.mjs", "multi-bot-client.js"),
     "OnboardingInteraction.bundle": ("manifest.json", "onboarding-client-original.js"),
 }
 NATIVE_CLASSES = {"DSHWorkspaceExportStore", "DSHWorkspaceExportCapability"}
@@ -256,7 +257,7 @@ def inspect_resources(app, source_root):
     manifest = json.loads(read_file(app / "JobTracking.bundle/manifest.json", 4 * CHUNK_BYTES))
     require(isinstance(manifest, dict), "JobTracking manifest must be a dictionary")
     files = manifest.get("files")
-    required = set(BUNDLES["JobTracking.bundle"]) - {"manifest.json"}
+    required = {"development-tools.mjs", "job-ledger.mjs", "job-tracking.mjs", "workspace-export.mjs"}
     require(manifest.get("schema") == 1 and isinstance(files, list) and len(files) == 4,
             "JobTracking manifest requires schema 1 and exactly four files")
     require(all(isinstance(item, dict) for item in files) and {item.get("source") for item in files} == required,
@@ -283,6 +284,13 @@ def inspect_resources(app, source_root):
     require(b"import { installWorkspaceExport } from './workspace-export.mjs';" in entry and
             b"installWorkspaceExport(ctx, defineTool," in entry and b"name: 'file_export_from_workspace'" in export,
             "Guest tool registration missing")
+    bots = json.loads(read_file(app / "JobTracking.bundle/multi-bot-manifest.json", 4 * CHUNK_BYTES))
+    require(bots.get("schema") == 1 and len(bots.get("files", [])) == 3, "Bot manifest shape differs")
+    require({item.get("source") for item in bots["files"]} == {"multi-bot-store.mjs", "multi-bot.mjs", "multi-bot-client.js"}, "Bot resource whitelist differs")
+    for item in bots["files"]:
+        name = item["source"]
+        require(item.get("target") == "/usr/local/lib/dsh-plugins/dsh-host-bridge/" + name, "Bot install target differs")
+        require(item.get("sha256") == digest_bytes(read_file(app / "JobTracking.bundle" / name, 4 * CHUNK_BYTES)), "Bot resource hash differs")
     return records
 
 

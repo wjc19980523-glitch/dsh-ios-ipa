@@ -1183,6 +1183,53 @@ static NSString *DSHInstallerTestHash(NSData *data) {
     XCTAssertTrue([self install:&error], @"actual bundled idempotence failed: %@", error);
     XCTAssertEqual(self.filesystem.writeCalls, writes);
 }
+- (void)prepareActualMultiBotBundle {
+    NSURL *bundle = [NSBundle.mainBundle URLForResource:@"JobTracking" withExtension:@"bundle"];
+    NSData *data = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:@"multi-bot-manifest.json"]];
+    XCTAssertNotNil(data);
+    if (!data) return;
+    self.manifest = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSMutableDictionary *resources = [NSMutableDictionary dictionary];
+    for (NSDictionary *record in self.manifest[@"files"]) {
+        NSData *bytes = [NSData dataWithContentsOfURL:[bundle URLByAppendingPathComponent:record[@"source"]]];
+        XCTAssertNotNil(bytes);
+        if (bytes) resources[record[@"source"]] = bytes;
+    }
+    self.resources = resources;
+    NSString *target = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/package.json";
+    NSString *parent = target.stringByDeletingLastPathComponent;
+    while (parent.length > 1) { [self.filesystem.directories addObject:parent]; parent = parent.stringByDeletingLastPathComponent; }
+    // Exact package descriptor from the pinned rc.3 rootfs overlay.
+    self.original = DSHInstallerTestData(@"{\n  \"name\": \"dsh-host-bridge\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"description\": \"dsh tools that reach iOS capabilities through the DSH app's host bridge\",\n  \"type\": \"module\",\n  \"main\": \"index.js\"\n}\n");
+    self.filesystem.files[target] = self.original;
+    XCTAssertEqualObjects(DSHInstallerTestHash(self.original), self.manifest[@"patches"][0][@"original_sha256"]);
+    self.filesystem.files[@"/root/.dsh/ios-multi-bot/bots.json"] = DSHInstallerTestData(@"user Bot sentinel");
+}
+- (void)testMultiBotBundleInstallsBeforeDescriptorAndIsIdempotent {
+    [self prepareActualMultiBotBundle];
+    DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest resources:self.resources filesystem:self.filesystem package:DSHVerifiedSystemPackageMultiBot];
+    NSError *error = nil;
+    XCTAssertTrue([installer installWithError:&error], @"%@", error);
+    NSString *target = self.manifest[@"patches"][0][@"target"];
+    XCTAssertEqualObjects(self.filesystem.renamedTargets.lastObject, target);
+    XCTAssertEqualObjects(DSHInstallerTestHash(self.filesystem.files[target]), self.manifest[@"patches"][0][@"patched_sha256"]);
+    NSUInteger writes = self.filesystem.writeCalls;
+    XCTAssertTrue([installer installWithError:&error], @"%@", error);
+    XCTAssertEqual(self.filesystem.writeCalls, writes);
+    XCTAssertEqualObjects(self.filesystem.files[@"/root/.dsh/ios-multi-bot/bots.json"], DSHInstallerTestData(@"user Bot sentinel"));
+}
+- (void)testMultiBotFailedResourceInstallNeverCommitsDescriptorAndCanRetry {
+    [self prepareActualMultiBotBundle];
+    DSHSessionLifecycleInstaller *installer = [[DSHSessionLifecycleInstaller alloc] initWithManifest:self.manifest resources:self.resources filesystem:self.filesystem package:DSHVerifiedSystemPackageMultiBot];
+    self.filesystem.failureOperation = @"rename";
+    self.filesystem.failureTarget = @"/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot.mjs";
+    self.filesystem.failuresRemaining = 1;
+    XCTAssertFalse([installer installWithError:nil]);
+    NSString *target = self.manifest[@"patches"][0][@"target"];
+    XCTAssertEqualObjects(self.filesystem.files[target], self.original);
+    XCTAssertTrue([installer installWithError:nil]);
+    XCTAssertEqualObjects(self.filesystem.files[@"/root/.dsh/ios-multi-bot/bots.json"], DSHInstallerTestData(@"user Bot sentinel"));
+}
 - (void)testAlreadyCurrentPeerChangedDuringInstallPreventsPackageCommit {
     [self primeControllers];
     [self.filesystem.files removeObjectForKey:DSHInstallerTestCore];

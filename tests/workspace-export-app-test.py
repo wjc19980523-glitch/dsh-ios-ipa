@@ -119,7 +119,7 @@ class ArchiveGateTests(unittest.TestCase):
     def test_actual_production_pins_and_fourteen_resource_contract(self):
         self.assertEqual(PINNED_ROOT_BYTES, 201769469)
         self.assertEqual(PINNED_ROOT_SHA, "8b6c2484971301d8d0448a21c1ea21c46ca79faa1291825fba970d28bdf14504")
-        self.assertEqual(sum(map(len, GATE.BUNDLES.values())), 14)
+        self.assertEqual(sum(map(len, GATE.BUNDLES.values())), 18)
         self.assertEqual(GATE.ONBOARDING_ORIGINAL_BYTES, 211258)
         self.assertEqual(GATE.ONBOARDING_ORIGINAL_SHA256, "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28")
         self.assertEqual(GATE.ONBOARDING_BUILD29_BYTES, 191089)
@@ -129,7 +129,7 @@ class ArchiveGateTests(unittest.TestCase):
 
     def test_valid_synthetic_app_contains_both_native_classes_and_all_resources(self):
         result = self.check()
-        self.assertEqual(result["bundled_resource_count"], 14)
+        self.assertEqual(result["bundled_resource_count"], 18)
         self.assertEqual(result["main_executable"]["slices"][0]["required_objc_class_names_found"], sorted(GATE.NATIVE_CLASSES))
         upgrade = result["onboarding_canonical_upgrade"]
         self.assertEqual(upgrade["replayed_sha256"], GATE.ONBOARDING_PATCHED_SHA256)
@@ -178,7 +178,7 @@ class ArchiveGateTests(unittest.TestCase):
         names_start = struct.unpack_from("<I", data, name_size_offset + 8)[0]
         data[names_start + old_size:names_start + old_size + 2] = b"\xc1\0"
         (self.app / "DSH").write_bytes(data)
-        self.assertEqual(self.check()["bundled_resource_count"], 14)
+        self.assertEqual(self.check()["bundled_resource_count"], 18)
 
     def test_main_code_signature_command_rejected(self):
         (self.app / "DSH").write_bytes(macho(signed=True))

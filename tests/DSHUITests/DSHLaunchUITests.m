@@ -257,12 +257,30 @@ static const NSTimeInterval kBootTimeout = 600;
     [control tap];
 }
 
+- (void)waitForBotConversation:(NSString *)name {
+    XCUIElement *web = self.app.webViews[@"dsh.webview"];
+    XCUIElement *group = [self currentBotGroup:name];
+    NSArray *labels = @[@"开始使用, web dialog", @"Get started, web dialog"];
+    XCUIElement *signIn = [web.otherElements matchingPredicate:
+                          [NSPredicate predicateWithFormat:@"label IN %@", labels]].firstMatch;
+    // With no API key, rc.3 may prompt again when a new Session is selected.
+    // Wait for navigation before dismissing only this optional account gate.
+    XCTNSPredicateExpectation *arrived = [[XCTNSPredicateExpectation alloc]
+        initWithPredicate:[NSPredicate predicateWithBlock:^BOOL(id object, NSDictionary *bindings) {
+            (void)object; (void)bindings; return group.exists || signIn.exists;
+        }] object:web];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[arrived] timeout:60], XCTWaiterResultCompleted);
+    [self closeKnownGuestDialogInWebView:web labels:labels actionLabels:@[@"关闭", @"Close"] closureTimeout:20];
+    XCTAssertTrue([group waitForExistenceWithTimeout:30]);
+}
+
 - (void)testMultiBotChiefCreatesAndReopensBotInRealWebView {
     [self waitForHarnessReady];
     XCUIElement *web = self.app.webViews[@"dsh.webview"];
     XCUIElement *chief = web.buttons[@"进入 Chief"];
     XCTAssertTrue([chief waitForExistenceWithTimeout:60]);
     [self tapReadyBotControl:chief];
+    [self waitForBotConversation:@"Chief"];
     XCUIElement *create = web.buttons[@"创建 Bot"].firstMatch;
     XCTAssertTrue([create waitForExistenceWithTimeout:60]);
     [create tap];
@@ -276,7 +294,7 @@ static const NSTimeInterval kBootTimeout = 600;
     [[web.buttons matchingIdentifier:@"创建 Bot"].allElementsBoundByIndex.lastObject tap];
     XCUIElement *enter = web.buttons[@"进入 Bot"];
     XCTAssertTrue([enter waitForExistenceWithTimeout:60]); [self tapReadyBotControl:enter];
-    XCTAssertTrue([[self currentBotGroup:botName] waitForExistenceWithTimeout:30]);
+    [self waitForBotConversation:botName];
     // Without Workspace membership rc.3 makes the blank composer inert even
     // when the Session itself exists. Verify it is exposed for conversation.
     XCTAssertTrue([web.textViews.firstMatch waitForExistenceWithTimeout:30]);
@@ -287,15 +305,15 @@ static const NSTimeInterval kBootTimeout = 600;
     [self attachScreenshot:@"multi-bot-memory"];
     [web.buttons[@"关闭"].firstMatch tap];
     [self tapReadyBotControl:chief];
-    XCTAssertTrue([[self currentBotGroup:@"Chief"] waitForExistenceWithTimeout:30]);
+    [self waitForBotConversation:@"Chief"];
     XCUIElement *saved = web.buttons[[NSString stringWithFormat:@"进入 %@", botName]];
     XCTAssertTrue(saved.exists); [self tapReadyBotControl:saved];
-    XCTAssertTrue([[self currentBotGroup:botName] waitForExistenceWithTimeout:30]);
+    [self waitForBotConversation:botName];
     [self attachScreenshot:@"multi-bot-sidebar"];
     [self.app terminate]; [self.app launch]; [self waitForHarnessReady];
     saved = self.app.webViews[@"dsh.webview"].buttons[[NSString stringWithFormat:@"进入 %@", botName]];
     XCTAssertTrue([saved waitForExistenceWithTimeout:60]); [self tapReadyBotControl:saved];
-    XCTAssertTrue([[self currentBotGroup:botName] waitForExistenceWithTimeout:30]);
+    [self waitForBotConversation:botName];
     [self attachScreenshot:@"multi-bot-after-relaunch"];
 }
 

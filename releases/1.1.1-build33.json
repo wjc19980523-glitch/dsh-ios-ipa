@@ -1,0 +1,105 @@
+{
+  "version": "1.1.1",
+  "build": 33,
+  "status": "unsigned-multi-bot-mvp-test-candidate",
+  "harness_version": "0.2.1-rc.3",
+  "node_version": "22.23.4",
+  "commit": "9b163210c556d6faaf1c162dbc431f149800ab4d",
+  "source_branch": "feature/multi-bot-mvp",
+  "ipa_filename": "DSH-1.1.1-build33-unsigned.ipa",
+  "ipa_bytes": 201823151,
+  "ipa_sha256": "58536e78b5b1bcd7d9756af878a27bd321acf83416f81df1d29b8c926291bf6b",
+  "bundle_identifier": "com.xnuapp.dsh",
+  "minimum_os_version": "16.0",
+  "workflow_run_id": 41484088336,
+  "workflow_run_attempt": 1,
+  "artifact_id": 13167158445,
+  "artifact_zip_bytes": 201855804,
+  "artifact_zip_sha256": "57a17d87a366a579cbec6968391c403d968ba36a516b1de2b97f27484293a4f9",
+  "workflow_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336",
+  "download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336/artifacts/13167158445",
+  "artifact_expires_at": "2026-12-02T18:18:59Z",
+  "artifact_name": "DSH-unsigned-ipa",
+  "artifact_download_url": "https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336/artifacts/13167158445",
+  "github_release_published": false,
+  "rootfs_sha256": "8b6c2484971301d8d0448a21c1ea21c46ca79faa1291825fba970d28bdf14504",
+  "rootfs_provenance": "rootfs/harness-0.2.1-rc.3-image.json",
+  "signed": false,
+  "stable_release": false,
+  "physical_ipad_validation": "pending",
+  "live_model_multi_bot_validation": "pending",
+  "superagent_installed": false,
+  "official_ds_bot_plugin_compatibility_claimed": false,
+  "old_session_history_repair": false,
+  "in_app_one_click_cloud_build": "unfinished",
+  "gates": {
+    "simulator_unit": {
+      "passed": 385,
+      "failed": 0,
+      "skipped": 3
+    },
+    "simulator_guest_integration": {
+      "passed": 13,
+      "failed": 0,
+      "skipped": 3
+    },
+    "simulator_ui": {
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    "required_export_and_original_confirmations": {
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0
+    },
+    "required_welcome_upgrade": {
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    "required_wk_input": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "multi_bot_simulator": {
+      "workflow_run_id": 41484087047,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    "full_guest_verification_job": {
+      "job_id": 125409704502,
+      "conclusion": "success"
+    },
+    "rootfs_checks": {
+      "passed": 62,
+      "failed": 0,
+      "retries": 0
+    },
+    "job_tracking_regressions": {
+      "passed": 74,
+      "failed": 0,
+      "skipped": 0
+    },
+    "native_device_archive": "passed",
+    "archive_components": "passed",
+    "downloaded_ipa_integrity": "passed",
+    "archive_resources_verified_in_downloaded_ipa": 18
+  },
+  "evidence_artifacts": {
+    "simulator_xctest_results": 13167632142,
+    "native_build_logs": 13167033545,
+    "guest_verification_logs": 13164222672,
+    "multi_bot_mvp_evidence": 13161399437
+  },
+  "validation_limits": [
+    "Required gate tests are subsets of the XCTest suites and must not be double-counted.",
+    "Six skipped cases require real-device system authorization or human observation.",
+    "Model round trips used controlled test servers; production model multi-Bot acceptance is pending.",
+    "Signing, physical iPad operation, overwrite installation, jetsam and saving through a real Files provider remain pending.",
+    "Persisted sessions and memory do not guarantee iOS background execution or recovery of unsaved output."
+  ],
+  "note": "This records the actual IPA source commit; subsequent documentation-only commits do not change that binary. The feature candidate does not update releases/latest.json."
+}

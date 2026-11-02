@@ -5,6 +5,18 @@
 不宣称兼容官方 ds-bot 插件；没有群聊 @、Bot 交接、Capabilities 商店、桌面数据互通或 Superagent。
 本分支基于 `upgrade/harness-0.2.1-rc.3` 的 `0fbc7b8`。
 
+## Build 33 测试 IPA
+
+2026-11-03（北京时间）已生成 **1.1.1 (33) 未签名测试 IPA**，支持 iOS/iPadOS 16 及以上。
+从 [Build 33 下载附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336/artifacts/13167158445)
+下载 ZIP，解压得到 `DSH-1.1.1-build33-unsigned.ipa` 和 `ipa.sha256`。GitHub 下载需要登录，附件保留至
+2026-12-03 02:18:59（北京时间）。准确哈希、大小和源码提交见[Build 33 记录](../releases/1.1.1-build33.json)。
+
+安装前先备份已有数据，保留原 App；按[签名安装步骤](install-sign.md#2-自行签名安装)使用自己的签名工具，
+选择此处的 **Build 33** 文件并沿用原签名账号和 Bundle ID。安装后确认版本为 1.1.1 (33)，保持前台等待启动，
+然后在“我的 Bots”进入 Chief。覆盖安装的数据保留仍须按下方真机清单验收。
+这是功能分支测试包，尚未发布 GitHub Release，也未替换 `releases/latest.json` 中的 Harness 升级基线。
+
 ## 使用
 
 1. 打开 App，完成原有首次启动提示，在侧边栏“我的 Bots”进入 Chief。
@@ -107,6 +119,7 @@ node tests/multi-bot-browser-test.mjs
 
 Windows 已安装 Edge 时，可设置 `DSH_BROWSER_CHANNEL=msedge`，无需下载 Chromium。
 截图保存到 `build/multi-bot-evidence`；夹具覆盖 1024px/390px、创建、切换、Markdown 纯文本显示、清空和重载。
+390px 夹具使用 Harness 的紧凑侧栏模式，记忆操作由当前 Bot 会话区进入；宽侧栏仍检查列表内的记忆入口。
 
 ## 人工验收清单
 
@@ -124,6 +137,21 @@ Windows 已安装 Edge 时，可设置 `DSH_BROWSER_CHANNEL=msedge`，无需下�
 其中 4 项为原生安装/升级测试，1 项为真实 iSH + WKWebView 全流程，验证 Chief、表单创建、可编辑输入框、记忆查看、往返切换和终止 App 后重开进入原 Bot。
 [验收附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41460074711/artifacts/13150756866) 包含 xcresult、计数 JSON、日志和截图，GitHub 保留到 2026-11-16。本次模拟器首次就绪约 284 秒、重开约 329 秒，不代表真机性能。
 真机锁屏、jetsam、真实模型多轮对话和覆盖安装的人工验收尚未完成；上面的清单保持未勾选，不以模拟器替代真机结论。
+
+### Build 33 的实际验收
+
+IPA 来自提交 `9b163210c556d6faaf1c162dbc431f149800ab4d`。
+[完整构建 41484088336](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484088336) 通过：
+单元 385、guest 集成 13、UI 11 项，共 **409 执行 / 409 通过 / 0 失败 / 6 跳过**。
+6 项跳过均需系统授权或人工观察；导出 51、升级 8、WK 输入 3 项必需门禁无跳过，且属于上述套件子集，不重复计数。
+同次完整 guest 验证的 RootFS 检查为 62/62、无重试，任务回归为 74/74。
+真机架构归档、IPA 内容与 18 项资源校验均通过。
+
+[同提交多 Bot 专项验收](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484087047)
+为 **5 执行 / 5 通过 / 0 失败 / 0 跳过**；[附件](https://github.com/wjc19980523-glitch/dsh-ios-ipa/actions/runs/41484087047/artifacts/13161399437)
+包含计数、xcresult、截图和日志。完整 UI 套件也执行了 Chief 创建、记忆查看和终止后重开原 Bot 的流程。
+此前完整套件在紧凑侧栏中误查仅宽侧栏显示的记忆按钮；修正为使用当前 Bot 会话区的记忆入口，并补充紧凑布局夹具，保留全部原有门禁。
+这些结果不替代上述真机、签名安装和真实模型验收。
 
 ## 许可
 

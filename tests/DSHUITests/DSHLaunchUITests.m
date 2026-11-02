@@ -263,6 +263,10 @@ static const NSTimeInterval kBootTimeout = 600;
     XCUIElement *enter = web.buttons[@"进入 Bot"];
     XCTAssertTrue([enter waitForExistenceWithTimeout:60]); [enter tap];
     XCTAssertTrue([web.staticTexts[botName] waitForExistenceWithTimeout:30]);
+    // Without Workspace membership rc.3 makes the blank composer inert even
+    // when the Session itself exists. Verify it is exposed for conversation.
+    XCTAssertTrue([web.textViews.firstMatch waitForExistenceWithTimeout:30]);
+    XCTAssertTrue(web.textViews.firstMatch.enabled);
     XCUIElement *memory = web.buttons[[NSString stringWithFormat:@"查看 %@ 记忆", botName]];
     XCTAssertTrue([memory waitForExistenceWithTimeout:30]); [memory tap];
     XCTAssertTrue([web.staticTexts[@"（记忆为空）"] waitForExistenceWithTimeout:15]);

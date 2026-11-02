@@ -69,9 +69,11 @@ test('links cannot turn memory clear into a write outside the Bot', { skip: proc
 test('open creates once, flushes, and never calls create for an existing nonblank session', async t => {
   const { home, store } = await fixture(t), [bot] = await store.list();
   const records = new Map(); let creates = 0, flushes = 0;
+  const workspace = { id: 'workspace-1', sessionIds: [], async attachSession(id) { this.sessionIds.push(id); } };
   const ctx = {
+    workspaceRegistry: { async create(path, name) { assert.equal(path, store.workspace(bot)); assert.equal(name, bot.name); return workspace; } },
     sessionQuery: { observeSession() { throw new Error('must not hydrate conversation'); } },
-    sessionController: { async create(request) { creates++; records.set(request.sessionId, request.cwd); return { sessionId: request.sessionId }; } },
+    sessionController: { async create(request) { creates++; assert.equal(request.workspaceId, workspace.id); assert.equal(request.cwd, undefined); records.set(request.sessionId, store.workspace(bot)); return { sessionId: request.sessionId }; } },
     sessionPersistence: {
       async stat(id) { return records.has(id) ? { header: { cwd: records.get(id) } } : undefined; },
       async flush() { flushes++; },
@@ -81,6 +83,7 @@ test('open creates once, flushes, and never calls create for an existing nonblan
   const reopened = new BotStore(home); await reopened.ready;
   assert.equal((await openBotSession(ctx, reopened, bot.id)).sessionId, bot.sessionId);
   assert.equal(creates, 1); assert.equal(flushes, 1);
+  assert.deepEqual(workspace.sessionIds, [bot.sessionId], 'blank composer must own the Bot workspace');
   records.delete(bot.sessionId);
   await assert.rejects(openBotSession(ctx, reopened, bot.id), /文件缺失/); assert.equal(creates, 1);
 });
@@ -93,6 +96,7 @@ test('session mismatch and persistence errors are visible and never silently rem
 test('a failed first flush is retried without creating a replacement session', async t => {
   const { store } = await fixture(t), [bot] = await store.list(); let exists = false, fail = true, creates = 0;
   const ctx = { sessionController: { async create({ sessionId }) { creates++; exists = true; return { sessionId }; } },
+    workspaceRegistry: { async create() { return { id: 'workspace-1', sessionIds: [], async attachSession() {} }; } },
     sessionPersistence: { async stat() { return exists ? { header: { cwd: store.workspace(bot) } } : undefined; },
       async flush() { if (fail) throw new Error('flush failed'); } } };
   await assert.rejects(openBotSession(ctx, store, bot.id), /flush failed/);

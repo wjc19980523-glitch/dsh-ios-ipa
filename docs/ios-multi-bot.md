@@ -54,6 +54,7 @@ bots.json
 | `sessionReady` | 首次会话已落盘，用于区分尚未使用与会话文件丢失 |
 
 创建 Bot 只保存目录和清单，不启动模型。首次进入时创建指定 ID 的 DSH 会话并等待 persistence flush，之后检查并打开同一 ID。
+约定目录同时登记为 Harness Workspace，并绑定该会话；rc.3 的空白输入框要求这个成员关系，只有 `cwd` 仍会锁住输入框。Workspace 按目录复用，名称使用 Bot 名称。
 切换使用 `sessionPersistence.stat` 只读会话头，避免为校验再加载一份完整聊天日志；历史仍交给原有聊天 UI 读取。
 **不能每次切换都调用 `session.create`**：rc.3 对已经开始聊天的会话可能分配一个新 ID。
 已使用 Bot 的会话若丢失、目录不匹配或读盘失败，会显示错误，不悄悄替换成空白会话。

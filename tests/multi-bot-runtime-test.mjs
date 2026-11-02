@@ -18,6 +18,7 @@ test('real Harness assembly scopes Chief creation and each Bot memory; output re
   let route;
   ctx.provide('connection', { fetch: { register(value) { route = value; return () => {}; } } });
   ctx.provide('sessionController', {}); ctx.provide('sessionQuery', {}); ctx.provide('sessionPersistence', {});
+  ctx.provide('workspaceRegistry', {});
   ctx.provide('agents', { get: () => undefined });
   installMultiBot(ctx, defineTool, { home });
   t.after(async () => { await ctx.fiber.dispose(); await rm(home, { recursive: true, force: true }); });

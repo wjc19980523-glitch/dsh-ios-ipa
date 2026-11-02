@@ -12,22 +12,26 @@ export async function openBotSession(ctx, store, id) {
   const snapshot = await ctx.sessionPersistence.stat(bot.sessionId);
   if (snapshot) {
     if (snapshot.header.cwd !== store.workspace(bot)) throw new Error('Bot 会话工作目录不匹配');
-  } else {
-    if (bot.sessionReady) throw new Error('该 Bot 的会话文件缺失。请恢复备份；不会自动换成空白会话。');
-    const created = await ctx.sessionController.create({ sessionId: bot.sessionId, cwd: store.workspace(bot) });
+  } else if (bot.sessionReady) throw new Error('该 Bot 的会话文件缺失。请恢复备份；不会自动换成空白会话。');
+  // rc.3's blank composer requires durable Workspace membership, not just cwd.
+  // Registry.create reuses the canonical path; no extra workspace ID is needed.
+  const workspace = await ctx.workspaceRegistry.create(store.workspace(bot), bot.name);
+  if (!snapshot) {
+    const created = await ctx.sessionController.create({ sessionId: bot.sessionId, workspaceId: workspace.id });
     if (created.sessionId !== bot.sessionId) throw new Error('Harness 返回了意外的会话 ID，已拒绝切换');
   }
   if (!bot.sessionReady) {
     // Also flush a created-but-not-yet-materialized session after a lost reply.
     await ctx.sessionPersistence.flush();
-    await store.markReady(bot.id);
   }
+  if (!workspace.sessionIds.includes(bot.sessionId)) await workspace.attachSession(bot.sessionId);
+  if (!bot.sessionReady) await store.markReady(bot.id);
   return { ...bot, sessionReady: true, workspace: store.workspace(bot) };
 }
 
 export function installMultiBot(ctx, defineTool, options = {}) {
   // Wait for the existing authenticated Web transport and session runtime.
-  return ctx.inject(['connection', 'sessionController', 'sessionPersistence', 'systemPrompt', 'agents'], child => {
+  return ctx.inject(['connection', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'systemPrompt', 'agents'], child => {
     const store = new BotStore(options.home ?? process.env.DSH_HOME ?? `${homedir()}/.dsh`);
     store.ready.catch(() => {}); // Surface a corrupt registry through the UI, never reset it.
     const opening = new Map();

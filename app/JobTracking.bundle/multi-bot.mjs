@@ -5,31 +5,29 @@ export const API_PATH = '/api/ios-multi-bot';
 const NOTICE = '仅在 App 前台使用。已保存的会话与记忆可保留；挂起或杀进程会中断工作，未保存输出可能丢失，不会自动重跑。';
 
 // Explicit-id session.create is a NEW-conversation API in rc.3. Calling it on
-// a nonblank session mints another ID. Observe first and never remap a Bot.
+// a nonblank session mints another ID. Read header metadata first, without
+// hydrating another copy of a long conversation on memory-constrained iOS.
 export async function openBotSession(ctx, store, id) {
   const bot = await store.byId(id);
-  let observation;
-  try { observation = await ctx.sessionQuery.observeSession(bot.sessionId, { projectionMode: 'none' }); }
-  catch (error) {
-    if (error.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error;
-    if (bot.sessionReady) throw new Error('该 Bot 的会话文件缺失。请恢复备份；不会自动换成空白会话。');
-  }
-  if (observation) {
-    try {
-      if (observation.header.cwd !== store.workspace(bot)) throw new Error('Bot 会话工作目录不匹配');
-    } finally { observation[Symbol.dispose](); }
+  const snapshot = await ctx.sessionPersistence.stat(bot.sessionId);
+  if (snapshot) {
+    if (snapshot.header.cwd !== store.workspace(bot)) throw new Error('Bot 会话工作目录不匹配');
   } else {
+    if (bot.sessionReady) throw new Error('该 Bot 的会话文件缺失。请恢复备份；不会自动换成空白会话。');
     const created = await ctx.sessionController.create({ sessionId: bot.sessionId, cwd: store.workspace(bot) });
     if (created.sessionId !== bot.sessionId) throw new Error('Harness 返回了意外的会话 ID，已拒绝切换');
-    await ctx.sessionPersistence.flush();
   }
-  if (!bot.sessionReady) await store.markReady(bot.id);
+  if (!bot.sessionReady) {
+    // Also flush a created-but-not-yet-materialized session after a lost reply.
+    await ctx.sessionPersistence.flush();
+    await store.markReady(bot.id);
+  }
   return { ...bot, sessionReady: true, workspace: store.workspace(bot) };
 }
 
 export function installMultiBot(ctx, defineTool, options = {}) {
   // Wait for the existing authenticated Web transport and session runtime.
-  return ctx.inject(['connection', 'sessionController', 'sessionQuery', 'sessionPersistence', 'systemPrompt', 'agents'], child => {
+  return ctx.inject(['connection', 'sessionController', 'sessionPersistence', 'systemPrompt', 'agents'], child => {
     const store = new BotStore(options.home ?? process.env.DSH_HOME ?? `${homedir()}/.dsh`);
     store.ready.catch(() => {}); // Surface a corrupt registry through the UI, never reset it.
     const opening = new Map();

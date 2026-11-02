@@ -68,27 +68,37 @@ test('links cannot turn memory clear into a write outside the Bot', { skip: proc
 });
 test('open creates once, flushes, and never calls create for an existing nonblank session', async t => {
   const { home, store } = await fixture(t), [bot] = await store.list();
-  const records = new Map(); let creates = 0, flushes = 0, closes = 0;
+  const records = new Map(); let creates = 0, flushes = 0;
   const ctx = {
-    sessionQuery: { async observeSession(id) {
-      if (!records.has(id)) throw Object.assign(new Error('missing'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' });
-      return { header: { cwd: records.get(id) }, [Symbol.dispose]() { closes++; } };
-    } },
+    sessionQuery: { observeSession() { throw new Error('must not hydrate conversation'); } },
     sessionController: { async create(request) { creates++; records.set(request.sessionId, request.cwd); return { sessionId: request.sessionId }; } },
-    sessionPersistence: { async flush() { flushes++; } },
+    sessionPersistence: {
+      async stat(id) { return records.has(id) ? { header: { cwd: records.get(id) } } : undefined; },
+      async flush() { flushes++; },
+    },
   };
   assert.equal((await openBotSession(ctx, store, bot.id)).sessionId, bot.sessionId);
   const reopened = new BotStore(home); await reopened.ready;
   assert.equal((await openBotSession(ctx, reopened, bot.id)).sessionId, bot.sessionId);
-  assert.equal(creates, 1); assert.equal(flushes, 1); assert.equal(closes, 1);
+  assert.equal(creates, 1); assert.equal(flushes, 1);
   records.delete(bot.sessionId);
   await assert.rejects(openBotSession(ctx, reopened, bot.id), /文件缺失/); assert.equal(creates, 1);
 });
 test('session mismatch and persistence errors are visible and never silently remap identity', async t => {
   const { store } = await fixture(t), [bot] = await store.list();
-  await assert.rejects(openBotSession({ sessionQuery: { observeSession: async () => ({ header: { cwd: '/other' }, [Symbol.dispose]() {} }) } }, store, bot.id), /不匹配/);
-  await assert.rejects(openBotSession({ sessionQuery: { observeSession: async () => { throw new Error('disk failure'); } } }, store, bot.id), /disk failure/);
+  await assert.rejects(openBotSession({ sessionPersistence: { stat: async () => ({ header: { cwd: '/other' } }) } }, store, bot.id), /不匹配/);
+  await assert.rejects(openBotSession({ sessionPersistence: { stat: async () => { throw new Error('disk failure'); } } }, store, bot.id), /disk failure/);
   assert.equal((await store.byId(bot.id)).sessionReady, false);
+});
+test('a failed first flush is retried without creating a replacement session', async t => {
+  const { store } = await fixture(t), [bot] = await store.list(); let exists = false, fail = true, creates = 0;
+  const ctx = { sessionController: { async create({ sessionId }) { creates++; exists = true; return { sessionId }; } },
+    sessionPersistence: { async stat() { return exists ? { header: { cwd: store.workspace(bot) } } : undefined; },
+      async flush() { if (fail) throw new Error('flush failed'); } } };
+  await assert.rejects(openBotSession(ctx, store, bot.id), /flush failed/);
+  assert.equal((await store.byId(bot.id)).sessionReady, false); fail = false;
+  await openBotSession(ctx, store, bot.id);
+  assert.equal(creates, 1); assert.equal((await store.byId(bot.id)).sessionReady, true);
 });
 test('HTTP form creation, reading, stale clear, running refusal, and empty clear', async t => {
   const { store } = await fixture(t); let running = false;

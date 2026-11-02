@@ -230,6 +230,10 @@ the script tests fail when either side drifts from it.
 
 ## FAQ
 
+The experimental [iOS multi-Bot MVP](docs/ios-multi-bot.md) adds Chief, one durable
+Harness session per Bot, and Markdown memory. This is an independent thin layer,
+not an installation of the official ds-bot plugin, and does not promise background execution.
+
 See [the FAQ](docs/faq.md) for signing, local versus cloud compilation, task/export limits,
 model credentials, test certificates and unfinished cloud-build integration.
 

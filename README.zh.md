@@ -196,6 +196,9 @@ Apple Health 有个值得注意的地方：iOS 从不告诉 app **读**权限是
 
 ## 常见问题
 
+实验性的 [iOS 多 Bot MVP](docs/ios-multi-bot.md) 提供 Chief、独立长期会话和 Markdown 记忆。
+这是自研薄层，未安装官方 ds-bot 插件；只承诺已保存数据的本地持久化，不承诺后台执行。
+
 详见 [FAQ](docs/faq.md)：签名安装、本地与云端编译、任务与导出限制、模型凭据、测试证书和未完成的一键云构建。
 
 ## 参与贡献

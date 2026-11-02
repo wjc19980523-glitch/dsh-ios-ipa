@@ -38,7 +38,7 @@ const server = createServer(async (req, res) => {
     }
     const paths = { '/client.js': resolve('app/JobTracking.bundle/multi-bot-client.js'),
       '/react.js': join(deps, 'react/umd/react.development.js'), '/react-dom.js': join(deps, 'react-dom/umd/react-dom.development.js') };
-    res.setHeader('Content-Type', paths[req.url] ? 'text/javascript' : 'text/html');
+    res.setHeader('Content-Type', paths[req.url] ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8');
     res.end(paths[req.url] ? await readFile(paths[req.url]) : html);
   } catch (error) { res.writeHead(500); res.end(error.message); }
 });
@@ -48,8 +48,9 @@ try {
   await mkdir('build/multi-bot-evidence', { recursive: true });
   for (const width of [1024, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 844 } });
-    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    const errors = []; page.on('pageerror', error => { errors.push(error.message); console.error(error.stack); });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.screenshot({ path: `build/multi-bot-evidence/initial-${width}.png` });
     await page.getByRole('button', { name: '进入 Chief', exact: true }).click();
     await page.getByRole('button', { name: '创建 Bot', exact: true }).click();
     const dialog = page.getByRole('dialog');
@@ -72,6 +73,7 @@ try {
     await dialog.getByRole('button', { name: '关闭', exact: true }).click();
     await page.reload();
     await page.getByRole('button', { name: `进入 Writer-${width}`, exact: true }).click();
+    await page.waitForFunction(id => document.getElementById('session').textContent === id, bot.sessionId);
     assert.equal(await page.locator('#session').textContent(), bot.sessionId);
     await page.screenshot({ path: `build/multi-bot-evidence/sidebar-${width}.png` });
     assert.deepEqual(errors, []);

@@ -25,7 +25,7 @@ test('one Chief, concurrent creation, retry and restart preserve fixed identitie
 });
 test('Markdown read/write/clear is isolated, persistent and revision checked', async t => {
   const { home, store } = await fixture(t);
-  const a = await store.create('A', '写作'), b = await store.create('B', '测试');
+  const a = await store.create('A', '写作\n润色中文'), b = await store.create('B', '测试');
   const initial = await store.memory(a.id);
   const written = await store.writeMemory(a.id, '# 喜好\n请用中文。', initial.revision);
   assert.equal((await store.memory(b.id)).content, '');

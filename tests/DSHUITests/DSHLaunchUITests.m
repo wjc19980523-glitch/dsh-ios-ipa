@@ -253,9 +253,10 @@ static const NSTimeInterval kBootTimeout = 600;
     XCUIElement *role = web.textViews[@"职责"];
     XCTAssertTrue(role.exists); [role tap]; [role typeText:@"Help test persistent bot sessions."];
     // Dialog submit and Chief header share their copy; the modal submit is last.
-    [web.buttons[@"创建 Bot"].allElementsBoundByIndex.lastObject tap];
+    [[web.buttons matchingIdentifier:@"创建 Bot"].allElementsBoundByIndex.lastObject tap];
     XCUIElement *enter = web.buttons[@"进入 Bot"];
     XCTAssertTrue([enter waitForExistenceWithTimeout:60]); [enter tap];
+    XCTAssertTrue([web.staticTexts[botName] waitForExistenceWithTimeout:30]);
     XCUIElement *memory = web.buttons[[NSString stringWithFormat:@"查看 %@ 记忆", botName]];
     XCTAssertTrue([memory waitForExistenceWithTimeout:30]); [memory tap];
     XCTAssertTrue([web.staticTexts[@"（记忆为空）"] waitForExistenceWithTimeout:15]);
@@ -268,7 +269,7 @@ static const NSTimeInterval kBootTimeout = 600;
     [self.app terminate]; [self.app launch]; [self waitForHarnessReady];
     saved = self.app.webViews[@"dsh.webview"].buttons[[NSString stringWithFormat:@"进入 %@", botName]];
     XCTAssertTrue([saved waitForExistenceWithTimeout:60]); [saved tap];
-    XCTAssertTrue([self.app.webViews[@"dsh.webview"].buttons[@"记忆"].firstMatch waitForExistenceWithTimeout:30]);
+    XCTAssertTrue([self.app.webViews[@"dsh.webview"].staticTexts[botName] waitForExistenceWithTimeout:30]);
     [self attachScreenshot:@"multi-bot-after-relaunch"];
 }
 

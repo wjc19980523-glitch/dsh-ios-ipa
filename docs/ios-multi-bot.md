@@ -94,6 +94,17 @@ python3 tests/workspace-export-app-test.py
 Native XCTest 验证生产 bundle 安装顺序、幂等和失败重试；UI XCTest 在真实 iSH + WKWebView 中验证 Chief、表单创建、
 记忆查看、切换和杀 App 后列表恢复。`.github/workflows/multi-bot-mvp.yml` 执行这些门禁并保存 xcresult。
 
+浏览器交互夹具使用实际客户端模块和 HTTP/存储实现，Harness 插槽由小型适配器替代，不能替代 WKWebView 测试：
+
+```sh
+npm install --prefix build/multi-bot-browser --no-audit --no-fund playwright@1.56.1 react@18.3.1 react-dom@18.3.1
+node build/multi-bot-browser/node_modules/playwright/cli.js install chromium
+node tests/multi-bot-browser-test.mjs
+```
+
+Windows 已安装 Edge 时，可设置 `DSH_BROWSER_CHANNEL=msedge`，无需下载 Chromium。
+截图保存到 `build/multi-bot-evidence`；夹具覆盖 1024px/390px、创建、切换、Markdown 纯文本显示、清空和重载。
+
 ## 人工验收清单
 
 - [ ] iPad 和 iPhone 侧边栏可操作；横竖屏、键盘、深色模式和长名称不遮挡控件。
@@ -104,7 +115,8 @@ Native XCTest 验证生产 bundle 安装顺序、幂等和失败重试；UI XCTe
 - [ ] 强杀 App、模拟器 terminate、真机内存压力回收后，区分已保存与尾部未保存输出，不宣称任务完成。
 - [ ] 从 Build 32 覆盖安装后，旧会话/设置保留，Chief 只初始化一次；不要卸载旧 App 来模拟升级。
 
-截至本分支初次实现，本地 WSL 存储/回归 30 项、真实 rc.3 装配 1 项通过。模拟器及浏览器证据随实际执行结果更新；真机验收尚未完成。
+本地已通过 WSL 存储/回归 30 项、真实 rc.3 装配 1 项、原有工具运行链回归 26 项、打包校验 47 项，以及两个宽度的浏览器夹具。
+模拟器证据随实际执行结果更新；真机验收尚未完成。
 
 ## 许可
 

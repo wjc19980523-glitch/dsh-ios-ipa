@@ -6,8 +6,9 @@ import { randomUUID, createHash } from 'node:crypto';
 export const MAX_BOTS = 24;
 export const MAX_MEMORY_BYTES = 16384;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const text = (value, max, label) => {
-  if (typeof value !== 'string' || !value.trim() || value.trim().length > max || /[\u0000-\u001f\u007f]/u.test(value))
+const text = (value, max, label, multiline = false) => {
+  const controls = multiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u : /[\u0000-\u001f\u007f]/u;
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > max || controls.test(value))
     throw new Error(`${label}格式无效（1–${max} 字符，不含控制字符）`);
   return value.trim();
 };
@@ -49,9 +50,9 @@ export class BotStore {
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const temporary = `${path}.${randomUUID()}.tmp`;
     const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(value, 'utf8'); await file.sync(); }
-    finally { await file.close(); }
     try {
+      try { await file.writeFile(value, 'utf8'); await file.sync(); }
+      finally { await file.close(); }
       await rename(temporary, path);
       // iSH's fakefs owns final durability. fsync the directory where supported.
       if (process.platform !== 'win32') {
@@ -89,7 +90,7 @@ export class BotStore {
     for (const bot of bots) {
       if (!bot || !UUID.test(bot.id) || ids.has(bot.id) || typeof bot.isMain !== 'boolean' || typeof bot.sessionReady !== 'boolean' ||
           bot.sessionId !== `ios-bot-${bot.id}` || bot.memoryPath !== join(this.root, bot.id, 'memory.md')) throw new Error('Bot 记录无效');
-      if (text(bot.name, 40, '名称') !== bot.name || text(bot.role, 1000, '职责') !== bot.role || names.has(bot.name.toLocaleLowerCase()))
+      if (text(bot.name, 40, '名称') !== bot.name || text(bot.role, 1000, '职责', true) !== bot.role || names.has(bot.name.toLocaleLowerCase()))
         throw new Error('Bot 名称或职责无效');
       ids.add(bot.id); names.add(bot.name.toLocaleLowerCase());
     }
@@ -109,7 +110,7 @@ export class BotStore {
     return bot;
   }
   create(name, role) {
-    name = text(name, 40, '名称'); role = text(role, 1000, '职责');
+    name = text(name, 40, '名称'); role = text(role, 1000, '职责', true);
     return this.serial(async () => {
       const bots = await this.load();
       const existing = bots.find(bot => bot.name.toLocaleLowerCase() === name.toLocaleLowerCase());

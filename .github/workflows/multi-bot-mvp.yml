@@ -4,6 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches: [feature/multi-bot-mvp]
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'rootfs/**'
+      - '.gitattributes'
+      - '.github/workflows/multi-bot-mvp.yml'
 
 permissions:
   contents: read

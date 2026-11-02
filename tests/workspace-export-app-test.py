@@ -66,7 +66,7 @@ class ArchiveGateTests(unittest.TestCase):
                 dest = cls.original / bundle / name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(data)
-        info = {"CFBundleIdentifier": GATE.APP_ID, "CFBundleVersion": "32", "CFBundleShortVersionString": "1.1.1",
+        info = {"CFBundleIdentifier": GATE.APP_ID, "CFBundleVersion": "33", "CFBundleShortVersionString": "1.1.1",
                 "CFBundleExecutable": "DSH", "CFBundlePackageType": "APPL", "MinimumOSVersion": "16.0"}
         (cls.original / "Info.plist").write_bytes(plistlib.dumps(info))
         (cls.original / "DSH").write_bytes(macho())

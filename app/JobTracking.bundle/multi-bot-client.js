@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({ id: 'dsh-host-bridge', factory: require => {
     function Header() {
       const model = useModel(), current = useCurrent();
       const bot = model.bots.find(row => row.sessionId === current.key);
-      return bot ? h('div', { className: 'ios-bots-header' }, h('span', { title: bot.role }, bot.name),
+      return bot ? h('div', { className: 'ios-bots-header', role: 'group', 'aria-label': `当前 Bot：${bot.name}` }, h('span', { title: bot.role }, bot.name),
         h('button', { type: 'button', onClick: () => showMemory(bot) }, '记忆'),
         bot.isMain && h('button', { type: 'button', onClick: showCreate }, '创建 Bot')) : null;
     }

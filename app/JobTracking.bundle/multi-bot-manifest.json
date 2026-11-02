@@ -14,7 +14,7 @@
     {
       "source": "multi-bot-client.js",
       "target": "/usr/local/lib/dsh-plugins/dsh-host-bridge/multi-bot-client.js",
-      "sha256": "11dffd6756e2e6963eeb0e1341e84d49cf19dd752bbe08af69dec3cab338988d"
+      "sha256": "8b891ac6ef4e28a4ad0866412c0db69ae2067c8545cc0bd3354cdf4e3b603f76"
     }
   ],
   "patches": [
